@@ -1,0 +1,368 @@
+
+import json
+import os
+import time
+import uuid
+from datetime import datetime, timezone
+
+import requests
+
+
+LLM_URL = os.getenv(
+    "LLM_URL", "http://127.0.0.1:8181/v1/chat/completions"
+)
+LAYA_URL = os.getenv(
+    "LAYA_URL", "http://127.0.0.1:8001/v1/systemone"
+)
+LLM_MODEL = os.getenv("LLM_MODEL", "local-main")
+MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "4"))
+TRACE_FILE = os.getenv("TRACE_FILE", "events.jsonl")
+
+HTTP = requests.Session()
+
+
+def log(event, **fields):
+    record = {
+        "time": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        **fields,
+    }
+    print("\n[TRACE] " + json.dumps(record, ensure_ascii=False))
+    with open(TRACE_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def main_llm(messages):
+    """Ask llama.cpp for one structured proposal."""
+    response = HTTP.post(
+        LLM_URL,
+        json={
+            "model": LLM_MODEL,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": 1024,
+            "thinking_budget_tokens": 256,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=180,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+
+    try:
+        proposal = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Main model did not return valid JSON: {content}"
+        ) from exc
+
+    if not isinstance(proposal, dict):
+        raise ValueError("Main model response must be a JSON object.")
+
+    if proposal.get("kind") not in {
+        "respond", "ask", "act", "continue", "end"
+    }:
+        raise ValueError(f"Unknown proposal kind: {proposal.get('kind')}")
+
+    return proposal
+
+
+def laya_route(user_text, proposal):
+    """Ask Laya to classify the proposed next step."""
+    state = {
+        "user_request": user_text[:1800],
+        "main_model_proposal": json.dumps(
+            proposal, ensure_ascii=False
+        )[:1800],
+    }
+
+    payload = {
+        "state": state,
+        "questions": {
+            "route": {
+                "type": "choice",
+                "instructions": (
+                    "Classify the next operational step proposed by "
+                    "the main assistant. Choose the best matching "
+                    "route. This is a routing suggestion, not permission "
+                    "to execute an action."
+                ),
+                "criteria": {
+                    "respond": (
+                        "Give the user a final conversational answer; "
+                        "no further action or clarification is needed."
+                    ),
+                    "ask": (
+                        "Ask the user for missing information or "
+                        "clarification before proceeding."
+                    ),
+                    "act": (
+                        "The proposal requests an action through a "
+                        "registered tool."
+                    ),
+                    "continue": (
+                        "More internal reasoning or another model "
+                        "iteration is needed before a final answer."
+                    ),
+                    "end": (
+                        "Explicitly end this interaction without "
+                        "another conversational response."
+                    ),
+                },
+            }
+        },
+    }
+
+    response = HTTP.post(LAYA_URL, json=payload, timeout=120)
+    response.raise_for_status()
+    result = response.json()
+
+    answer = result.get("answers", {}).get("route", {})
+    route = answer.get("choice")
+
+    if route not in {"respond", "ask", "act", "continue", "end"}:
+        raise ValueError(
+            "Unexpected Laya response: "
+            + json.dumps(result, ensure_ascii=False)
+        )
+
+    return route, result
+
+
+def execute_action(name, args):
+    """
+    Safe demonstration tools only.
+    Never expose arbitrary shell execution to the model.
+    """
+    if not isinstance(args, dict):
+        return {"ok": False, "error": "Arguments must be an object"}
+
+    if name == "get_status":
+        return {
+            "ok": True,
+            "data": {
+                "prototype": "running",
+                "host": os.uname().nodename,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+
+    if name == "echo":
+        text = args.get("text", "")
+        if not isinstance(text, str):
+            return {"ok": False, "error": "text must be a string"}
+        return {"ok": True, "data": {"echo": text[:500]}}
+
+    return {
+        "ok": False,
+        "error": f"Action is not registered: {name}",
+    }
+
+
+SYSTEM_PROMPT = """
+You are the main reasoning model inside a personal assistant prototype.
+
+Return exactly one JSON object with these fields:
+{
+  "kind": "respond | ask | act | continue | end",
+  "message": "text for the user, or a brief internal note",
+  "action": "registered action name or empty string",
+  "args": {},
+  "reason": "short explanation of your proposed next step"
+}
+
+Rules:
+- You reason, interpret intent, and propose the next step.
+- Laya independently classifies your proposal. It does not grant permission.
+- Available demonstration actions:
+  - get_status: returns basic prototype status; args must be {}
+  - echo: returns the provided text; args must contain {"text": "..."}
+- Never invent tools or claim an action succeeded before its result exists.
+- Ask when essential information is missing.
+- Use kind=continue only when another reasoning iteration is useful.
+- Use kind=end when the interaction should stop without a final response.
+- Never request arbitrary shell commands.
+- Keep messages concise.
+"""
+
+
+def run_interaction(user_text, history, session_id):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
+
+    log("interaction_start", session_id=session_id, user=user_text)
+
+    for iteration in range(1, MAX_ITERATIONS + 1):
+        log("iteration_start", iteration=iteration)
+
+        try:
+            proposal = main_llm(messages)
+        except Exception as exc:
+            log("main_llm_error", error=str(exc))
+            print(f"\n[ERROR] Main LLM failed: {exc}")
+            return "The main model failed. Check the trace and server logs."
+
+        log("main_llm_proposal", iteration=iteration, proposal=proposal)
+
+        try:
+            route, raw_laya = laya_route(user_text, proposal)
+        except Exception as exc:
+            log("laya_error", error=str(exc))
+            print(f"\n[ERROR] Laya failed: {exc}")
+            return "Laya failed. No action was executed."
+
+        log(
+            "laya_decision",
+            iteration=iteration,
+            route=route,
+            raw_result=raw_laya,
+        )
+
+        proposed_kind = proposal["kind"]
+
+        # Laya is a routing signal, not an execution authority.
+        # A mismatch involving actions is handled conservatively.
+        if proposed_kind == "act" and route != "act":
+            log(
+                "action_blocked",
+                reason="Laya route disagrees with action proposal",
+                route=route,
+            )
+            print("\n[Harness] Action blocked: routing disagreement.")
+            return (
+                "I couldn't safely validate the proposed action. "
+                "No action was executed."
+            )
+
+        if route == "ask":
+            answer = proposal.get("message", "")
+            if proposed_kind != "ask":
+                answer = (
+                    "I need clarification before proceeding. "
+                    + answer
+                )
+            print(f"\nAssistant: {answer}")
+            return answer
+
+        if route == "end":
+            log("END_INTERACTION", iteration=iteration)
+            print("\n[Harness] END_INTERACTION")
+            return None
+
+        if route == "act":
+            if proposed_kind != "act":
+                log(
+                    "action_blocked",
+                    reason="Laya requested act but main model did not",
+                )
+                return "No action executed: model proposals disagreed."
+
+            action = proposal.get("action", "")
+            args = proposal.get("args", {})
+            log("action_start", action=action, args=args)
+            result = execute_action(action, args)
+            log("action_result", action=action, result=result)
+
+            # Feed the real tool result back to the main model.
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps(proposal, ensure_ascii=False),
+            })
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Tool result (trusted harness output): "
+                    + json.dumps(result, ensure_ascii=False)
+                    + "\nNow produce the next JSON proposal. Do not "
+                    "claim success if the result has ok=false."
+                ),
+            })
+            continue
+
+        if route == "continue":
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps(proposal, ensure_ascii=False),
+            })
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Continue reasoning and produce the next JSON "
+                    "proposal. Do not repeat the same step without "
+                    "a reason."
+                ),
+            })
+            continue
+
+        if route == "respond":
+            if proposed_kind == "act":
+                log(
+                    "action_blocked",
+                    reason="Respond route cannot authorize an action",
+                )
+                return "No action executed because routing disagreed."
+
+            answer = proposal.get("message", "")
+            if proposed_kind == "end":
+                log(
+                    "route_mismatch",
+                    proposed_kind=proposed_kind,
+                    route=route,
+                )
+                return "The interaction ended due to a routing mismatch."
+
+            print(f"\nAssistant: {answer}")
+            return answer
+
+    log("iteration_limit", maximum=MAX_ITERATIONS)
+    print("\n[Harness] Iteration limit reached.")
+    return (
+        "I reached the prototype's iteration limit. "
+        "Please narrow the request or try again."
+    )
+
+
+def main():
+    session_id = str(uuid.uuid4())
+    history = []
+
+    print("Assistant prototype — type /quit to exit.")
+    print(f"Session: {session_id}")
+    print(f"Trace: {os.path.abspath(TRACE_FILE)}")
+    print("Registered tools: get_status, echo")
+
+    while True:
+        try:
+            user_text = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting.")
+            break
+
+        if not user_text:
+            continue
+        if user_text.lower() in {"/quit", "/exit"}:
+            break
+
+        started = time.monotonic()
+        answer = run_interaction(user_text, history, session_id)
+        elapsed = time.monotonic() - started
+
+        log(
+            "interaction_end",
+            session_id=session_id,
+            elapsed_seconds=round(elapsed, 2),
+        )
+
+        # Only completed conversational turns enter user-visible history.
+        # Internal tool messages are kept local to each interaction.
+        if answer is not None:
+            history.extend([
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": answer},
+            ])
+            history = history[-12:]
+
+
+if __name__ == "__main__":
+    main()
