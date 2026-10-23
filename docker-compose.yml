@@ -1,0 +1,32 @@
+services:
+  harness:
+    build: .
+    image: personal-harness:1.0.0
+    ports:
+      - "${HARNESS_PORT:-8080}:8080"
+    environment:
+      HARNESS_DATA_DIR: /data
+      HARNESS_BIND_HOST: 0.0.0.0
+      HARNESS_BIND_PORT: "8080"
+      HARNESS_UI_TOKEN: "${HARNESS_UI_TOKEN:-change-this-token}"
+      HARNESS_INTERACTIVE_ENDPOINT: "${HARNESS_INTERACTIVE_ENDPOINT:-http://host.docker.internal:8181/v1/chat/completions}"
+      HARNESS_BACKGROUND_ENDPOINT: "${HARNESS_BACKGROUND_ENDPOINT:-http://host.docker.internal:8181/v1/chat/completions}"
+      HARNESS_INTERACTIVE_MODEL: "${HARNESS_INTERACTIVE_MODEL:-local-main}"
+    volumes:
+      - harness-data:/data
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  harness-data:

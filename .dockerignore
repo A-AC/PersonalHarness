@@ -1,0 +1,13 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+data
+tmp_smoke
+prototype
+tests
+eval
+.venv
+venv

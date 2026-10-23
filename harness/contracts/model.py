@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+
+class ModelError(RuntimeError):
+    """Base error for inference adapter failures."""
+
+
+class ModelUnavailable(ModelError):
+    """The inference backend could not be reached or returned no usable result."""
+
+
+@dataclass
+class Message:
+    role: str
+    content: str
+
+
+@dataclass
+class ModelResult:
+    content: str
+    latency_ms: int
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    finish_reason: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+class ModelAdapter(Protocol):
+    def complete(
+        self,
+        role: str,
+        messages: list[Message],
+        *,
+        schema: dict[str, Any] | None = None,
+    ) -> ModelResult: ...
+
+    def health(self, role: str) -> bool: ...

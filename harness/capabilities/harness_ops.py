@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+from harness.constants import PermissionLevel
+from harness.contracts.capabilities import Manifest, OperationSpec
+
+
+MEMORY_MANIFEST = Manifest(
+    name="harness_memory",
+    purpose="Create, correct, or retract long-term memories.",
+    source="harness",
+    operations=[
+        OperationSpec(
+            name="remember",
+            description="Store an explicit memory from the user's statement.",
+            permission=PermissionLevel.WRITE,
+            inputs={"type": "string", "content": "string", "scope": "string"},
+            required=["content"],
+        ),
+        OperationSpec(
+            name="correct",
+            description="Supersede an existing memory with a correction.",
+            permission=PermissionLevel.WRITE,
+            inputs={"memory_id": "string", "content": "string"},
+            required=["memory_id", "content"],
+        ),
+        OperationSpec(
+            name="retract",
+            description="Retract a memory.",
+            permission=PermissionLevel.WRITE,
+            inputs={"memory_id": "string"},
+            required=["memory_id"],
+        ),
+    ],
+)
+
+
+STRUCTURE_MANIFEST = Manifest(
+    name="harness_structure",
+    purpose="Propose persistent structure for explicit user confirmation.",
+    source="harness",
+    operations=[
+        OperationSpec(
+            name="suggest_domain",
+            description="Ask the user whether to create a domain; records a pending suggestion. Never creates it.",
+            permission=PermissionLevel.READ,
+            inputs={"name": "string", "reason": "string"},
+            required=["name"],
+        ),
+    ],
+)
