@@ -173,10 +173,13 @@ class DefaultContextBuilder:
                 raise ValueError("context exceeds total budget after dropping optional sections")
         body = "\n\n".join(f"## {item.name}\n{item.text}" for item in sections if item.text)
         # Chat templates commonly require a user turn; keep the context in the
-        # system message and make the task's goal the user query.
+        # system message. Use the latest user text so a resumed task sees the
+        # reply that unblocked it, not only the original task goal.
+        latest = self._sessions.list_interactions(limit=1)
+        user_text = latest[-1].user_text if latest else task.goal
         messages = [
             Message(role="system", content=body),
-            Message(role="user", content=task.goal),
+            Message(role="user", content=user_text),
         ]
         if usage:
             self._memory.record_usage(usage)

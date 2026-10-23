@@ -252,7 +252,7 @@ def scenario() -> list[EvalScenario]:
         EvalScenario(
             "echo_missing_text",
             "missing_arg",
-            [EvalTurn("Echo something.", [no_attempts(), blocked_awaiting_user()])],
+            [EvalTurn("Echo the value in <text>.", [no_attempts(), blocked_awaiting_user()])],
         ),
         EvalScenario(
             "status_missing_target",
@@ -405,7 +405,7 @@ def scenario() -> list[EvalScenario]:
             "followup_echo",
             "follow_up",
             [
-                EvalTurn("Echo something.", [no_attempts(), blocked_awaiting_user()]),
+                EvalTurn("Echo the value in <text>.", [no_attempts(), blocked_awaiting_user()]),
                 EvalTurn(
                     "banana",
                     [

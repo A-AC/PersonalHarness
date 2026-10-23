@@ -52,6 +52,15 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
     assert "args: a:number, b:number; required: a, b" in prompt
 
 
+def test_resumed_task_uses_latest_user_reply(make_harness) -> None:
+    h = make_harness([])
+    h.sessions.record_interaction("banana")
+    task = h.tasks.create(TaskSpec(goal="Echo the value in <text>."))
+    package = h.context.build(task, h.sessions.current(), trace_id="trc_resume")
+    assert package.messages[-1].role == "user"
+    assert package.messages[-1].content == "banana"
+
+
 def test_global_preference_appears_once_and_is_used(make_harness) -> None:
     h = make_harness([])
     record = remember(h, "The user prefers concise answers", type="preference")

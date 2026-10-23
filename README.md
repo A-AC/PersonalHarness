@@ -692,8 +692,9 @@ The model can propose exactly five actions:
 `end(completed)` is rejected unless the task has a delivered response or a
 succeeded execution. Invalid proposals consume a bounded retry budget; a task
 fails visibly when the budget is exhausted. When a task is blocked awaiting a
-user, the next user message is appended as a constraint and the task resumes. A
-blocked task does not stop unrelated ready tasks.
+user, the next user message becomes the current user turn and is appended as a
+constraint, then the task resumes. A blocked task does not stop unrelated ready
+tasks.
 
 Important invariants:
 
