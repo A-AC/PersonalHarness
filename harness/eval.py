@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
@@ -663,6 +664,12 @@ def run_suite(
     for item in selected:
         for repeat in range(1, repeats + 1):
             run_dir = source_dir / "eval" / tag / item.id / f"repeat_{repeat}"
+            # A tag names a run, not a reusable sandbox. Without this reset, a
+            # rerun resumes tasks, sessions, memories, and traces left behind by
+            # an earlier run with the same tag, so the reported results no
+            # longer describe the current model/configuration.
+            if run_dir.exists():
+                shutil.rmtree(run_dir)
             _write_settings(run_dir / "settings.yaml", configured)
             if adapter_factory is None:
                 harness = build_harness(run_dir, env={})

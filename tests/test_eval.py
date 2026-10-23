@@ -4,7 +4,7 @@ from pathlib import Path
 
 from harness.eval import SCENARIOS, run_suite, select_scenarios, summarize
 from harness.model.scripted import ScriptedAdapter
-from tests.conftest import plan, respond
+from tests.conftest import ask, plan, respond
 
 
 def test_scenario_ids_are_unique_and_selectable() -> None:
@@ -79,3 +79,41 @@ def test_run_suite_uses_isolated_harnesses_and_writes_results(tmp_path: Path) ->
     assert (tmp_path / "eval" / "results" / "unit.json").exists()
     assert (tmp_path / "eval" / "unit" / scenario.id / "repeat_1" / "settings.yaml").exists()
     assert (tmp_path / "eval" / "unit" / scenario.id / "repeat_2").exists()
+
+
+def test_run_suite_resets_state_when_tag_is_reused(tmp_path: Path) -> None:
+    scenario = select_scenarios("echo_missing_text")[0]
+
+    def factory(_settings):
+        return ScriptedAdapter([plan("Echo the value in <text>."), ask("What text?", "text")])
+
+    first = run_suite(
+        data_dir=tmp_path,
+        repeats=1,
+        scenarios=[scenario],
+        tag="reused",
+        adapter_factory=factory,
+    )
+    first_ids = {
+        task["id"]
+        for turn in first["results"][0]["turns"]
+        for task in turn["task_states"]
+    }
+    assert first["summary"]["passed"] == 1
+
+    second = run_suite(
+        data_dir=tmp_path,
+        repeats=1,
+        scenarios=[scenario],
+        tag="reused",
+        adapter_factory=factory,
+    )
+    second_ids = {
+        task["id"]
+        for turn in second["results"][0]["turns"]
+        for task in turn["task_states"]
+    }
+    assert second["summary"]["passed"] == 1
+    assert first_ids
+    assert second_ids
+    assert first_ids.isdisjoint(second_ids)

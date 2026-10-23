@@ -612,7 +612,10 @@ python -m harness --data-dir ./data eval --compare baseline another-tag
 ```
 
 Each scenario repeat gets an isolated directory under
-`data/eval/<tag>/<scenario>/repeat_N`. The summary is written to
+`data/eval/<tag>/<scenario>/repeat_N`. A tag names one run: reusing a tag resets
+each selected scenario's repeat directories before the new run, so stale tasks,
+sessions, memories, and traces cannot contaminate the results. Use a new tag to
+keep the previous run's per-scenario data. The summary is written to
 `data/eval/results/<tag>.json` and includes pass rates by category and scenario,
 proposal validity, capability-call counts, latency, and failure reasons. Checks
 are deterministic: they inspect tasks, execution attempts, memory records, and
