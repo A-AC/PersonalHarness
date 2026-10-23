@@ -51,7 +51,9 @@ The v1 scope is deliberately small:
   explicit user command or confirmation; the model may only suggest.
 - **Budgeted context and full traces.** Each model call records the context
   sections included or excluded, the prompt, the raw response, validation
-  result, latency, and token counts.
+  result, duration, time to first token, prompt/completion/visible/reasoning
+  tokens, and whether thinking occurred. Each turn also stores a stage timeline
+  (prompt build, model calls, parse/validation, execution, response).
 - **Inspectable UI and files.** A small authenticated server-rendered UI exposes
   tasks, traces, memory, settings, and consolidation state without a separate
   database.
@@ -70,7 +72,9 @@ together. See [CODEMAP.md](CODEMAP.md) for the full module and storage map.
 user text
   -> session interaction (append-only)
   -> structure command?  yes -> registry create/confirm/decline
-                         no  -> model task plan -> persisted tasks
+                         no  -> model task plan, or one code task for a
+                                short single request in heuristic mode
+  -> persisted tasks
   -> next ready task
   -> budgeted context (persona, memory, domain/project, history, capabilities)
   -> model proposal (respond / ask / act / continue / end)

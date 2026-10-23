@@ -240,13 +240,17 @@ class MemoryCore:
 
     def _validate_candidate(self, candidate: MemoryCandidate) -> str | None:
         if candidate.type not in list(MemoryType):
-            return "invalid type"
+            allowed = ", ".join(item.value for item in MemoryType)
+            return f"invalid type '{candidate.type}'; allowed types: {allowed}"
         if candidate.origin not in list(MemoryOrigin):
             return "invalid origin"
         if not candidate.content.strip():
             return "empty content"
         if not self._scope_exists(candidate.scope):
-            return "unknown scope"
+            return (
+                f"unknown scope '{candidate.scope}'; allowed scopes: global, self, "
+                "domain:<id>, project:<id>"
+            )
         provenance = candidate.provenance or {}
         source_kind = provenance.get("source_kind")
         if source_kind not in list(SourceKind):

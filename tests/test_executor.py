@@ -135,6 +135,33 @@ def test_memory_capability_uses_user_statement_sources(make_harness) -> None:
     assert h.memory.get(record.id).status == "retracted"
 
 
+def test_memory_validation_error_lists_allowed_types_and_scopes(make_harness) -> None:
+    h = make_harness([])
+    interaction = h.sessions.record_interaction("Remember my name")
+    bad_type = h.capabilities.execute(
+        req(
+            "harness_memory",
+            "remember",
+            {"type": "identity", "content": "The user's name is Alex", "scope": "global"},
+            interaction_id=interaction.id,
+        )
+    )
+    assert bad_type.status == ExecutionStatus.FAILED
+    assert "allowed types" in bad_type.message
+    assert "preference" in bad_type.message
+
+    bad_scope = h.capabilities.execute(
+        req(
+            "harness_memory",
+            "remember",
+            {"type": "fact", "content": "The user's name is Alex", "scope": "personal"},
+            interaction_id=interaction.id,
+        )
+    )
+    assert bad_scope.status == ExecutionStatus.FAILED
+    assert "allowed scopes" in bad_scope.message
+
+
 def test_manifest_operations_have_permission_levels(make_harness) -> None:
     h = make_harness([])
     manifest = h.capabilities.get("mock")

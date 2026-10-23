@@ -15,8 +15,15 @@ composition/edge layer.
 | `harness/app.py` | `Harness` container and `build_harness()` wiring |
 | `harness/constants.py` | Schema version, ID prefixes, enums, reserved `self` id |
 | `harness/storage/atomic.py` | UTC timestamps, safe IDs/filenames, atomic JSON/text, JSONL append |
-| `harness/text.py` | Tokenization, overlap, token estimate |
+| `harness/text.py` | Tokenization, reasoning stripping, overlap, token estimate |
 | `harness/prompts.py` | Base action instructions and task-plan instructions |
+
+## Measurement scripts
+
+| Path | Responsibility |
+| --- | --- |
+| `scripts/experiments.py` | Writes each experiment config, runs the fixed eval set, saves and tabulates results |
+| `scripts/cold_start_probe.py` | Idle/warm/concurrent llama-server latency probe with model-status and router hints |
 
 ## Contracts
 
@@ -65,13 +72,14 @@ It has no concrete imports.
 | `harness/capabilities/mcp.py` | Optional stdio MCP discovery/call via the official SDK |
 | `harness/orchestrator/parse.py` | Pydantic parsing and JSON schemas |
 | `harness/orchestrator/machine.py` | Allowed-state and action-transition rules |
-| `harness/orchestrator/loop.py` | Turn handling, structure commands, planning, task loop |
+| `harness/orchestrator/loop.py` | Turn handling, structure commands, heuristic/LLM planning, task loop, retry cap, turn timeline and metrics |
+| `harness/orchestrator/timeline.py` | Per-turn stage recorder (start offset, duration, detail) serialized into traces |
 | `harness/consolidation/service.py` | Evidence snapshot, proposals, apply/results, rollback |
 | `harness/model/scripted.py` | Deterministic test adapter |
 | `harness/model/openai_http.py` | OpenAI-compatible HTTP adapter and health probe |
 | `harness/measure.py` | Learning report from stored events/tasks/memories/usage |
-| `harness/eval.py` | Isolated live eval, deterministic checks, pass-rate summary |
-| `harness/ui/web.py` | Authenticated server-rendered inspection/control UI |
+| `harness/eval.py` | Isolated live eval, deterministic checks, fixed latency/failure scenarios, p50/p95 and token metrics |
+| `harness/ui/web.py` | Authenticated server-rendered inspection/control UI, including turn timeline and execution envelope |
 
 ## Turn data flow
 
@@ -79,8 +87,10 @@ It has no concrete imports.
 user text
   -> SessionManager.record_interaction (append-only)
   -> structure command?  yes -> DomainRegistry.create_* / confirm / decline
-                         no  -> ModelAdapter.complete(task plan)
-                              -> TaskManager.create(sequence, deps)
+                         no  -> short single request in heuristic mode?
+                                  yes -> TaskManager.create(one code task)
+                                  no  -> ModelAdapter.complete(task plan)
+                                        -> TaskManager.create(sequence, deps)
   -> TaskManager.next_ready
   -> ContextBuilder.build(task, trace_id)
        persona + preferences + domain/project/workspace + task + history
@@ -93,6 +103,26 @@ user text
   -> SessionManager.append_assistant
   -> TurnResult(messages, tasks)
 ```
+
+Every model trace records `duration_ms`, `time_to_first_token_ms`,
+`prompt_tokens`, `completion_tokens`, `visible_output_tokens` (reasoning
+stripped), `reasoning_tokens`, and `thinking_produced`. Each turn also writes a
+`role="turn"`, `model_called=False` trace whose `timeline` lists stage names,
+start offsets, durations, and details (prompt build, model calls,
+parse/validation, execution envelope, response). Execution stage details carry
+the full status/error_category/message envelope. `harness/eval.py` derives turn
+and call p50/p95, TTFT, token means, thinking ratio, and tool success from those
+traces.
+
+Planning is selectable through `tasks.planning_mode`: `llm` always asks the
+model to split, while `heuristic` (the default) creates one task in code for
+short single-request messages and reserves the model split for marker-bearing
+input. `loop.stop_after_nonretryable_failure` (default true) rejects further
+capability calls after a non-retryable execution failure and forces an honest
+failure response. `models.<role>.enable_thinking` (default true) and
+`thinking_budget_tokens` control reasoning; `models.<role>.stream` (default
+true) controls streaming/TTFT measurement. The experiment evidence and the
+recommendation for these defaults are in `EXPERIMENTS.md`.
 
 The trace id is generated before context construction so memory usage rows,
 traces, and model-call events share an id. Each execution attempt is stored
@@ -125,6 +155,10 @@ before dispatch as `in_flight` and completed with `started_at`, `ended_at`,
 | `consolidation/run_*.input.json` | Exact evidence snapshot for rollback/audit |
 | `eval/<tag>/...` | Isolated per-scenario-per-repeat data dirs |
 | `eval/results/<tag>.json` | Eval config, summary, and run details |
+| `experiments/results/<tag>.json` | Experiment config, summary, per-run traces, fixed scenario set |
+| `experiments/results/cold_start_idle.json` | Idle/warm/concurrent cold-start probe samples and model state |
+| `experiments/results/cold_start_unload.json` | Forced-unload reload measurement |
+| `experiments/results/summary.json` | Cross-experiment configs and summaries |
 
 ## Adding a component
 

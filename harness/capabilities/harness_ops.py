@@ -11,7 +11,11 @@ MEMORY_MANIFEST = Manifest(
     operations=[
         OperationSpec(
             name="remember",
-            description="Store an explicit memory from the user's statement.",
+            description=(
+                "Store an explicit memory from the user's statement. type defaults to fact; "
+                "allowed types: fact, preference, decision, procedure, lesson. scope defaults "
+                "to global; allowed scopes: global, self, domain:<id>, project:<id>."
+            ),
             permission=PermissionLevel.WRITE,
             inputs={"type": "string", "content": "string", "scope": "string"},
             required=["content"],

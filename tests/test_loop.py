@@ -74,7 +74,12 @@ def test_permission_denied_is_explained_and_not_run(make_harness) -> None:
     assert "capabilities.policy.write" in attempts[0].message
     assert not task.succeeded_execution
     trace = h.traces.list_for(task_id=task.id, limit=10)[0]
-    assert trace.validation == {"ok": True, "execution": "denied"}
+    assert trace.validation["ok"] is True
+    assert trace.validation["execution"] == "denied"
+    envelope = trace.validation["envelope"]
+    assert envelope["status"] == "denied"
+    assert envelope["error_category"] == "permission_denied"
+    assert "capabilities.policy.write" in envelope["message"]
 
 
 def test_unknown_write_is_not_retried(make_harness) -> None:
@@ -161,6 +166,79 @@ def test_missing_capability_does_not_crash_and_unrelated_task_completes(make_har
     missing_task = [item for item in result.tasks if item.goal == "use missing"][0]
     attempts = [item for item in h.capabilities.last_attempts(missing_task.id)]
     assert attempts and attempts[0].status == ExecutionStatus.UNAVAILABLE
+
+
+def test_heuristic_planning_skips_the_model_for_a_short_single_request(make_harness) -> None:
+    h = make_harness([respond("Hello.")], settings={"tasks": {"planning_mode": "heuristic"}})
+    result = h.loop.handle_turn("hello")
+    assert result.messages == ["Hello."]
+    planner = [item for item in h.traces.list_for(interaction_id=result.interaction_id) if item.role == "planner"][0]
+    assert planner.model_called is False
+    assert planner.validation["source"] == "heuristic"
+    assert len(result.tasks) == 1
+    assert len([item for item in h.traces.list_for(interaction_id=result.interaction_id) if item.model_called]) == 1
+
+
+def test_heuristic_planning_keeps_the_model_split_for_multiple_requests(make_harness) -> None:
+    h = make_harness(
+        [plan("first", "second"), respond("first done"), respond("second done")],
+        settings={"tasks": {"planning_mode": "heuristic"}},
+    )
+    result = h.loop.handle_turn("Do first, and also do second.")
+    assert len(result.tasks) == 2
+    planner = [item for item in h.traces.list_for(interaction_id=result.interaction_id) if item.role == "planner"][0]
+    assert planner.model_called is True
+
+
+def test_nonretryable_failure_stops_before_a_second_execution(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("fail"),
+            act("mock", "fail", category="hard_failure"),
+            act("mock", "fail", category="hard_failure"),
+            act("mock", "fail", category="hard_failure"),
+        ],
+        settings={"loop": {"stop_after_nonretryable_failure": True}},
+    )
+    result = h.loop.handle_turn("Try the failing call.")
+    task = result.tasks[0]
+    attempts = h.capabilities.last_attempts(task.id)
+    assert len(attempts) == 1
+    assert attempts[0].status == ExecutionStatus.FAILED
+    assert task.state == TaskState.COMPLETED
+    assert "couldn't complete" in result.messages[0]
+    assert "noted" not in result.messages[0].lower()
+
+
+def test_nonretryable_failure_allows_an_honest_response(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("fail"),
+            act("mock", "fail", category="hard_failure"),
+            respond("The call failed; I did not complete it."),
+        ],
+        settings={"loop": {"stop_after_nonretryable_failure": True}},
+    )
+    result = h.loop.handle_turn("Try the failing call.")
+    assert len(h.capabilities.last_attempts(result.tasks[0].id)) == 1
+    assert result.tasks[0].state == TaskState.COMPLETED
+    assert "failed" in result.messages[0].lower()
+
+
+def test_retryable_failure_is_not_stopped_by_the_cap(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("retry"),
+            act("mock", "fail", category="transient"),
+            act("mock", "echo", text="now works"),
+            respond("Recovered."),
+        ],
+        settings={"loop": {"stop_after_nonretryable_failure": True}},
+    )
+    result = h.loop.handle_turn("Try the call.")
+    statuses = [item.status for item in h.capabilities.last_attempts(result.tasks[0].id)]
+    assert statuses == [ExecutionStatus.FAILED, ExecutionStatus.SUCCEEDED]
+    assert result.tasks[0].succeeded_execution
 
 
 def test_task_decomposition_and_dependencies(make_harness) -> None:

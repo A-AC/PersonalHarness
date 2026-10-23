@@ -26,6 +26,10 @@ class ModelResult:
     completion_tokens: int | None = None
     finish_reason: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    time_to_first_token_ms: int | None = None
+    reasoning_content: str | None = None
+    timings: dict[str, Any] = field(default_factory=dict)
+    streaming: bool = False
 
 
 class ModelAdapter(Protocol):

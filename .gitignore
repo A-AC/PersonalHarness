@@ -5,6 +5,7 @@ __pycache__/
 venv/
 data/
 tmp_smoke/
+experiments/data/
 .env
 coverage.xml
 htmlcov/

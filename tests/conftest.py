@@ -46,11 +46,33 @@ def write_settings(root: Path, payload: dict[str, Any]) -> None:
     (root / "settings.yaml").write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8", newline="\n")
 
 
+# Behavior tests script an explicit task plan, so they pin the planner to the
+# LLM path and pin the failure policy they were written against. The catalog
+# defaults (heuristic planning, retry cap) are covered by tests that override
+# these keys on purpose. This keeps test intent independent of default tuning.
+TEST_BASELINE: dict[str, Any] = {
+    "tasks": {"planning_mode": "llm"},
+    "loop": {"stop_after_nonretryable_failure": False},
+}
+
+
+def _deep_merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = value
+    return target
+
+
 @pytest.fixture
 def make_harness(tmp_path: Path):
     def factory(script: list[Any] | None = None, settings: dict[str, Any] | None = None) -> Harness:
-        if settings:
-            write_settings(tmp_path, settings)
+        payload = _deep_merge(
+            {key: dict(value) for key, value in TEST_BASELINE.items()},
+            settings or {},
+        )
+        write_settings(tmp_path, payload)
         model = ScriptedAdapter(script or [])
         return build_harness(tmp_path, model=model)
 

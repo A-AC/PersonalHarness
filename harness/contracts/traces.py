@@ -21,6 +21,17 @@ class Trace:
     latency_ms: int | None = None
     token_counts: dict[str, int] = field(default_factory=dict)
     finish_reason: str | None = None
+    # Instrumentation. `duration_ms` duplicates `latency_ms` for new traces and is
+    # the canonical field; `latency_ms` remains for traces written before v1.1.
+    duration_ms: int | None = None
+    time_to_first_token_ms: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    visible_output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    thinking_produced: bool = False
+    model_called: bool = True
+    timeline: list[dict[str, Any]] = field(default_factory=list)
 
 
 class TraceStore(Protocol):

@@ -21,6 +21,12 @@ def test_defaults_are_written_and_readable(tmp_path: Path) -> None:
     assert service.get("loop.max_iterations") == 5
     assert service.get("capabilities.policy.write") == "deny"
     assert service.get("context.budgets.total") == 4000
+    # Experiment-backed defaults: skip the planner for short single requests
+    # and stop after a non-retryable execution failure. Reasoning stays on
+    # because disabling it lost missing-argument clarification.
+    assert service.get("tasks.planning_mode") == "heuristic"
+    assert service.get("loop.stop_after_nonretryable_failure") is True
+    assert service.get("models.interactive.enable_thinking") is True
 
 
 def test_unknown_file_key_fails_loudly(tmp_path: Path) -> None:

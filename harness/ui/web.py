@@ -84,13 +84,14 @@ def create_app(harness: Harness) -> Starlette:
         items = harness.traces.list_for(limit=limit)
         rows = "".join(
             f'<tr><td><a href="/traces/{_esc(item.id)}">{_esc(item.id)}</a></td>'
-            f"<td>{_esc(item.task_id)}</td><td>{_esc(item.validation)}</td>"
+            f"<td>{_esc(item.role)}</td><td>{_esc(item.task_id)}</td><td>{_esc(item.validation)}</td>"
+            f"<td>{_esc(item.duration_ms or item.latency_ms)}</td>"
             f"<td>{_esc(item.finish_reason)}</td><td>{_esc(item.ts)}</td></tr>"
             for item in reversed(items)
         )
         return _page(
-            "<h1>Traces</h1><table><tr><th>id</th><th>task</th><th>validation</th>"
-            "<th>finish</th><th>ts</th></tr>"
+            "<h1>Traces</h1><table><tr><th>id</th><th>role</th><th>task</th><th>validation</th>"
+            "<th>duration ms</th><th>finish</th><th>ts</th></tr>"
             + rows
             + "</table>"
         )
@@ -102,10 +103,30 @@ def create_app(harness: Harness) -> Starlette:
         included = "".join(f"<li>include {_esc(row)}</li>" for row in item.included)
         excluded = "".join(f"<li>exclude {_esc(row)}</li>" for row in item.excluded)
         prompt = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in item.messages)
+        timeline_rows = "".join(
+            f"<tr><td>{_esc(row.get('stage'))}</td><td>{_esc(row.get('start_ms'))}</td>"
+            f"<td>{_esc(row.get('duration_ms'))}</td><td><pre>{_esc(row.get('detail'))}</pre></td></tr>"
+            for row in item.timeline
+        )
+        timeline = (
+            "<h2>Turn timeline</h2><table><tr><th>stage</th><th>start ms</th>"
+            "<th>duration ms</th><th>detail</th></tr>" + timeline_rows + "</table>"
+            if timeline_rows
+            else "<h2>Turn timeline</h2><p class='muted'>none</p>"
+        )
+        envelope = (item.validation or {}).get("envelope")
+        envelope_block = (
+            f"<h2>Execution envelope</h2><pre>{_esc(envelope)}</pre>" if envelope else ""
+        )
+        duration = item.duration_ms if item.duration_ms is not None else item.latency_ms
         return _page(
-            f"<h1>{_esc(item.id)}</h1><p>task {_esc(item.task_id)} interaction {_esc(item.interaction_id)}</p>"
-            f"<p class='muted'>latency {_esc(item.latency_ms)} ms, tokens {_esc(item.token_counts)}, "
-            f"finish {_esc(item.finish_reason)}</p>"
+            f"<h1>{_esc(item.id)}</h1><p>role {_esc(item.role)} task {_esc(item.task_id)} "
+            f"interaction {_esc(item.interaction_id)}</p>"
+            f"<p class='muted'>duration {_esc(duration)} ms, time to first token "
+            f"{_esc(item.time_to_first_token_ms)} ms, tokens {_esc(item.token_counts)}, "
+            f"thinking {_esc(item.thinking_produced)}, finish {_esc(item.finish_reason)}</p>"
+            f"{timeline}"
+            f"{envelope_block}"
             f"<h2>Included / excluded</h2><ul>{included}{excluded}</ul>"
             f"<h2>Prompt</h2><pre>{_esc(prompt)}</pre>"
             f"<h2>Raw output</h2><pre>{_esc(item.raw_output)}</pre>"
@@ -113,27 +134,42 @@ def create_app(harness: Harness) -> Starlette:
         )
 
     async def memory(request: Request) -> HTMLResponse:
+        error = ""
         if request.method == "POST":
             form = _form(await request.body())
             action = form.get("action", "")
             mem_id = form.get("id", "")
-            if action == "retract":
-                harness.memory.retract(mem_id, "user")
-            elif action == "approve":
-                harness.memory.approve(mem_id, "user")
-            elif action == "reject":
-                harness.memory.reject(mem_id, "user")
-            return RedirectResponse("/memory", status_code=303)
+            try:
+                if action == "retract":
+                    harness.memory.retract(mem_id, "user")
+                elif action == "approve":
+                    harness.memory.approve(mem_id, "user")
+                elif action == "reject":
+                    harness.memory.reject(mem_id, "user")
+                else:
+                    raise ValueError(f"unknown memory action: {action}")
+            except (KeyError, ValueError) as exc:
+                # A stale row or a non-proposed approval used to escape the
+                # handler as a 500. Surface the cause in the page instead.
+                error = f"{type(exc).__name__}: {exc}"
+            else:
+                return RedirectResponse("/memory", status_code=303)
         rows = []
         for item in harness.memory.list():
+            actions = ""
+            if item.status == "proposed":
+                actions = (
+                    '<button name="action" value="approve">approve</button>'
+                    '<button name="action" value="reject">reject</button>'
+                )
+            elif item.status == "active":
+                actions = '<button name="action" value="retract">retract</button>'
             rows.append(
                 f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.type)}</td><td>{_esc(item.origin)}</td>"
                 f"<td>{_esc(item.status)}</td><td>{_esc(item.scope)}</td><td>{_esc(item.content)}</td>"
                 f"<td>{_esc(item.provenance)}</td>"
                 f'<td><form method="post"><input type="hidden" name="id" value="{_esc(item.id)}">'
-                f'<button name="action" value="retract">retract</button>'
-                f'<button name="action" value="approve">approve</button>'
-                f'<button name="action" value="reject">reject</button></form></td></tr>'
+                f'{actions}</form></td></tr>'
             )
         learned = "".join(
             f'<li>{_esc(item.id)} ({_esc(item.type)}, {_esc(item.scope)}): {_esc(item.content)} '
@@ -142,11 +178,15 @@ def create_app(harness: Harness) -> Starlette:
             for item in harness.memory.recently_learned(limit=int(harness.settings.get("memory.recent_limit")))
         )
         pending = "".join(
-            f"<li>{_esc(item.id)}: {_esc(item.content)} ({_esc(item.provenance)})</li>"
+            f'<li>{_esc(item.id)}: {_esc(item.content)} ({_esc(item.provenance)}) '
+            f'<form method="post" style="display:inline"><input type="hidden" name="id" value="{_esc(item.id)}">'
+            f'<button name="action" value="approve">approve</button>'
+            f'<button name="action" value="reject">reject</button></form></li>'
             for item in harness.memory.list(status="proposed")
         )
         return _page(
-            "<h1>Memory</h1><h2>Awaiting approval</h2><ul>"
+            ("<p class='err'>" + _esc(error) + "</p>" if error else "")
+            + "<h1>Memory</h1><h2>Awaiting approval</h2><ul>"
             + pending
             + "</ul><h2>Recently learned</h2><ul>"
             + learned

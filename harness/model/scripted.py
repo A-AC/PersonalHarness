@@ -34,7 +34,13 @@ class ScriptedAdapter:
             content = json.dumps(item, ensure_ascii=False)
         else:
             content = str(item)
-        return ModelResult(content=content, latency_ms=1, prompt_tokens=len(content), completion_tokens=8)
+        return ModelResult(
+            content=content,
+            latency_ms=1,
+            prompt_tokens=len(content),
+            completion_tokens=8,
+            time_to_first_token_ms=1,
+        )
 
     def health(self, role: str) -> bool:
         return self.healthy

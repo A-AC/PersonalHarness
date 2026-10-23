@@ -1,0 +1,76 @@
+{
+  "endpoint": "http://192.168.50.40:8181/v1/chat/completions",
+  "model": "qwen3.5-9b",
+  "idle_s": 0.0,
+  "router": {
+    "role": "router",
+    "max_instances": 1,
+    "models_autoload": true,
+    "build_info": "b11669-620d2225c"
+  },
+  "state_before_idle": {
+    "status": "loaded",
+    "context_length": 262144
+  },
+  "unload": {
+    "attempts": [
+      {
+        "path": "/models/unload",
+        "status_code": 200,
+        "body": "{\"success\":true}"
+      }
+    ],
+    "state": {
+      "status": "loaded",
+      "context_length": 262144
+    }
+  },
+  "state_after_unload": {
+    "status": "loaded",
+    "context_length": 262144
+  },
+  "state_after_idle": {
+    "status": "unloaded",
+    "context_length": 262144
+  },
+  "first_after_idle": {
+    "marker": 1,
+    "duration_ms": 2970,
+    "ttft_ms": 2933,
+    "prompt_tokens": 24,
+    "completion_tokens": 2,
+    "server_prompt_ms": 116.355,
+    "server_predicted_ms": 36.101
+  },
+  "warm": [
+    {
+      "marker": 2,
+      "duration_ms": 339,
+      "ttft_ms": 303,
+      "prompt_tokens": 24,
+      "completion_tokens": 2,
+      "server_prompt_ms": 106.175,
+      "server_predicted_ms": 35.44
+    }
+  ],
+  "state_after_warm": {
+    "status": "loaded",
+    "context_length": 262144
+  },
+  "summary": {
+    "first_after_idle": {
+      "count": 1,
+      "duration_p50_ms": 2970,
+      "duration_min_ms": 2970,
+      "duration_max_ms": 2970,
+      "ttft_p50_ms": 2933
+    },
+    "warm": {
+      "count": 1,
+      "duration_p50_ms": 339,
+      "duration_min_ms": 339,
+      "duration_max_ms": 339,
+      "ttft_p50_ms": 303
+    }
+  }
+}

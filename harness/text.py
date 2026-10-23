@@ -4,6 +4,17 @@ import math
 import re
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+THINK_BLOCK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """Return only the user-visible text from a model response.
+
+    llama-server returns Qwen reasoning in ``reasoning_content``, but some
+    templates inline it as ``<think>...</think>``. Both must be excluded from
+    visible-output accounting.
+    """
+    return THINK_BLOCK_RE.sub("", text or "").strip()
 
 
 def word_tokens(text: str) -> set[str]:
