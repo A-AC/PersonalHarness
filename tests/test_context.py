@@ -56,9 +56,11 @@ def test_resumed_task_uses_latest_user_reply(make_harness) -> None:
     h = make_harness([])
     h.sessions.record_interaction("banana")
     task = h.tasks.create(TaskSpec(goal="Echo the value in <text>."))
-    package = h.context.build(task, h.sessions.current(), trace_id="trc_resume")
+    h.tasks.append_constraint(task.id, "User reply: banana")
+    package = h.context.build(h.tasks.get(task.id), h.sessions.current(), trace_id="trc_resume")
     assert package.messages[-1].role == "user"
     assert package.messages[-1].content == "banana"
+    assert "Resumed: the latest user message answers your pending question." in package.messages[0].content
 
 
 def test_global_preference_appears_once_and_is_used(make_harness) -> None:

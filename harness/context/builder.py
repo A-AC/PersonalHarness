@@ -131,6 +131,8 @@ class DefaultContextBuilder:
             f"Constraints: {', '.join(task.constraints) or 'none'}\n"
             f"Dependencies: {', '.join(task.depends_on) or 'none'}"
         )
+        if any(item.startswith("User reply:") for item in task.constraints):
+            task_text += "\nResumed: the latest user message answers your pending question."
         history_msgs = self._sessions.recent_history()
         history_text = "\n".join(f"{m.role}: {m.content}" for m in history_msgs)
         cap_text = self._capability_text(task.domain_id)

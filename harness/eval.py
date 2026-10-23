@@ -107,6 +107,17 @@ def no_attempts() -> Check:
     return check
 
 
+def _attempts_summary(obs: TurnObservation) -> str:
+    if not obs.attempts:
+        return "none"
+    return ", ".join(
+        f"{item.capability}.{item.operation}={item.status}"
+        + (f" ({item.error_category})" if item.error_category else "")
+        + (f" data={item.data}" if item.data else "")
+        for item in obs.attempts
+    )
+
+
 def succeeded(capability: str, operation: str, data: dict[str, Any] | None = None) -> Check:
     def check(obs: TurnObservation) -> str | None:
         for item in obs.attempts:
@@ -118,7 +129,7 @@ def succeeded(capability: str, operation: str, data: dict[str, Any] | None = Non
                 continue
             return None
         wanted = f"{capability}.{operation}"
-        return f"expected a successful {wanted} call with {data or {}}"
+        return f"expected a successful {wanted} call with {data or {}}; attempts: {_attempts_summary(obs)}"
 
     return check
 
@@ -133,7 +144,7 @@ def failed(capability: str, operation: str, category: str | None = None) -> Chec
             if category is not None and item.error_category != category:
                 continue
             return None
-        return f"expected a failed {capability}.{operation} call"
+        return f"expected a failed {capability}.{operation} call; attempts: {_attempts_summary(obs)}"
 
     return check
 
