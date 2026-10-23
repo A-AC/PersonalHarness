@@ -738,7 +738,10 @@ Built-in manifests:
 
 Enablement is per domain; tasks without a domain use
 `capabilities.default_enabled`. Permission policy is separate:
-`capabilities.policy.read|write|destructive`.
+`capabilities.policy.read|write|destructive`. For each enabled manifest the
+context discloses the operation description, argument names and types, and
+required fields, so the model can choose `act` and fill arguments instead of
+guessing.
 
 Optional extension points:
 

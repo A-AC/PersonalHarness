@@ -215,8 +215,16 @@ class DefaultContextBuilder:
         for manifest in self._capabilities.list_manifests():
             if manifest.name not in enabled:
                 continue
-            ops = ", ".join(f"{op.name}({op.permission})" for op in manifest.operations) or "instructions only"
-            lines.append(f"- {manifest.name}: {manifest.purpose} operations: {ops}")
+            lines.append(f"- {manifest.name}: {manifest.purpose}")
+            if not manifest.operations:
+                lines.append("  operations: instructions only")
+            for op in manifest.operations:
+                args = ", ".join(f"{key}:{kind}" for key, kind in op.inputs.items()) or "none"
+                required = ", ".join(op.required) or "none"
+                lines.append(
+                    f"  - {op.name} ({op.permission}): {op.description} "
+                    f"args: {args}; required: {required}"
+                )
             if manifest.skill_body:
                 lines.append(manifest.skill_body)
         return "\n".join(lines)

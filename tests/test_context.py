@@ -45,6 +45,11 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
     assert package.messages[0].role == "system"
     assert package.messages[-1].role == "user"
     assert package.messages[-1].content == task.goal
+    # Operation signatures must be disclosed, not just operation names.
+    assert "echo (read)" in prompt
+    assert "args: text:string; required: text" in prompt
+    assert "add (read)" in prompt
+    assert "args: a:number, b:number; required: a, b" in prompt
 
 
 def test_global_preference_appears_once_and_is_used(make_harness) -> None:
