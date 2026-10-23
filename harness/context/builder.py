@@ -172,7 +172,12 @@ class DefaultContextBuilder:
             if not reduced:
                 raise ValueError("context exceeds total budget after dropping optional sections")
         body = "\n\n".join(f"## {item.name}\n{item.text}" for item in sections if item.text)
-        messages = [Message(role="system", content=body)]
+        # Chat templates commonly require a user turn; keep the context in the
+        # system message and make the task's goal the user query.
+        messages = [
+            Message(role="system", content=body),
+            Message(role="user", content=task.goal),
+        ]
         if usage:
             self._memory.record_usage(usage)
         return ContextPackage(

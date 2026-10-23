@@ -316,12 +316,83 @@ docker compose ps
 Back up before upgrading. There is no migration framework; the data format is
 intended to remain inspectable and stable, but a backup is the recovery path.
 
-If you replace the named volume with a bind mount, the directory must be
-writable by UID 10001:
+#### Using host directories instead of the named volume
+
+If you want the data at a path you control, such as `/srv/personal-harness-data`,
+replace the named volume in `docker-compose.yml`:
+
+```yaml
+services:
+  harness:
+    volumes:
+      - /srv/personal-harness-data:/data
+```
+
+You can then delete the top-level `volumes: harness-data:` block, or leave it;
+it will simply be unused.
+
+The container runs as UID **10001**, so the host directory must be writable by
+that user:
 
 ```bash
-sudo chown -R 10001:10001 /srv/personal-harness-data
+sudo install -d -m 0750 -o 10001 -g 10001 /srv/personal-harness-data
+sudo install -d -m 0750 -o 10001 -g 10001 /srv/personal-harness-backup
 ```
+
+On SELinux hosts, add `:Z` to the data mount:
+
+```yaml
+      - /srv/personal-harness-data:/data:Z
+```
+
+Recreate the container so the new mount takes effect:
+
+```bash
+docker compose up -d --force-recreate
+docker compose exec harness id
+docker compose exec harness ls -la /data
+```
+
+If the old named volume already contains data, copy it before recreating:
+
+```bash
+docker compose stop
+VOLUME=$(docker volume ls --format '{{.Name}}' | grep 'harness-data$')
+docker run --rm \
+  -v "$VOLUME":/from:ro \
+  -v /srv/personal-harness-data:/to \
+  alpine sh -c 'cp -a /from/. /to/'
+sudo chown -R 10001:10001 /srv/personal-harness-data
+# edit docker-compose.yml, then:
+docker compose up -d --force-recreate
+```
+
+With a bind mount, back up and restore using the host paths directly; no
+volume lookup is needed:
+
+```bash
+docker compose stop
+docker run --rm \
+  -v /srv/personal-harness-data:/data:ro \
+  -v /srv/personal-harness-backup:/backup \
+  alpine tar czf /backup/harness-$(date +%F).tgz -C /data .
+docker compose start
+```
+
+Restore (destructive to the current data directory):
+
+```bash
+docker compose stop
+docker run --rm \
+  -v /srv/personal-harness-data:/data \
+  -v /srv/personal-harness-backup:/backup \
+  alpine sh -c 'find /data -mindepth 1 -delete && tar xzf /backup/harness-YYYY-MM-DD.tgz -C /data'
+sudo chown -R 10001:10001 /srv/personal-harness-data
+docker compose start
+```
+
+The backup directory is only used by the temporary `alpine` container; it is
+not mounted into the harness, so the running application cannot modify backups.
 
 #### Optional container smoke check
 

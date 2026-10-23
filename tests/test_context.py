@@ -41,6 +41,10 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
     assert "personal assistant harness" in prompt
     assert "mock" in prompt
     assert package.total_tokens == sum(item.tokens for item in package.sections)
+    # llama.cpp and other chat templates require a user turn.
+    assert package.messages[0].role == "system"
+    assert package.messages[-1].role == "user"
+    assert package.messages[-1].content == task.goal
 
 
 def test_global_preference_appears_once_and_is_used(make_harness) -> None:
