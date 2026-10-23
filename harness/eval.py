@@ -620,9 +620,31 @@ def select_scenarios(only: str | None) -> list[EvalScenario]:
     ]
 
 
+def _nested_settings(values: dict[str, Any]) -> dict[str, Any]:
+    tree: dict[str, Any] = {}
+    for key, value in values.items():
+        parts = key.split(".")
+        cursor = tree
+        for part in parts[:-1]:
+            child = cursor.get(part)
+            if not isinstance(child, dict):
+                child = {}
+                cursor[part] = child
+            cursor = child
+        cursor[parts[-1]] = value
+    return tree
+
+
 def _write_settings(path: Path, values: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(values, sort_keys=False, allow_unicode=True), encoding="utf-8", newline="\n")
+    # FileSettingsService exposes flat dotted keys. They must be expanded before
+    # writing YAML, or the isolated harness cannot read them back and silently
+    # falls back to catalog defaults (including the default endpoint/model).
+    path.write_text(
+        yaml.safe_dump(_nested_settings(values), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def _config_snapshot(settings: FileSettingsService) -> dict[str, Any]:

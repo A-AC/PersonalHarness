@@ -4,7 +4,8 @@ from pathlib import Path
 
 from harness.eval import SCENARIOS, run_suite, select_scenarios, summarize
 from harness.model.scripted import ScriptedAdapter
-from tests.conftest import ask, plan, respond
+from harness.settings.service import FileSettingsService
+from tests.conftest import ask, plan, respond, write_settings
 
 
 def test_scenario_ids_are_unique_and_selectable() -> None:
@@ -117,3 +118,49 @@ def test_run_suite_resets_state_when_tag_is_reused(tmp_path: Path) -> None:
     assert first_ids
     assert second_ids
     assert first_ids.isdisjoint(second_ids)
+
+
+def test_run_suite_propagates_effective_model_settings(tmp_path: Path) -> None:
+    scenario = select_scenarios("respond_role")[0]
+    write_settings(
+        tmp_path,
+        {
+            "models": {
+                "interactive": {
+                    "endpoint": "http://example.test/v1/chat/completions",
+                    "model_name": "qwen3.5-9b",
+                }
+            }
+        },
+    )
+    seen: list[tuple[str, str]] = []
+
+    def factory(settings):
+        seen.append(
+            (
+                settings.get("models.interactive.endpoint"),
+                settings.get("models.interactive.model_name"),
+            )
+        )
+        return ScriptedAdapter([plan("role"), respond("I help with tracked tasks.")])
+
+    output = run_suite(
+        data_dir=tmp_path,
+        repeats=2,
+        scenarios=[scenario],
+        tag="custom",
+        adapter_factory=factory,
+    )
+
+    expected = ("http://example.test/v1/chat/completions", "qwen3.5-9b")
+    assert output["summary"]["passed"] == 2
+    assert seen == [expected, expected]
+    assert output["config"]["endpoint"] == expected[0]
+    assert output["config"]["model"] == expected[1]
+
+    run_settings = FileSettingsService(
+        tmp_path / "eval" / "custom" / scenario.id / "repeat_1" / "settings.yaml",
+        env={},
+    )
+    assert run_settings.get("models.interactive.endpoint") == expected[0]
+    assert run_settings.get("models.interactive.model_name") == expected[1]
