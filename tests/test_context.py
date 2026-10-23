@@ -50,6 +50,9 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
     assert "args: text:string; required: text" in prompt
     assert "add (read)" in prompt
     assert "args: a:number, b:number; required: a, b" in prompt
+    assert "suggest_domain (read)" in prompt
+    assert "required: name" in prompt
+    assert "prose-only suggestion is not recorded" in prompt
 
 
 def test_resumed_task_uses_latest_user_reply(make_harness) -> None:

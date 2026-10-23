@@ -41,7 +41,11 @@ STRUCTURE_MANIFEST = Manifest(
     operations=[
         OperationSpec(
             name="suggest_domain",
-            description="Ask the user whether to create a domain; records a pending suggestion. Never creates it.",
+            description=(
+                "Record a pending domain suggestion for user confirmation. Use this for "
+                "requests to suggest or propose a domain, including when the user says "
+                "not to create it. Never creates the domain."
+            ),
             permission=PermissionLevel.READ,
             inputs={"name": "string", "reason": "string"},
             required=["name"],
