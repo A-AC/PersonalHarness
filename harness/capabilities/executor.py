@@ -354,6 +354,7 @@ class FileCapabilityExecutor:
             record = result.record
             data: dict[str, Any] = {
                 "memory_id": record.id,
+                "kind": record.kind,
                 "type": record.type,
                 "scope": record.scope,
             }
@@ -377,6 +378,7 @@ class FileCapabilityExecutor:
                     content=str(args["content"]),
                     origin="explicit",
                     type_hint=old.type,
+                    kind_hint=old.kind,
                     scope_hint=old.scope,
                     default_scope=old.scope,
                     provenance=provenance,

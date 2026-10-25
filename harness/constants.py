@@ -43,12 +43,39 @@ class BlockReason(StrEnum):
     CAPABILITY_UNAVAILABLE = "capability_unavailable"
 
 
+class MemoryKind(StrEnum):
+    """Orthogonal memory axis; ``MemoryType`` stays the semantic subtype."""
+
+    SEMANTIC = "semantic"
+    EPISODIC = "episodic"
+    PROCEDURAL = "procedural"
+    PROSPECTIVE = "prospective"
+
+
 class MemoryType(StrEnum):
     FACT = "fact"
     PREFERENCE = "preference"
     DECISION = "decision"
     PROCEDURE = "procedure"
     LESSON = "lesson"
+
+
+# Deterministic kind derivation for legacy rows and new writes. ``procedure``
+# and ``lesson`` remain valid types so old records load unchanged; they map to
+# the procedural kind instead of being renamed on disk.
+MEMORY_KIND_BY_TYPE: dict[str, MemoryKind] = {
+    MemoryType.FACT: MemoryKind.SEMANTIC,
+    MemoryType.PREFERENCE: MemoryKind.SEMANTIC,
+    MemoryType.DECISION: MemoryKind.SEMANTIC,
+    MemoryType.PROCEDURE: MemoryKind.PROCEDURAL,
+    MemoryType.LESSON: MemoryKind.PROCEDURAL,
+}
+
+
+def memory_kind_for_type(type_name: str) -> str:
+    """Return the kind implied by a type, defaulting to semantic."""
+
+    return str(MEMORY_KIND_BY_TYPE.get(str(type_name).strip(), MemoryKind.SEMANTIC))
 
 
 class MemoryScopeKind(StrEnum):

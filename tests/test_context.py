@@ -63,6 +63,17 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
     assert "Current time:" in prompt
 
 
+def test_memory_tag_includes_kind(make_harness) -> None:
+    h = make_harness([])
+    semantic = remember(h, "The NAS is at 192.168.1.10")
+    procedural = remember(h, "Always restart the service after an update", type="lesson")
+    assert semantic is not None and procedural is not None
+    task = h.tasks.create(TaskSpec(goal="NAS restart service"))
+    prompt = h.context.build(task, h.sessions.current(), trace_id="trc_kind").messages[0].content
+    assert f'<memory id="{semantic.id}" kind="semantic"' in prompt
+    assert f'<memory id="{procedural.id}" kind="procedural"' in prompt
+
+
 def test_old_memory_carries_age_marker(make_harness) -> None:
     h = make_harness([], settings={"context": {"history": {"strategy": "full"}}})
     interaction = h.sessions.record_interaction("source for the garage code")

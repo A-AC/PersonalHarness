@@ -114,6 +114,8 @@ class FileConsolidationService:
 
         # Inference first, then deterministic maintenance over the result so a
         # newly extracted memory is re-typed and de-duplicated in the same run.
+        # Re-typing is semantic-only inside MemoryCore.consolidate: procedural,
+        # episodic, and prospective rows keep their type and kind.
         extraction = self._extract(run, run_id, evidence)
         run.results.extend(self._memory.consolidate(run_id, "consolidation"))
         run.report = self._report(run.results, extraction)

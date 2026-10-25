@@ -50,10 +50,10 @@ The v1 scope is deliberately small:
   denied, unavailable, or unknown execution. Unknown outcomes must be reported
   as unknown, and the model is never allowed to ask the user to choose internal
   schema such as a memory type or scope.
-- **Memory with provenance.** Facts, preferences, decisions, procedures, and
-  lessons in global, self, domain, or project scope, with explicit/inferred
-  source rules, conflict handling, supersession, retraction, usage logging, and
-  consolidation rollback.
+- **Memory with provenance.** Semantic, episodic, procedural, and prospective
+  kinds over facts, preferences, decisions, procedures, and lessons in global,
+  self, domain, or project scope, with explicit/inferred source rules, conflict
+  handling, supersession, retraction, usage logging, and consolidation rollback.
 - **Domains, projects, and workspaces.** Structure is created only by an
   explicit user command or confirmation; the model may only suggest.
 - **Budgeted context and full traces.** Each model call records the context
@@ -766,7 +766,14 @@ Important invariants:
 
 ## Memory
 
-Memory types are `fact`, `preference`, `decision`, `procedure`, and `lesson`.
+Memory records have a `type` (`fact`, `preference`, `decision`, `procedure`,
+`lesson`) and an orthogonal `kind`: `semantic`, `episodic`, `procedural`, or
+`prospective`. For semantic-kind records, `type` is the semantic subtype. The
+harness derives the kind from the assigned type (`procedure`/`lesson` ->
+`procedural`; `fact`/`preference`/`decision` -> `semantic`) unless a valid
+`kind_hint` is supplied. `procedure` and `lesson` remain valid types for legacy
+rows, and records written before `kind` existed derive it on load, so old data
+needs no migration.
 Scopes are `global`, `self`, `domain:<id>`, and `project:<id>`. `remember` only
 requires `content`. The harness derives `type` with a configurable keyword
 classifier and `scope` from the task's project/domain (or `global`). The model's
@@ -777,14 +784,19 @@ user fact cannot be hidden from normal retrieval.
 
 Records keep harness-filled provenance and a three-state lifecycle: `active`,
 `superseded`, `retracted`. A newer explicit statement that conflicts with an
-older one supersedes it and the response names the replaced memory. Corrections
-supersede rather than delete. Usage is logged with task and trace ids.
+older one of the same kind supersedes it and the response names the replaced
+memory. Corrections supersede rather than delete. Duplicate detection, conflict
+supersession, explicit supersedes, and consolidation merges all require the same
+kind, so a procedural lesson cannot silently replace a semantic fact. Usage is
+logged with task and trace ids.
 
 Consolidation runs off the hot path (UI button or optional schedule). It first
 extracts inferred memories from recent conversation with verified source refs,
-then re-types, merges duplicates/near-duplicates, and resolves conflicts by
-recency. A run stores an input snapshot and a report of what was added, merged,
-and superseded; it can be rolled back as a whole (and inferred rows individually).
+then re-types only semantic-kind records, merges duplicates/near-duplicates, and
+resolves conflicts by recency. Procedural, episodic, and prospective records
+keep their type and kind. A run stores an input snapshot and a report of what was
+added, merged, and superseded; it can be rolled back as a whole (and inferred
+rows individually).
 
 ## Capabilities
 

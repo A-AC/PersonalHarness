@@ -147,6 +147,34 @@ def test_consolidation_queues_persona_and_domain_proposals(make_harness) -> None
     assert h.domains.find_domain_by_name("homelab") is None
 
 
+def test_consolidation_never_changes_a_procedural_kind(make_harness) -> None:
+    h = make_harness([])
+    source = h.sessions.record_interaction("Always verify backups before upgrading")
+    record = h.memory.submit(
+        MemoryCandidate(
+            content="The NAS is at 192.168.1.10",
+            type_hint="fact",
+            kind_hint="procedural",
+            default_scope="global",
+            provenance={
+                "source_kind": "user_statement",
+                "source_refs": [source.id],
+                "evidence_status": "stated",
+            },
+        )
+    ).record
+    assert record is not None
+    h.memory.set_type(record.id, "lesson", "test")
+    h.model.push({"proposals": [], "findings": []})
+
+    run = h.consolidation.run(trigger="test")
+    retyped = [item for item in run.results if item["kind"] == "retype" and item["memory_id"] == record.id]
+    assert retyped == []
+    current = h.memory.get(record.id)
+    assert current.kind == "procedural"
+    assert current.type == "lesson"
+
+
 def test_rollback_undoes_added_merged_and_retyped_changes(make_harness) -> None:
     h = make_harness([])
     source = h.sessions.record_interaction("The NAS is at 192.168.1.10")
