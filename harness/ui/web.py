@@ -46,22 +46,33 @@ input{background:#1b1b1b;color:#eee}
 .env{padding:1px 5px;border:1px solid #555;border-radius:3px}
 .env.ok{border-color:#484}
 .env.err{border-color:#844;color:#f66}
-#live-stages{max-height:16em;overflow:auto}
-#live-tokens{max-height:16em}
+body.chat-page{height:100vh;overflow:hidden;display:flex;flex-direction:column}
+body.chat-page nav{flex:0 0 auto}
+body.chat-page main{flex:1 1 auto;min-height:0;max-width:none;padding:0;overflow:hidden;display:flex;width:100%}
+.chat-panel{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;width:100%;max-width:1200px;margin:0 auto;padding:12px 16px 0;box-sizing:border-box}
+.chat-head{flex:0 0 auto}
+.chat-head h1{margin:0 0 4px}
+#chat-log{flex:1 1 auto;min-height:0;overflow-y:auto;padding:4px 8px 4px 0}
+#live{flex:0 0 auto;max-height:32vh;overflow:auto;border-top:1px solid #333;padding:6px 0}
+#live summary{cursor:pointer;color:#9cf}
+#live-stages{max-height:12em;overflow:auto}
+#live-tokens{max-height:12em;overflow:auto;margin:0}
+#chat-composer{flex:0 0 auto;padding:8px 0 12px;border-top:1px solid #333}
+#chat-text{resize:none;max-height:12em;overflow-y:auto;box-sizing:border-box}
 </style></head>
-<body>
+<body{% if body_class %} class="{{ body_class }}"{% endif %}>
 <nav>
 <a href="/chat">chat</a><a href="/">traces</a><a href="/memory">memory</a><a href="/persona">persona</a>
 <a href="/tasks">tasks</a><a href="/domains">domains</a><a href="/history">history</a><a href="/capabilities">capabilities</a>
 <a href="/consolidation">consolidation</a><a href="/settings">settings</a>
 <a href="/events">events</a><a href="/learning">learning</a><a href="/reset">reset</a>
 </nav>
-<main>{{ body|safe }}</main></body></html>"""
+<main{% if main_class %} class="{{ main_class }}"{% endif %}>{{ body|safe }}</main></body></html>"""
 )
 
 
-def _page(body: str) -> HTMLResponse:
-    return HTMLResponse(LAYOUT.render(body=body))
+def _page(body: str, *, body_class: str = "", main_class: str = "") -> HTMLResponse:
+    return HTMLResponse(LAYOUT.render(body=body, body_class=body_class, main_class=main_class))
 
 
 _CHAT_JS = """
@@ -70,6 +81,7 @@ _CHAT_JS = """
   var form = document.getElementById('chat-form');
   var input = document.getElementById('chat-text');
   var send = document.getElementById('chat-send');
+  var log = document.getElementById('chat-log');
   var live = document.getElementById('live');
   var status = document.getElementById('live-status');
   var stages = document.getElementById('live-stages');
@@ -94,6 +106,11 @@ _CHAT_JS = """
     'error': 'error'
   };
   function label(name) { return labels[name] || name; }
+  function scrollLog() { log.scrollTop = log.scrollHeight; }
+  function growInput() {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 192) + 'px';
+  }
   function addStage(data) {
     if (data.running) {
       status.textContent = 'running: ' + label(data.stage);
@@ -112,7 +129,23 @@ _CHAT_JS = """
   function fail(message) {
     status.textContent = 'failed';
     error.textContent = 'Turn failed: ' + message;
+    live.open = true;
     send.disabled = false;
+  }
+  function appendInteraction(interactionId) {
+    return fetch('/chat/interactions/' + encodeURIComponent(interactionId), {
+      headers: {'accept': 'text/html'}
+    }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.text();
+    }).then(function (html) {
+      var empty = log.querySelector('[data-empty]');
+      if (empty) empty.parentNode.removeChild(empty);
+      var holder = document.createElement('div');
+      holder.innerHTML = html;
+      while (holder.firstChild) log.appendChild(holder.firstChild);
+      scrollLog();
+    });
   }
   form.addEventListener('submit', function (event) {
     event.preventDefault();
@@ -120,6 +153,7 @@ _CHAT_JS = """
     if (!text) return;
     send.disabled = true;
     live.hidden = false;
+    live.open = true;
     status.textContent = 'starting...';
     stages.textContent = '';
     tokens.textContent = '';
@@ -149,17 +183,26 @@ _CHAT_JS = """
         tokens.textContent += data.text;
         tokens.scrollTop = tokens.scrollHeight;
       });
-      source.addEventListener('turn.completed', function () {
+      source.addEventListener('turn.completed', function (event) {
         source.close();
-        status.textContent = 'complete; reloading...';
-        window.location.reload();
+        var data = JSON.parse(event.data);
+        status.textContent = 'complete';
+        send.disabled = false;
+        input.value = '';
+        growInput();
+        if (!data.interaction_id) return;
+        appendInteraction(data.interaction_id).catch(function (err) {
+          status.textContent = 'complete; could not append reply: ' + (err.message || err);
+        });
       });
       source.addEventListener('turn.failed', function (event) {
         source.close();
         var data = JSON.parse(event.data);
         fail(data.error || 'unknown error');
         if (data.interaction_id) {
-          window.location.reload();
+          appendInteraction(data.interaction_id).catch(function (err) {
+            error.textContent += ' (could not append turn: ' + (err.message || err) + ')';
+          });
         }
       });
       source.onerror = function () {
@@ -171,6 +214,9 @@ _CHAT_JS = """
       };
     }).catch(function (err) { fail(err.message || String(err)); });
   });
+  input.addEventListener('input', growInput);
+  growInput();
+  scrollLog();
 })();
 </script>
 """
@@ -472,7 +518,7 @@ def create_app(harness: Harness) -> Starlette:
             _render_interaction(item, details[item.id]) for item in items
         )
         if not blocks:
-            blocks = "<p class='muted'>No messages yet.</p>"
+            blocks = "<p class='muted' data-empty>No messages yet.</p>"
         focus_note = (
             f"<p><a href='/chat'>show recent only</a> · focused on {_esc(focus)}</p>"
             if focus
@@ -480,19 +526,31 @@ def create_app(harness: Harness) -> Starlette:
         )
         stream_tokens = bool(harness.settings.get("ui.chat_stream_tokens"))
         return _page(
-            "<h1>Chat</h1>"
+            "<div class='chat-panel'>"
+            "<div class='chat-head'><h1>Chat</h1>"
             "<p class='muted'>One turn service shared with <code>harness turn</code>. "
             "Stage progress and raw model tokens stream while the turn runs.</p>"
-            f"{focus_note}<div id='chat-log'>{blocks}</div>"
-            "<div id='live' hidden><h2>Live turn</h2>"
-            "<p id='live-status' class='muted'>starting...</p>"
+            f"{focus_note}</div>"
+            f"<div id='chat-log'>{blocks}</div>"
+            "<details id='live' hidden><summary>Live turn · "
+            "<span id='live-status' class='muted'>starting...</span></summary>"
             "<ol id='live-stages'></ol><h3>Raw model stream</h3>"
-            "<pre id='live-tokens'></pre><p id='live-error' class='err'></p></div>"
-            "<h2>Send</h2><form id='chat-form'>"
+            "<pre id='live-tokens'></pre><p id='live-error' class='err'></p></details>"
+            "<div id='chat-composer'><form id='chat-form'>"
             "<textarea id='chat-text' placeholder='message'></textarea>"
-            "<p><button id='chat-send'>send</button></p></form>"
-            + _CHAT_JS.replace("__STREAM_TOKENS__", "true" if stream_tokens else "false")
+            "<p><button id='chat-send'>send</button></p></form></div></div>"
+            + _CHAT_JS.replace("__STREAM_TOKENS__", "true" if stream_tokens else "false"),
+            body_class="chat-page",
+            main_class="chat-main",
         )
+
+    async def chat_interaction(request: Request) -> Response:
+        interaction_id = request.path_params["interaction_id"]
+        item = harness.sessions.get_interaction(interaction_id)
+        if item is None:
+            return _error_page("interaction not found", 404)
+        detail = harness.chat.detail(interaction_id)
+        return HTMLResponse(_render_interaction(item, detail))
 
     async def chat_turn(request: Request) -> JSONResponse:
         form = _form(await request.body())
@@ -1008,6 +1066,7 @@ def create_app(harness: Harness) -> Starlette:
     routes = [
         Route("/health", health),
         Route("/chat", chat),
+        Route("/chat/interactions/{interaction_id}", chat_interaction),
         Route("/chat/turn", chat_turn, methods=["POST"]),
         Route("/chat/turns/{job_id}/events", chat_events),
         Route("/chat/memory/undo", chat_memory_undo, methods=["POST"]),

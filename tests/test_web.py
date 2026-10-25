@@ -150,6 +150,80 @@ def test_chat_page_renders_messages_and_trace_links(make_harness) -> None:
     assert f'id="msg-{result.interaction_id}"' in response.text
 
 
+def test_chat_page_is_a_scrollable_panel_with_the_composer_inside(make_harness) -> None:
+    h = make_harness([plan("hello"), respond("Hello from chat.")])
+    h.chat.submit("hello")
+
+    response = _request(h, "GET", "/chat")
+    assert response.status_code == 200
+    page = response.text
+    assert '<body class="chat-page">' in page
+    assert "class='chat-panel'" in page
+    panel = page.split("class='chat-panel'", 1)[1]
+    log_at = panel.index("id='chat-log'")
+    live_at = panel.index("id='live'")
+    composer_at = panel.index("id='chat-composer'")
+    assert log_at < live_at < composer_at
+    assert "id='chat-form'" in panel[composer_at:]
+    assert "#chat-log{flex:1 1 auto;min-height:0;overflow-y:auto" in page
+    assert "#chat-text{resize:none;max-height:12em;overflow-y:auto" in page
+    assert "#live-stages{max-height:12em;overflow:auto}" in page
+    assert "#live-tokens{max-height:12em;overflow:auto" in page
+    assert page.count("scrollLog();") >= 2
+
+
+def test_non_chat_pages_keep_the_normal_document_flow(make_harness) -> None:
+    h = make_harness([])
+    response = _request(h, "GET", "/memory")
+    assert response.status_code == 200
+    assert 'class="chat-page"' not in response.text
+    assert "class='chat-panel'" not in response.text
+
+
+def test_chat_completed_turn_appends_without_reloading_the_document(make_harness) -> None:
+    h = make_harness([plan("hello"), respond("Hello appended.")])
+    result = h.chat.submit("hello")
+
+    page = _request(h, "GET", "/chat")
+    assert "window.location.reload" not in page.text
+    assert "'turn.completed'" in page.text
+    assert "/chat/interactions/" in page.text
+
+    fragment = _request(h, "GET", f"/chat/interactions/{result.interaction_id}")
+    assert fragment.status_code == 200
+    assert f'id="msg-{result.interaction_id}"' in fragment.text
+    assert "Hello appended." in fragment.text
+    assert "/traces/trc_" in fragment.text
+    assert "chat-form" not in fragment.text
+    assert "<html" not in fragment.text
+
+
+def test_chat_interaction_fragment_preserves_memory_undo(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("remember bluefin"),
+            act("harness_memory", "remember", content="the code word is bluefin"),
+            respond("Noted."),
+        ]
+    )
+    result = h.chat.submit("remember bluefin")
+    record = h.memory.list()[0]
+
+    fragment = _request(h, "GET", f"/chat/interactions/{result.interaction_id}")
+    assert fragment.status_code == 200
+    assert "memory writes" in fragment.text
+    assert 'action="/chat/memory/undo"' in fragment.text
+    assert f'value="{record.id}"' in fragment.text
+    assert ">undo<" in fragment.text
+
+
+def test_missing_chat_interaction_fragment_returns_404(make_harness) -> None:
+    h = make_harness([])
+    response = _request(h, "GET", "/chat/interactions/int_missing")
+    assert response.status_code == 404
+    assert "interaction not found" in response.text
+
+
 def test_chat_turn_rejects_empty_text(make_harness) -> None:
     h = make_harness([])
     response = _request(h, "POST", "/chat/turn", "text=")
