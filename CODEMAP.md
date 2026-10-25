@@ -88,7 +88,7 @@ It has no concrete imports.
 | `harness/model/openai_http.py` | OpenAI-compatible HTTP adapter and health probe |
 | `harness/measure.py` | Learning report from stored events/tasks/memories/usage |
 | `harness/eval.py` | Isolated live eval, deterministic checks, long-history real-use and time-awareness scenarios, scripted honesty cases, p50/p95, malformed-output, prompt-token, and token metrics |
-| `harness/ui/web.py` | Authenticated server-rendered inspection/control UI (chat panel, memory actions, on-demand/scheduled consolidation, stored conversation history, turn timeline, execution envelope, confirm-gated reset); chat streams stage/token events over SSE and links messages to traces and back; malformed control requests return 4xx with a message |
+| `harness/ui/web.py` | Authenticated server-rendered inspection/control UI (viewport-sized chat panel with a scrollable log, collapsible live strip, and composer pinned to the panel bottom; completed turns are appended from server-rendered fragments over SSE without reloading, memory actions, on-demand/scheduled consolidation, stored conversation history, turn timeline, execution envelope, confirm-gated reset); chat streams stage/token events over SSE and links messages to traces and back; malformed control requests return 4xx with a message |
 
 ## Turn data flow
 
@@ -129,7 +129,9 @@ completion/start markers, raw `token` deltas, and a final
 uses one SSE channel per turn job backed by this listener; the terminal calls
 the same `submit` without a listener. Completed payloads carry trace ids,
 execution envelopes, retrieved memory ids, and memory writes (with undo ids).
-The chat page resolves all visible details with one recent trace scan
+The chat page appends the completed turn by fetching its server-rendered
+fragment (`/chat/interactions/<id>`) instead of reloading the document. The
+chat page resolves all visible details with one recent trace scan
 (`detail_many`) and scans per message only for older focused links.
 
 Every model trace records `duration_ms`, `time_to_first_token_ms`,

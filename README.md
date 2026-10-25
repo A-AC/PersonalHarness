@@ -62,8 +62,9 @@ The v1 scope is deliberately small:
   tokens, and whether thinking occurred. Each turn also stores a stage timeline
   (prompt build, model calls, parse/validation, execution, response).
 - **Inspectable UI and files.** A small authenticated server-rendered UI exposes
-  tasks, traces, memory, settings, and consolidation state without a separate
-  database.
+  a viewport-sized chat panel (scrollable log, collapsible live progress strip,
+  composer pinned to the bottom) plus tasks, traces, memory, settings, and
+  consolidation state without a separate database.
 - **Deterministic tests and a live eval tier.** Behavior tests use a scripted
   adapter; the live eval runs real scenarios with deterministic checks,
   long-history real-use cases (remembering a name/NAS, ambiguous replies,
