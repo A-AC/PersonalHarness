@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from harness.contracts.memory import MemoryCandidate
@@ -10,10 +12,11 @@ def remember(harness, content: str, *, scope: str = "global", type: str = "fact"
     interaction = harness.sessions.record_interaction(f"source for {content}")
     return harness.memory.submit(
         MemoryCandidate(
-            type=type,
             content=content,
-            scope=scope,
             origin="explicit",
+            type_hint=type,
+            scope_hint=scope,
+            default_scope=scope,
             provenance={
                 "source_kind": "user_statement",
                 "source_refs": [interaction.id],
@@ -53,6 +56,36 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
     assert "suggest_domain (read)" in prompt
     assert "required: name" in prompt
     assert "prose-only suggestion is not recorded" in prompt
+    # Enum values come from the real enums, and optional hints are marked.
+    assert "type:string (one of fact|preference|decision|procedure|lesson) [optional]" in prompt
+    assert "scope:string (one of global|self|domain:<id>|project:<id>) [optional]" in prompt
+    assert "content:string" in prompt
+    assert "Current time:" in prompt
+
+
+def test_old_memory_carries_age_marker(make_harness) -> None:
+    h = make_harness([], settings={"context": {"history": {"strategy": "full"}}})
+    interaction = h.sessions.record_interaction("source for the garage code")
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    record = h.memory.submit(
+        MemoryCandidate(
+            content="The garage door code is 4411",
+            origin="explicit",
+            type_hint="fact",
+            scope_hint="global",
+            default_scope="global",
+            provenance={
+                "source_kind": "user_statement",
+                "source_refs": [interaction.id],
+                "evidence_status": "stated",
+            },
+            updated_at=old,
+        )
+    ).record
+    task = h.tasks.create(TaskSpec(goal="what is the garage door code"))
+    prompt = h.context.build(task, h.sessions.current(), trace_id="trc_memory_age").messages[0].content
+    assert record.content in prompt
+    assert 'age="10 days"' in prompt
 
 
 def test_resumed_task_uses_latest_user_reply(make_harness) -> None:
@@ -82,7 +115,7 @@ def test_self_scope_loads_only_on_demand(make_harness) -> None:
     h = make_harness([])
     record = remember(
         h,
-        "The assistant remembers a concise style for itself",
+        "The assistant prefers a concise style for itself",
         scope="self",
         type="preference",
     )
@@ -139,6 +172,23 @@ def test_base_instruction_overflow_is_not_silently_truncated(make_harness) -> No
     task = h.tasks.create(TaskSpec(goal="hello"))
     with pytest.raises(ValueError, match="base_instructions"):
         h.context.build(task, h.sessions.current(), trace_id="trc_overflow")
+
+
+def test_trimmed_prompt_variant_is_selected_by_setting(make_harness) -> None:
+    h = make_harness([], settings={"context": {"prompt_variant": "trimmed"}})
+    task = h.tasks.create(TaskSpec(goal="hello"))
+    prompt = h.context.build(task, h.sessions.current(), trace_id="trc_trimmed").messages[0].content
+    assert "ask only for information from the user's world" in prompt
+    assert "Decision order:" not in prompt
+    assert "Never ask the user to choose internal details" in prompt
+
+
+def test_enum_disclosure_can_be_disabled_for_the_experiment(make_harness) -> None:
+    h = make_harness([], settings={"capabilities": {"disclose_enum_values": False}})
+    task = h.tasks.create(TaskSpec(goal="hello"))
+    prompt = h.context.build(task, h.sessions.current(), trace_id="trc_no_enum").messages[0].content
+    assert "one of fact|preference" not in prompt
+    assert "type:string" in prompt
 
 
 def test_default_capability_setting_controls_disclosure(make_harness) -> None:

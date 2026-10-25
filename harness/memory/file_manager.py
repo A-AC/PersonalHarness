@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+import shutil
 
+from harness.constants import CONVERSATION_REF_PREFIXES
 from harness.contracts.events import EventLog
-from harness.contracts.memory import MemoryCandidate, MemoryRecord, RankedMemory, SubmitResult, UsageEntry
+from harness.contracts.memory import MemoryCandidate, MemoryClassifier, MemoryRecord, RankedMemory, SubmitResult, UsageEntry
 from harness.contracts.settings import SettingsService
 from harness.contracts.sources import SourceResolver
 from harness.memory.core import MemoryCore
@@ -12,7 +14,15 @@ from harness.storage.atomic import append_jsonl, atomic_write_json, read_json, r
 
 
 class FileMemoryManager:
-    def __init__(self, directory: Path, settings: SettingsService, events: EventLog, sources: SourceResolver, scope_check):
+    def __init__(
+        self,
+        directory: Path,
+        settings: SettingsService,
+        events: EventLog,
+        sources: SourceResolver,
+        scope_check,
+        classifier: MemoryClassifier | None = None,
+    ):
         self._dir = directory
         self._records = directory / "records"
         self._usage_path = directory / "usage.jsonl"
@@ -28,6 +38,7 @@ class FileMemoryManager:
             usage_put=self._usage_put,
             usage_all=self._usage_all,
             scopes=scope_check,
+            classifier=classifier,
         )
 
     def _rw(self) -> tuple[int, float]:
@@ -68,11 +79,14 @@ class FileMemoryManager:
     def retract(self, memory_id: str, actor: str) -> MemoryRecord:
         return self._core.retract(memory_id, actor)
 
-    def approve(self, memory_id: str, actor: str) -> MemoryRecord:
-        return self._core.approve(memory_id, actor)
+    def set_type(self, memory_id: str, type: str, actor: str) -> MemoryRecord:
+        return self._core.set_type(memory_id, type, actor)
 
-    def reject(self, memory_id: str, actor: str) -> MemoryRecord:
-        return self._core.reject(memory_id, actor)
+    def restore(self, memory_id: str, actor: str) -> MemoryRecord:
+        return self._core.restore(memory_id, actor)
+
+    def consolidate(self, run_id: str, actor: str) -> list[dict]:
+        return self._core.consolidate(run_id, actor)
 
     def record_usage(self, entries: list[UsageEntry]) -> None:
         self._core.record_usage(entries)
@@ -88,3 +102,29 @@ class FileMemoryManager:
 
     def rollback_run(self, run_id: str, actor: str) -> list[str]:
         return self._core.rollback_run(run_id, actor)
+
+    def reset(self, *, keep_records: bool = False) -> None:
+        """Clear the store, or only conversation-derived usage/references."""
+        if not keep_records:
+            shutil.rmtree(self._records, ignore_errors=True)
+        self._records.mkdir(parents=True, exist_ok=True)
+        self._usage_path.unlink(missing_ok=True)
+        if keep_records:
+            self._strip_conversation_refs()
+
+    def _strip_conversation_refs(self) -> None:
+        retries, retry_s = self._rw()
+        for path in self._records.glob("mem_*.json"):
+            data = read_json(path)
+            provenance = data.get("provenance") or {}
+            refs = [str(item) for item in provenance.get("source_refs") or []]
+            kept = [item for item in refs if not item.startswith(CONVERSATION_REF_PREFIXES)]
+            if kept == refs:
+                continue
+            dropped = sorted(set(refs) - set(kept))
+            provenance["source_refs"] = kept
+            provenance["reset_cleared_refs"] = sorted(
+                set(provenance.get("reset_cleared_refs") or []) | set(dropped)
+            )
+            data["provenance"] = provenance
+            atomic_write_json(path, data, retries=retries, retry_s=retry_s)

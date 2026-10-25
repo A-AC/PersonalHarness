@@ -15,6 +15,7 @@ class ConsolidationRun:
     proposals: list[dict[str, Any]] = field(default_factory=list)
     results: list[dict[str, Any]] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
+    report: dict[str, Any] = field(default_factory=dict)
     rolled_back: bool = False
 
 

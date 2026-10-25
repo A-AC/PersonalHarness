@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 class ModelError(RuntimeError):
@@ -39,6 +39,7 @@ class ModelAdapter(Protocol):
         messages: list[Message],
         *,
         schema: dict[str, Any] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> ModelResult: ...
 
     def health(self, role: str) -> bool: ...

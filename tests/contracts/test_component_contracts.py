@@ -12,18 +12,20 @@ from harness.contracts import (
     DomainRegistry,
     EventLog,
     InteractionLoop,
+    HistoryService,
     MemoryManager,
     SelfProfile,
     SessionManager,
     SettingsService,
     TaskManager,
     TraceStore,
+    ResetService,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "harness"
-SHARED = {"contracts", "constants", "storage", "text", "prompts"}
+SHARED = {"contracts", "constants", "storage", "text", "timefmt", "prompts"}
 
 
 def harness_imports(path: Path) -> list[str]:
@@ -70,6 +72,7 @@ def test_composition_root_satisfies_protocols(harness: Harness) -> None:
         (DomainRegistry, harness.domains),
         (TaskManager, harness.tasks),
         (SessionManager, harness.sessions),
+        (HistoryService, harness.history),
         (EventLog, harness.events),
         (TraceStore, harness.traces),
         (SelfProfile, harness.profile),
@@ -77,6 +80,7 @@ def test_composition_root_satisfies_protocols(harness: Harness) -> None:
         (ContextBuilder, harness.context),
         (InteractionLoop, harness.loop),
         (ConsolidationService, harness.consolidation),
+        (ResetService, harness.reset),
     ]
     for protocol, instance in bindings:
         for name, member in inspect.getmembers(protocol):

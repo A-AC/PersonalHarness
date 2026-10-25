@@ -22,6 +22,7 @@ class ScriptedAdapter:
         messages: list[Message],
         *,
         schema: dict[str, Any] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> ModelResult:
         if not self._script:
             raise ModelUnavailable("scripted adapter exhausted")
@@ -34,6 +35,8 @@ class ScriptedAdapter:
             content = json.dumps(item, ensure_ascii=False)
         else:
             content = str(item)
+        if on_delta is not None:
+            on_delta(content)
         return ModelResult(
             content=content,
             latency_ms=1,

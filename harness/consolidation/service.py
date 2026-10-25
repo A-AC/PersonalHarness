@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import threading
+from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from harness.constants import MemoryOrigin, SourceKind
+from harness.constants import MemoryOrigin
 from harness.contracts.consolidation import ConsolidationRun
 from harness.contracts.domains import DomainRegistry, StructureDraft
 from harness.contracts.events import Event, EventLog
@@ -25,11 +28,10 @@ CONSOLIDATION_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string"},
-                    "type": {"type": "string"},
                     "content": {"type": "string"},
-                    "scope": {"type": "string"},
                     "source_refs": {"type": "array", "items": {"type": "string"}},
-                    "source_kind": {"type": "string"},
+                    "scope": {"type": ["string", "null"]},
+                    "type": {"type": ["string", "null"]},
                     "supersedes": {"type": ["string", "null"]},
                     "confidence": {"type": "number"},
                     "name": {"type": "string"},
@@ -49,12 +51,16 @@ CONSOLIDATION_SCHEMA = {
 
 
 INSTRUCTIONS = """
-Read the evidence and propose memory updates. Return JSON:
-{"proposals":[...],"findings":[{"message":"..."}]}
-Proposal kinds: new_memory, merge, confidence, persona_edit, domain_suggestion.
-Never restate a rule already enforced by a capability manifest or schema; those are findings.
-Lessons from execution must cite operation_ids in source_refs and use source_kind execution_outcome.
-Keep observed error text out of the lesson interpretation.
+Read the recent conversation and propose durable memories worth keeping.
+Return JSON: {"proposals":[...],"findings":[{"message":"..."}]}.
+Each memory proposal is {"kind":"new_memory","content":"clear standalone statement",
+"source_refs":["int_..."],"confidence":0.0}.
+Copy source_refs from the interaction ids in the evidence; the harness verifies them.
+Only propose stable facts, preferences, decisions, procedures, or lessons that will
+still be useful later. Do not restate an existing active memory, and do not propose
+temporary state, greetings, or the assistant's own text. Type and scope are optional
+hints; never ask the user to choose them. Do not restate a capability rule or schema
+as a memory; return those as findings.
 """
 
 
@@ -78,9 +84,20 @@ class FileConsolidationService:
         self._events = events
         self._profile = profile
         self._domains = domains
+        self._lock = threading.RLock()
         directory.mkdir(parents=True, exist_ok=True)
 
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Wait for an in-flight run before reset wipes memory/run state."""
+        with self._lock:
+            yield
+
     def run(self, *, trigger: str) -> ConsolidationRun:
+        with self._lock:
+            return self._run_locked(trigger=trigger)
+
+    def _run_locked(self, *, trigger: str) -> ConsolidationRun:
         run_id = new_id("run")
         started = now_ts()
         run = ConsolidationRun(
@@ -92,14 +109,41 @@ class FileConsolidationService:
             input_snapshot_ref=f"{run_id}.input.json",
         )
         self._save(run)
-        if not self._model.health("background"):
-            run.status = "failed"
-            run.ended_at = now_ts()
-            run.findings.append({"message": "background model unavailable"})
-            self._save(run)
-            return run
         evidence = self._evidence()
         self._save_snapshot(run, evidence)
+
+        # Inference first, then deterministic maintenance over the result so a
+        # newly extracted memory is re-typed and de-duplicated in the same run.
+        extraction = self._extract(run, run_id, evidence)
+        run.results.extend(self._memory.consolidate(run_id, "consolidation"))
+        run.report = self._report(run.results, extraction)
+        run.status = "completed"
+        run.ended_at = now_ts()
+        self._save(run)
+        self._events.append(
+            Event(
+                id=new_id("evt"),
+                ts=run.ended_at,
+                actor="consolidation",
+                operation="consolidation.run",
+                target=run.id,
+                result=run.status,
+                data=run.report,
+            )
+        )
+        return run
+
+    def _extract(self, run: ConsolidationRun, run_id: str, evidence: str) -> str:
+        if not bool(self._settings.get("consolidation.extract_enabled")):
+            run.findings.append({"message": "inference extraction disabled"})
+            return "disabled"
+        if not self._model.health("background"):
+            run.findings.append({"message": "background model unavailable; deterministic maintenance only"})
+            return "unavailable"
+        interactions = self._sessions.list_interactions(limit=int(self._settings.get("consolidation.evidence_interactions")))
+        if not interactions:
+            run.findings.append({"message": "no recent interactions to extract from"})
+            return "no_evidence"
         try:
             result = self._model.complete(
                 "background",
@@ -107,29 +151,21 @@ class FileConsolidationService:
                 schema=CONSOLIDATION_SCHEMA,
             )
         except ModelUnavailable as exc:
-            run.status = "failed"
-            run.ended_at = now_ts()
             run.findings.append({"message": str(exc)})
-            self._save(run)
-            return run
+            return "unavailable"
         payload = self._parse(result.content)
-        run.proposals = [item for item in (payload.get("proposals") or []) if isinstance(item, dict)]
+        proposals = [item for item in (payload.get("proposals") or []) if isinstance(item, dict)]
+        run.proposals = proposals
         run.findings.extend(item for item in (payload.get("findings") or []) if isinstance(item, dict))
         limit = int(self._settings.get("consolidation.max_proposals"))
-        for proposal in run.proposals[:limit]:
-            run.results.append(self._apply(run_id, proposal))
-        for proposal in run.proposals[limit:]:
+        for proposal in proposals[:limit]:
+            run.results.append(self._apply(run_id, proposal, interactions))
+        for proposal in proposals[limit:]:
             run.results.append({"kind": str(proposal.get("kind") or ""), "status": "skipped_limit"})
-        run.status = "completed"
-        run.ended_at = now_ts()
-        self._save(run)
-        self._events.append(
-            Event(id=new_id("evt"), ts=run.ended_at, actor="consolidation", operation="consolidation.run", target=run.id, result=run.status)
-        )
         self._events.append(
             Event(
                 id=new_id("evt"),
-                ts=run.ended_at,
+                ts=now_ts(),
                 actor="model",
                 operation="model.call",
                 target=run_id,
@@ -138,7 +174,7 @@ class FileConsolidationService:
                 data={"role": "background", "latency_ms": result.latency_ms, "tokens": result.completion_tokens},
             )
         )
-        return run
+        return "applied"
 
     def get(self, run_id: str) -> ConsolidationRun:
         return ConsolidationRun(**read_json(self._dir / f"{run_id}.json"))
@@ -151,6 +187,18 @@ class FileConsolidationService:
         run = self.get(run_id)
         self._memory.rollback_run(run_id, actor)
         for result in run.results:
+            if result.get("kind") == "retype" and result.get("memory_id") and result.get("from"):
+                try:
+                    self._memory.set_type(str(result["memory_id"]), str(result["from"]), actor)
+                except (KeyError, ValueError):
+                    pass
+            if result.get("kind") in {"merged", "superseded"} and result.get("loser_id"):
+                try:
+                    loser = self._memory.get(str(result["loser_id"]))
+                    if loser.status != "active":
+                        self._memory.restore(loser.id, actor)
+                except KeyError:
+                    pass
             if result.get("kind") == "persona_edit" and result.get("id"):
                 try:
                     self._profile.reject(str(result["id"]), actor)
@@ -213,11 +261,11 @@ class FileConsolidationService:
             lines.append(f"{item.id} {item.type} {item.origin} {item.content}")
         return "\n".join(lines)
 
-    def _apply(self, run_id: str, proposal: dict[str, Any]) -> dict[str, Any]:
+    def _apply(self, run_id: str, proposal: dict[str, Any], interactions: list[Any]) -> dict[str, Any]:
         kind = str(proposal.get("kind") or "new_memory")
         if kind == "finding" or proposal.get("finding"):
             return {"kind": kind, "status": "finding", "message": proposal.get("finding") or proposal.get("content")}
-        content = str(proposal.get("content") or "")
+        content = str(proposal.get("content") or "").strip()
         if self._structural_finding(content):
             return {"kind": kind, "status": "finding", "message": "structural defect; not stored as memory"}
         if kind == "domain_suggestion":
@@ -240,33 +288,46 @@ class FileConsolidationService:
             item = self._profile.propose_edit(draft, "consolidation")
             return {"kind": kind, "status": "queued", "id": item.id}
         if kind in {"new_memory", "merge", "confidence"}:
-            origin = MemoryOrigin.INFERRED
-            if kind == "confidence":
-                origin = MemoryOrigin.CONSOLIDATED
-            source_kind = str(proposal.get("source_kind") or SourceKind.USER_STATEMENT)
-            refs = list(proposal.get("source_refs") or [])
+            if not content:
+                return {"kind": kind, "status": "rejected", "reason": "empty content"}
+            valid = {item.id for item in interactions}
+            refs = [str(item) for item in (proposal.get("source_refs") or []) if str(item) in valid]
+            if not refs and interactions:
+                refs = [interactions[-1].id]
+            if not refs:
+                return {"kind": kind, "status": "rejected", "reason": "no source interaction"}
+            origin = MemoryOrigin.CONSOLIDATED if kind == "confidence" else MemoryOrigin.INFERRED
             submitted = self._memory.submit(
                 MemoryCandidate(
-                    type=str(proposal.get("type") or "fact"),
                     content=content,
-                    scope=str(proposal.get("scope") or "global"),
                     origin=origin,
+                    type_hint=proposal.get("type"),
+                    scope_hint=proposal.get("scope"),
+                    default_scope=str(self._settings.get("memory.default_scope")),
                     provenance={
-                        "source_kind": source_kind,
+                        "source_kind": "user_statement",
                         "source_refs": refs,
                         "evidence_status": "inferred",
                         "confidence": proposal.get("confidence"),
-                        "structured_fields": proposal.get("structured_fields") or {},
                     },
                     supersedes=proposal.get("supersedes"),
                     run_id=run_id,
                 )
             )
+            status = "committed" if submitted.accepted else "rejected"
+            if submitted.duplicate:
+                status = "duplicate"
+            elif submitted.replaced:
+                status = "superseded"
             return {
                 "kind": kind,
-                "status": "queued" if submitted.queued else ("committed" if submitted.accepted else "rejected"),
+                "status": status,
                 "reason": submitted.reason,
+                "content": content,
                 "memory_id": submitted.record.id if submitted.record else None,
+                "winner_id": submitted.record.id if submitted.record else None,
+                "loser_id": submitted.replaced[0].id if submitted.replaced else proposal.get("supersedes"),
+                "hint_notes": submitted.hint_notes,
             }
         return {"kind": kind, "status": "ignored"}
 
@@ -274,3 +335,34 @@ class FileConsolidationService:
         text = content.lower()
         needles = ("required argument", "missing required", "manifest already", "schema already", "validation gap")
         return any(item in text for item in needles)
+
+    def _report(self, results: list[dict[str, Any]], extraction: str) -> dict[str, Any]:
+        added = [
+            {"memory_id": item.get("memory_id"), "content": item.get("content"), "kind": item.get("kind")}
+            for item in results
+            if item.get("status") == "committed" and item.get("memory_id")
+        ]
+        merged = [
+            {"winner_id": item.get("winner_id"), "loser_id": item.get("loser_id")}
+            for item in results
+            if item.get("kind") == "merged"
+        ]
+        superseded = [
+            {"winner_id": item.get("winner_id"), "loser_id": item.get("loser_id"), "memory_id": item.get("memory_id")}
+            for item in results
+            if item.get("kind") == "superseded" or item.get("status") == "superseded"
+        ]
+        retyped = [
+            {"memory_id": item.get("memory_id"), "from": item.get("from"), "to": item.get("to")}
+            for item in results
+            if item.get("kind") == "retype"
+        ]
+        counts = Counter(str(item.get("status") or item.get("kind") or "unknown") for item in results)
+        return {
+            "added": added,
+            "merged": merged,
+            "superseded": superseded,
+            "retyped": retyped,
+            "counts": dict(sorted(counts.items())),
+            "extraction": extraction,
+        }

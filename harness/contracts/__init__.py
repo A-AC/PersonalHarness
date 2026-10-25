@@ -1,11 +1,14 @@
 """Replaceable manager contracts. Types and signatures only."""
 
 from harness.contracts.capabilities import CapabilityExecutor, ExecuteRequest, Manifest, OperationSpec
+from harness.contracts.chat import MemoryUse, MemoryWrite, TurnDetail, TurnService
 from harness.contracts.context import ContextPackage, ContextBuilder, ContextSection, InclusionRecord
 from harness.contracts.consolidation import ConsolidationRun, ConsolidationService
 from harness.contracts.domains import Domain, DomainRegistry, Project, StructureDraft, Suggestion, Workspace
 from harness.contracts.events import Event, EventLog
-from harness.contracts.loop import InteractionLoop, TurnResult
+from harness.contracts.history import HistoryNote, HistorySegment, HistoryService, HistoryView
+from harness.contracts.loop import InteractionLoop, TurnEvent, TurnListener, TurnResult
+from harness.contracts.maintenance import RemovedState, ResetReport, ResetService
 from harness.contracts.memory import MemoryCandidate, MemoryManager, MemoryRecord, RankedMemory, SubmitResult, UsageEntry
 from harness.contracts.model import Message, ModelAdapter, ModelResult
 from harness.contracts.profile import Persona, PersonaDraft, PersonaProposal, PersonaVersion, SelfProfile
@@ -41,6 +44,10 @@ __all__ = [
     "EventLog",
     "ExecuteRequest",
     "ExecutionResult",
+    "HistoryNote",
+    "HistorySegment",
+    "HistoryService",
+    "HistoryView",
     "InclusionRecord",
     "Interaction",
     "InteractionLoop",
@@ -48,6 +55,8 @@ __all__ = [
     "MemoryCandidate",
     "MemoryManager",
     "MemoryRecord",
+    "MemoryUse",
+    "MemoryWrite",
     "Message",
     "ModelAdapter",
     "ModelResult",
@@ -59,6 +68,9 @@ __all__ = [
     "Project",
     "Proposal",
     "RankedMemory",
+    "RemovedState",
+    "ResetReport",
+    "ResetService",
     "RespondAction",
     "SelfProfile",
     "Session",
@@ -76,7 +88,11 @@ __all__ = [
     "TaskSpec",
     "Trace",
     "TraceStore",
+    "TurnDetail",
+    "TurnEvent",
+    "TurnListener",
     "TurnResult",
+    "TurnService",
     "UsageEntry",
     "Workspace",
 ]

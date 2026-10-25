@@ -51,6 +51,16 @@ class MemoryType(StrEnum):
     LESSON = "lesson"
 
 
+class MemoryScopeKind(StrEnum):
+    GLOBAL = "global"
+    SELF = "self"
+
+
+# Scoped memory ids are dynamic, so they are disclosed as patterns rather than
+# a closed enum. The capability description and the validator both use these.
+MEMORY_SCOPE_PREFIXES = ("domain", "project")
+
+
 class MemoryOrigin(StrEnum):
     EXPLICIT = "explicit"
     INFERRED = "inferred"
@@ -58,11 +68,9 @@ class MemoryOrigin(StrEnum):
 
 
 class MemoryStatus(StrEnum):
-    PROPOSED = "proposed"
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     RETRACTED = "retracted"
-    REJECTED = "rejected"
 
 
 class SourceKind(StrEnum):
@@ -116,3 +124,8 @@ class Actor(StrEnum):
 
 SELF_DOMAIN_ID = "self"
 SELF_DOMAIN_NAME = "self"
+
+# Source references that point at conversation/execution rows. A
+# conversations-only reset removes those rows, so retained memory provenance
+# drops the ids (and records what was dropped) instead of leaving dangling refs.
+CONVERSATION_REF_PREFIXES = ("int_", "op_", "evt_", "trc_", "tsk_")

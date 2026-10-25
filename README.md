@@ -40,9 +40,16 @@ The v1 scope is deliberately small:
 - **Five-action protocol.** `respond`, `ask`, `act`, `continue`, and `end`.
   Malformed proposals consume a bounded retry budget and end in a visible
   failure, not a silent success.
-- **Validated capabilities.** Registration, availability, operation existence,
-  idempotency, domain enablement, permission policy, argument schema, dispatch,
-  and evidence recording happen in a fixed order.
+- **Validated capabilities with actionable errors.** Registration, availability,
+  operation existence, idempotency, domain enablement, permission policy,
+  argument schema, dispatch, and evidence recording happen in a fixed order.
+  Every bad field is reported at once with the rejected value and allowed
+  values; enum values and defaults are generated from the real operation
+  metadata, and optional arguments are coerced or defaulted instead of gated.
+- **Honest outcomes.** A final response cannot claim success after a failed,
+  denied, unavailable, or unknown execution. Unknown outcomes must be reported
+  as unknown, and the model is never allowed to ask the user to choose internal
+  schema such as a memory type or scope.
 - **Memory with provenance.** Facts, preferences, decisions, procedures, and
   lessons in global, self, domain, or project scope, with explicit/inferred
   source rules, conflict handling, supersession, retraction, usage logging, and
@@ -58,8 +65,10 @@ The v1 scope is deliberately small:
   tasks, traces, memory, settings, and consolidation state without a separate
   database.
 - **Deterministic tests and a live eval tier.** Behavior tests use a scripted
-  adapter; the live eval runs real scenarios with deterministic checks and
-  reports pass rates, latency, and proposal validity.
+  adapter; the live eval runs real scenarios with deterministic checks,
+  long-history real-use cases (remembering a name/NAS, ambiguous replies,
+  resumed asks), scripted failure/unknown honesty cases, and reports pass rates,
+  malformed-output rate, latency, and proposal validity.
 
 ## Architecture at a glance
 
@@ -77,8 +86,8 @@ user text
   -> persisted tasks
   -> next ready task
   -> budgeted context (persona, memory, domain/project, history, capabilities)
-  -> model proposal (respond / ask / act / continue / end)
-  -> validation + permission check
+  -> model proposal (respond / ask / act / continue / end), strict or loose schema
+  -> validation + permission check + internal-schema/honesty guards
   -> capability dispatch -> attempt record + evidence + event
   -> repeat until response, question, completion, or a limit
   -> trace + assistant update + turn result
@@ -605,6 +614,7 @@ python -m harness [--data-dir DIR] COMMAND
 | `consolidate` | Run one background consolidation pass |
 | `measure` | Print the learning report as JSON |
 | `eval` | Run the live deterministic-check eval suite |
+| `reset` | Back up and wipe learned state (`--scope full|memories|conversations`, requires `--yes`) |
 
 Evaluation examples:
 
@@ -615,13 +625,28 @@ python -m harness --data-dir ./data eval --only injection,follow_up --repeats 5
 python -m harness --data-dir ./data eval --compare baseline another-tag
 ```
 
+Reset examples:
+
+```bash
+python -m harness --data-dir ./data reset --scope full --yes
+python -m harness --data-dir ./data reset --scope memories --yes --no-backup
+```
+
+Reset writes `data/backups/reset_<scope>_<timestamp>.zip` first unless the
+`maintenance.reset.backup` setting is off or `--no-backup` is passed. A full
+reset re-applies default settings, the code-defined persona, the reserved
+`self` domain, and a fresh session. The UI exposes the same action at `/reset`
+and requires typing the `maintenance.reset.confirmation_word` value (default
+`RESET`).
+
 Each scenario repeat gets an isolated directory under
 `data/eval/<tag>/<scenario>/repeat_N`. A tag names one run: reusing a tag resets
 each selected scenario's repeat directories before the new run, so stale tasks,
 sessions, memories, and traces cannot contaminate the results. Use a new tag to
 keep the previous run's per-scenario data. The summary is written to
 `data/eval/results/<tag>.json` and includes pass rates by category and scenario,
-proposal validity, capability-call counts, latency, and failure reasons. Checks
+proposal validity, malformed-output rate, honesty rejections, capability-call
+counts, latency, and failure reasons. Checks
 are deterministic: they inspect tasks, execution attempts, memory records, and
 traces. No model judges another model.
 
@@ -657,14 +682,23 @@ changes is appended to `settings_history.jsonl`.
 Important groups:
 
 - `models.interactive.*` and `models.background.*`: endpoint, model, limits,
-  sampling, seed, thinking budget, timeout, retries, response format
+  sampling, seed, thinking budget, timeout, retries, response format, strict or
+  loose action schema
 - `context.budgets.*`: per-section and total token budgets
+- `context.prompt_variant`, `context.include_time`: full/trimmed rules and the
+  current UTC time in the task section
 - `context.self_scope_keywords`: phrases that load the reserved `self` domain
-- `memory.*`: retrieval weights, duplicate overlap, source policy, auto-commit
-- `capabilities.*`: permission policy, default enablement, skill/MCP paths
+- `memory.*`: retrieval weights, duplicate/conflict overlap, classifier rules, source policy
+- `consolidation.*`: extraction, schedule, evidence window, proposal limit
+- `capabilities.*`: permission policy, default enablement, skill/MCP paths,
+  enum disclosure, optional-argument coercion, placeholder rejection
 - `domain.suggestion.*`: repeated-subject threshold and cooldown
-- `loop.*`: iteration/time/retry limits
+- `loop.*`: iteration/time/retry limits, honesty and internal-schema guards
 - `session.history_window`, `ui.*`, `events/traces.retention_days`
+
+V1.1 defaults are `response_format: json_schema`, `action_schema: strict`,
+`prompt_variant: full`, `include_time: true`, all three capability switches on,
+and both loop guards on; the evidence is in `EXPERIMENTS.md`.
 
 Environment overrides are applied after the file:
 
@@ -709,14 +743,18 @@ Important invariants:
   Creation happens only after an explicit user command or confirmation.
 - Capability execution is validated in this order: registration, availability,
   operation exists, idempotency key, domain enablement, permission policy,
-  argument schema, dispatch, result recording.
+  argument schema, dispatch, result recording. Argument validation reports every
+  bad field at once; optional values are hints that may be defaulted/coerced.
+- A final response may not claim success after a failed, denied, unavailable, or
+  unknown execution. An unknown outcome must be stated as unknown. An `ask` may
+  only request information from the user's world, never internal schema choices.
 - A call with an unknown outcome is recorded as `unknown`. Identical retries of
   unknown write/destructive calls are rejected; the model must reconcile or ask.
 - Every execution attempt is written before dispatch as `in_flight` and
   completed with an evidence envelope.
 - Memory candidates need resolved source refs. Execution outcomes can only use
-  structured fields. Inferred conflicts with explicit memories queue for
-  approval.
+  structured fields. Explicit writes activate immediately; inferred memories
+  are created by consolidation, never by an approval queue.
 - Interaction history is append-only: user rows and assistant-update rows are
   merged on read.
 - All timestamps are UTC ISO-8601 (`Z`). Files are UTF-8 with LF endings and
@@ -725,15 +763,24 @@ Important invariants:
 ## Memory
 
 Memory types are `fact`, `preference`, `decision`, `procedure`, and `lesson`.
-Scopes are `global`, `self`, `domain:<id>`, and `project:<id>`. Explicit user
-statements may commit directly; inferred and consolidated records follow the
-auto-commit settings, and conflicts with explicit memories always queue.
+Scopes are `global`, `self`, `domain:<id>`, and `project:<id>`. `remember` only
+requires `content`. The harness derives `type` with a configurable keyword
+classifier and `scope` from the task's project/domain (or `global`). The model's
+`type`/`scope` values are hints: invalid values fall back to the derived value
+and the rejected hint is recorded on the record, so a bad hint never fails the
+call. An explicit `self` hint is kept only for a task about the assistant, so a
+user fact cannot be hidden from normal retrieval.
 
-Records keep provenance and soft lifecycle state: `proposed`, `active`,
-`superseded`, `retracted`, `rejected`. Corrections supersede rather than delete.
-Usage is logged with task and trace ids. Consolidation edits memory, persona, and
-structure suggestions in one run with an input snapshot and can roll the whole
-run back.
+Records keep harness-filled provenance and a three-state lifecycle: `active`,
+`superseded`, `retracted`. A newer explicit statement that conflicts with an
+older one supersedes it and the response names the replaced memory. Corrections
+supersede rather than delete. Usage is logged with task and trace ids.
+
+Consolidation runs off the hot path (UI button or optional schedule). It first
+extracts inferred memories from recent conversation with verified source refs,
+then re-types, merges duplicates/near-duplicates, and resolves conflicts by
+recency. A run stores an input snapshot and a report of what was added, merged,
+and superseded; it can be rolled back as a whole (and inferred rows individually).
 
 ## Capabilities
 

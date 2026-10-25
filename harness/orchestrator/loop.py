@@ -4,26 +4,49 @@ import json
 import re
 import time
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Callable
 
 from harness.constants import SELF_DOMAIN_ID, ActionKind, BlockReason, ExecutionStatus, PermissionLevel, TaskState
-from harness.contracts.actions import ActAction, ExecutionResult, Proposal
+from harness.contracts.actions import ActAction, AskAction, EndAction, ExecutionResult, Proposal, RespondAction
 from harness.contracts.capabilities import CapabilityExecutor, ExecuteRequest
 from harness.contracts.context import ContextBuilder
 from harness.contracts.domains import DomainRegistry, StructureDraft
 from harness.contracts.events import Event, EventLog
-from harness.contracts.loop import TurnResult
+from harness.contracts.history import HistoryService
+from harness.contracts.loop import TurnEvent, TurnListener, TurnResult
 from harness.contracts.model import Message, ModelAdapter, ModelResult, ModelUnavailable
 from harness.contracts.session import SessionManager
 from harness.contracts.settings import SettingsService
 from harness.contracts.tasks import Task, TaskManager, TaskOutcome, TaskSpec
 from harness.contracts.traces import Trace, TraceStore
 from harness.orchestrator.machine import apply_action
-from harness.orchestrator.parse import PROPOSAL_SCHEMA, TASK_PLAN_SCHEMA, parse_proposal, parse_task_plan
+from harness.orchestrator.parse import (
+    PROPOSAL_SCHEMA_LOOSE,
+    PROPOSAL_SCHEMA_STRICT,
+    TASK_PLAN_SCHEMA,
+    parse_proposal,
+    parse_task_plan,
+)
 from harness.orchestrator.timeline import TurnTimeline
 from harness.prompts import TASK_PLAN_INSTRUCTIONS
 from harness.storage.atomic import new_id, now_ts
-from harness.text import estimate_tokens, strip_reasoning
+from harness.text import (
+    claims_success,
+    estimate_tokens,
+    matches_keywords,
+    states_unknown_outcome,
+    strip_reasoning,
+)
+
+
+def _notify(emit: TurnListener | None, kind: str, data: dict[str, Any]) -> None:
+    """Send one client event; a broken listener must not fail the turn."""
+    if emit is None:
+        return
+    try:
+        emit(TurnEvent(kind=kind, data=data))
+    except Exception:
+        pass
 
 
 class DefaultInteractionLoop:
@@ -38,6 +61,7 @@ class DefaultInteractionLoop:
         capabilities: CapabilityExecutor,
         traces: TraceStore,
         events: EventLog,
+        history: HistoryService,
     ):
         self._settings = settings
         self._model = model
@@ -48,13 +72,37 @@ class DefaultInteractionLoop:
         self._capabilities = capabilities
         self._traces = traces
         self._events = events
+        self._history = history
 
-    def handle_turn(self, user_text: str) -> TurnResult:
-        timeline = TurnTimeline()
+    def handle_turn(
+        self,
+        user_text: str,
+        *,
+        emit: TurnListener | None = None,
+    ) -> TurnResult:
+        timeline = TurnTimeline(on_stage=lambda item: _notify(emit, "stage", item))
         interaction_started = time.monotonic()
         interaction = self._sessions.record_interaction(user_text)
+        _notify(
+            emit,
+            "turn.started",
+            {"interaction_id": interaction.id, "ts": interaction.ts, "text": user_text},
+        )
         timeline.record("session", interaction_started, {"interaction_id": interaction.id})
         messages: list[str] = []
+        try:
+            return self._run_turn(user_text, interaction, timeline, messages, emit)
+        except Exception as exc:
+            return self._turn_failed(interaction, timeline, messages, exc)
+
+    def _run_turn(
+        self,
+        user_text: str,
+        interaction,
+        timeline: TurnTimeline,
+        messages: list[str],
+        emit: TurnListener | None,
+    ) -> TurnResult:
         structure_started = time.monotonic()
         structure = self._handle_structure_command(user_text)
         timeline.record("structure_check", structure_started, {"handled": structure is not None})
@@ -65,6 +113,7 @@ class DefaultInteractionLoop:
             timeline.stage("response", duration_ms=0, detail={"kind": "structure", "text": text})
             result = TurnResult(interaction_id=interaction.id, messages=messages, tasks=self._tasks.list())
             self._write_turn_trace(interaction.id, timeline, result)
+            self._history.after_turn(interaction.id)
             return result
 
         waiting = [
@@ -77,7 +126,7 @@ class DefaultInteractionLoop:
                 self._tasks.append_constraint(task.id, f"User reply: {user_text}")
                 self._tasks.transition(task.id, TaskState.READY, reason=None)
         else:
-            self._plan_tasks(user_text, interaction.id, timeline)
+            self._plan_tasks(user_text, interaction.id, timeline, emit)
         created = self._tasks.list()
         interaction.task_ids = [task.id for task in created if task.interaction_id == interaction.id]
         suggestion_started = time.monotonic()
@@ -88,7 +137,7 @@ class DefaultInteractionLoop:
 
         ready = self._tasks.next_ready()
         while ready is not None:
-            result_messages = self._run_task(ready, interaction.id, timeline)
+            result_messages = self._run_task(ready, interaction.id, timeline, emit)
             messages.extend(result_messages)
             ready = self._tasks.next_ready()
 
@@ -97,6 +146,32 @@ class DefaultInteractionLoop:
         self._sessions.append_assistant(interaction.id, text, task_ids=interaction.task_ids)
         timeline.record("turn.response", response_started, {"messages": messages})
         result = TurnResult(interaction_id=interaction.id, messages=messages, tasks=self._tasks.list())
+        self._write_turn_trace(interaction.id, timeline, result)
+        self._history.after_turn(interaction.id)
+        return result
+
+    def _turn_failed(
+        self,
+        interaction,
+        timeline: TurnTimeline,
+        messages: list[str],
+        exc: Exception,
+    ) -> TurnResult:
+        error = f"{type(exc).__name__}: {exc}"
+        text = f"Turn failed: {error}"
+        messages.append(text)
+        try:
+            self._sessions.append_assistant(interaction.id, text, task_ids=[])
+        except Exception:
+            # Storage failure during the failure path must not hide the error.
+            pass
+        timeline.stage("error", duration_ms=0, detail={"error": error})
+        result = TurnResult(
+            interaction_id=interaction.id,
+            messages=messages,
+            tasks=self._tasks.list(),
+            error=error,
+        )
         self._write_turn_trace(interaction.id, timeline, result)
         return result
 
@@ -182,7 +257,13 @@ class DefaultInteractionLoop:
             return [f"Created {kind} '{created.name}' ({created.id}). You can rename or archive it in the UI."]
         return None
 
-    def _plan_tasks(self, user_text: str, interaction_id: str, timeline: TurnTimeline) -> None:
+    def _plan_tasks(
+        self,
+        user_text: str,
+        interaction_id: str,
+        timeline: TurnTimeline,
+        emit: TurnListener | None = None,
+    ) -> None:
         trace_id = new_id("trc")
         prompt_started = time.monotonic()
         prompt = [
@@ -235,8 +316,14 @@ class DefaultInteractionLoop:
             )
             return
         call_started = time.monotonic()
+        timeline.begin("plan.model_call", {"trace_id": trace_id})
         try:
-            result = self._model.complete("interactive", prompt, schema=TASK_PLAN_SCHEMA)
+            result = self._model.complete(
+                "interactive",
+                prompt,
+                schema=TASK_PLAN_SCHEMA,
+                on_delta=self._delta_emitter(emit, "", trace_id, "planner"),
+            )
         except ModelUnavailable as exc:
             timeline.record("plan.model_call", call_started, {"error": str(exc)})
             trace = Trace(
@@ -369,7 +456,13 @@ class DefaultInteractionLoop:
         )
         return f"We've talked about this a few times, want me to create a domain for '{' '.join(words)}'?"
 
-    def _run_task(self, task: Task, interaction_id: str, timeline: TurnTimeline) -> list[str]:
+    def _run_task(
+        self,
+        task: Task,
+        interaction_id: str,
+        timeline: TurnTimeline,
+        emit: TurnListener | None = None,
+    ) -> list[str]:
         self._tasks.transition(task.id, TaskState.RUNNING, reason=None)
         task = self._tasks.get(task.id)
         started = time.monotonic()
@@ -385,6 +478,8 @@ class DefaultInteractionLoop:
         stop_after_failure = bool(self._settings.get("loop.stop_after_nonretryable_failure"))
         stopped_failure: ExecutionResult | None = None
         stop_rejections = 0
+        last_execution: ExecutionResult | None = None
+        honesty_rejections = 0
         while iterations < limit_iter:
             if time.monotonic() - started > limit_s:
                 self._tasks.transition(task.id, TaskState.BLOCKED, reason=BlockReason.LIMIT)
@@ -393,6 +488,7 @@ class DefaultInteractionLoop:
             task = self._tasks.get(task.id)
             trace_id = new_id("trc")
             build_started = time.monotonic()
+            timeline.begin("prompt_build", {"task_id": task.id})
             try:
                 package = self._context.build(task, self._sessions.current(), trace_id=trace_id)
             except ValueError as exc:
@@ -402,12 +498,24 @@ class DefaultInteractionLoop:
             timeline.record(
                 "prompt_build",
                 build_started,
-                {"task_id": task.id, "tokens": package.total_tokens, "included": len(package.included), "excluded": len(package.excluded)},
+                {
+                    "task_id": task.id,
+                    "tokens": package.total_tokens,
+                    "included": len(package.included),
+                    "excluded": len(package.excluded),
+                    "history": package.stats.get("history"),
+                },
             )
             prompt = list(package.messages) + extra
             call_started = time.monotonic()
+            timeline.begin("model_call", {"task_id": task.id, "trace_id": trace_id})
             try:
-                model_result = self._model.complete("interactive", prompt, schema=PROPOSAL_SCHEMA)
+                model_result = self._model.complete(
+                    "interactive",
+                    prompt,
+                    schema=self._proposal_schema(),
+                    on_delta=self._delta_emitter(emit, task.id, trace_id, "interactive"),
+                )
             except ModelUnavailable as exc:
                 timeline.record("model_call", call_started, {"task_id": task.id, "error": str(exc)})
                 self._tasks.transition(task.id, TaskState.BLOCKED, reason=BlockReason.MODEL_UNAVAILABLE)
@@ -436,9 +544,13 @@ class DefaultInteractionLoop:
                 proposal = parse_proposal(model_result.content)
             except (ValueError, json.JSONDecodeError) as exc:
                 invalid_used += 1
-                trace.validation = {"ok": False, "error": str(exc)}
+                trace.validation = {"ok": False, "error": str(exc), "failure_kind": "parse"}
                 trace.retries = invalid_used
-                timeline.record("parse_validation", parse_started, {"ok": False, "error": str(exc)})
+                timeline.record(
+                    "parse_validation",
+                    parse_started,
+                    {"ok": False, "error": str(exc), "failure_kind": "parse"},
+                )
                 self._finish_trace(trace, interaction_id, timeline)
                 extra.append(Message(role="assistant", content=model_result.content))
                 extra.append(Message(role="user", content=f"Invalid proposal: {exc}. Return one valid JSON action."))
@@ -448,11 +560,42 @@ class DefaultInteractionLoop:
                     break
                 continue
             trace.parsed = {"kind": proposal.kind}
+            internal_ask = self._internal_schema_ask_problem(proposal)
+            if internal_ask:
+                invalid_used += 1
+                trace.validation = {"ok": False, "error": internal_ask, "failure_kind": "internal_schema_ask"}
+                timeline.record(
+                    "parse_validation",
+                    parse_started,
+                    {"ok": False, "error": internal_ask, "failure_kind": "internal_schema_ask"},
+                )
+                self._finish_trace(trace, interaction_id, timeline)
+                extra.append(Message(role="assistant", content=model_result.content))
+                extra.append(Message(role="user", content=internal_ask))
+                if invalid_used > invalid_budget:
+                    text = "I couldn't choose the right internal details to continue. Please rephrase the request."
+                    self._tasks.mark_delivered(task.id, text)
+                    delivered.append(text)
+                    self._tasks.transition(task.id, TaskState.COMPLETED)
+                    self._tasks.record_outcome(
+                        task.id, TaskOutcome(summary=text, status=TaskState.COMPLETED)
+                    )
+                    timeline.stage(
+                        "response",
+                        duration_ms=0,
+                        detail={"kind": "harness_failure", "task_id": task.id, "text": text},
+                    )
+                    break
+                continue
             machine = apply_action(task, proposal)
             if machine.error:
                 invalid_used += 1
-                trace.validation = {"ok": False, "error": machine.error}
-                timeline.record("parse_validation", parse_started, {"ok": False, "error": machine.error})
+                trace.validation = {"ok": False, "error": machine.error, "failure_kind": "machine"}
+                timeline.record(
+                    "parse_validation",
+                    parse_started,
+                    {"ok": False, "error": machine.error, "failure_kind": "machine"},
+                )
                 self._finish_trace(trace, interaction_id, timeline)
                 extra.append(Message(role="assistant", content=model_result.content))
                 extra.append(Message(role="user", content=f"Rejected: {machine.error}"))
@@ -504,6 +647,10 @@ class DefaultInteractionLoop:
                     continue
                 timeline.record("parse_validation", parse_started, {"ok": True, "kind": proposal.kind, "action": "act"})
                 execution_started = time.monotonic()
+                timeline.begin(
+                    "execution",
+                    {"task_id": task.id, "capability": proposal.capability, "operation": proposal.operation},
+                )
                 execution = self._capabilities.execute(
                     ExecuteRequest(
                         task_id=task.id,
@@ -512,10 +659,16 @@ class DefaultInteractionLoop:
                         operation=proposal.operation,
                         arguments=proposal.arguments,
                         interaction_id=interaction_id,
+                        project_id=task.project_id,
+                        self_request=matches_keywords(
+                            task.goal,
+                            str(self._settings.get("context.self_scope_keywords") or ""),
+                        ),
                     )
                 )
                 envelope = self._envelope_dict(execution)
                 timeline.record("execution", execution_started, envelope)
+                last_execution = execution
                 self._record_fingerprint(proposal, execution, fingerprints)
                 machine = apply_action(task, proposal, execution)
                 if execution.status == ExecutionStatus.SUCCEEDED:
@@ -561,6 +714,35 @@ class DefaultInteractionLoop:
                 )
                 iterations += 1
                 continue
+            honesty = self._honesty_problem(last_execution, proposal, task.succeeded_execution)
+            if honesty:
+                honesty_rejections += 1
+                invalid_used += 1
+                trace.validation = {"ok": False, "error": honesty, "failure_kind": "honesty"}
+                trace.retries = invalid_used
+                timeline.record(
+                    "parse_validation",
+                    parse_started,
+                    {"ok": False, "error": honesty, "failure_kind": "honesty"},
+                )
+                self._finish_trace(trace, interaction_id, timeline)
+                extra.append(Message(role="assistant", content=model_result.content))
+                extra.append(Message(role="user", content=honesty))
+                if honesty_rejections > 1 or invalid_used > invalid_budget:
+                    text = self._honest_failure_text(last_execution)
+                    self._tasks.mark_delivered(task.id, text)
+                    delivered.append(text)
+                    self._tasks.transition(task.id, TaskState.COMPLETED)
+                    self._tasks.record_outcome(
+                        task.id, TaskOutcome(summary=text, status=TaskState.COMPLETED)
+                    )
+                    timeline.stage(
+                        "response",
+                        duration_ms=0,
+                        detail={"kind": "harness_failure", "task_id": task.id, "text": text},
+                    )
+                    break
+                continue
             timeline.record("parse_validation", parse_started, {"ok": True, "kind": proposal.kind})
             trace.validation = {"ok": True, "action": proposal.kind}
             self._finish_trace(trace, interaction_id, timeline)
@@ -588,6 +770,31 @@ class DefaultInteractionLoop:
             self._tasks.transition(task.id, TaskState.BLOCKED, reason=BlockReason.LIMIT)
             delivered.append("Stopped: iteration limit reached.")
         return delivered
+
+    def _proposal_schema(self) -> dict[str, Any]:
+        if str(self._settings.get("models.interactive.action_schema")) == "strict":
+            return PROPOSAL_SCHEMA_STRICT
+        return PROPOSAL_SCHEMA_LOOSE
+
+    def _delta_emitter(
+        self,
+        emit: TurnListener | None,
+        task_id: str,
+        trace_id: str,
+        role: str,
+    ) -> Callable[[str], None] | None:
+        if emit is None:
+            return None
+
+        def on_delta(piece: str) -> None:
+            if piece:
+                _notify(
+                    emit,
+                    "token",
+                    {"task_id": task_id, "trace_id": trace_id, "role": role, "text": piece},
+                )
+
+        return on_delta
 
     def _call_metrics(self, result: ModelResult) -> dict[str, Any]:
         chars_per_token = int(self._settings.get("context.chars_per_token"))
@@ -718,6 +925,98 @@ class DefaultInteractionLoop:
             if op.name == proposal.operation:
                 return execution.error_category in set(op.retryable_error_categories)
         return False
+
+    def _honesty_problem(
+        self,
+        execution: ExecutionResult | None,
+        proposal: Proposal,
+        succeeded_execution: bool = False,
+    ) -> str | None:
+        """Reject a final response that contradicts the execution record."""
+        if not bool(self._settings.get("loop.honesty_guard")):
+            return None
+        if isinstance(proposal, RespondAction):
+            text = proposal.message
+        elif isinstance(proposal, EndAction) and proposal.status == "completed":
+            text = proposal.summary
+        else:
+            return None
+        if execution is None:
+            if succeeded_execution or not claims_success(text):
+                return None
+            return (
+                "No capability execution has succeeded for this task. Do not claim "
+                "success; explain the limitation or ask for the missing information."
+            )
+        if execution.status == ExecutionStatus.SUCCEEDED:
+            return None
+        if execution.status == ExecutionStatus.UNKNOWN:
+            if claims_success(text):
+                return (
+                    f"The last execution {execution.capability}.{execution.operation} has "
+                    "status unknown. Do not claim success; say the outcome is unknown or uncertain."
+                )
+            if not states_unknown_outcome(text):
+                return (
+                    f"The last execution {execution.capability}.{execution.operation} has "
+                    "status unknown. Say that the outcome is unknown or uncertain."
+                )
+            return None
+        if claims_success(text):
+            return (
+                f"The last execution {execution.capability}.{execution.operation} has "
+                f"status {execution.status} ({execution.error_category or 'no category'}): "
+                f"{execution.message}. Do not claim success. State exactly what failed."
+            )
+        return None
+
+    def _internal_schema_ask_problem(self, proposal: Proposal) -> str | None:
+        """An ask must never make the user choose harness-internal schema."""
+        if not isinstance(proposal, AskAction):
+            return None
+        if not bool(self._settings.get("loop.internal_schema_ask_guard")):
+            return None
+        missing = proposal.missing.strip().lower()
+        question = proposal.question.strip().lower()
+        internal = {
+            "type",
+            "scope",
+            "memory type",
+            "memory scope",
+            "capability",
+            "operation",
+            "argument",
+            "arguments",
+        }
+        phrases = (
+            "what type of memory",
+            "which type of memory",
+            "what memory type",
+            "what scope",
+            "which scope",
+            "which capability",
+            "which operation",
+        )
+        if missing in internal or any(phrase in question for phrase in phrases):
+            return (
+                "ask is only for information from the user's world. Do not ask the user to "
+                "choose internal details such as memory type, scope, capability, operation, or "
+                "argument names; choose a valid value or omit the optional argument."
+            )
+        return None
+
+    def _honest_failure_text(self, execution: ExecutionResult | None) -> str:
+        if execution is None:
+            return (
+                "I couldn't complete that: the capability is not available or no "
+                "execution succeeded, so no action was taken."
+            )
+        if execution.status == ExecutionStatus.UNKNOWN:
+            return (
+                f"I'm not sure whether {execution.capability}.{execution.operation} completed: "
+                f"{execution.message}. The outcome is unknown; I have not reported it as done."
+            )
+        return self._failure_response(execution)
 
     def _failure_response(self, execution: ExecutionResult) -> str:
         category = execution.error_category or execution.status

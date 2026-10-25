@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -25,18 +25,27 @@ class OpenAICompatAdapter:
         messages: list[Message],
         *,
         schema: dict[str, Any] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> ModelResult:
         endpoint = str(self._settings.get(self._role_key(role, "endpoint")))
         retries = int(self._settings.get(self._role_key(role, "retries")))
         timeout = float(self._settings.get(self._role_key(role, "timeout_s")))
         payload = self._payload(role, messages, schema)
         stream = bool(self._settings.get(self._role_key(role, "stream")))
+        sent = False
+
+        def delta(piece: str) -> None:
+            nonlocal sent
+            sent = True
+            if on_delta is not None:
+                on_delta(piece)
+
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
                 if stream:
-                    return self._stream(endpoint, payload, timeout)
-                return self._post(endpoint, payload, timeout)
+                    return self._stream(endpoint, payload, timeout, delta)
+                return self._post(endpoint, payload, timeout, delta)
             except (httpx.HTTPError, KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
                 if stream:
@@ -44,7 +53,7 @@ class OpenAICompatAdapter:
                     # One non-streaming fallback keeps the adapter portable.
                     stream = False
                     try:
-                        return self._post(endpoint, payload, timeout)
+                        return self._post(endpoint, payload, timeout, None if sent else delta)
                     except (httpx.HTTPError, KeyError, IndexError, json.JSONDecodeError, ValueError) as fallback:
                         last_error = fallback
                 if attempt >= retries:
@@ -65,7 +74,13 @@ class OpenAICompatAdapter:
         except httpx.HTTPError:
             return False
 
-    def _post(self, endpoint: str, payload: dict[str, Any], timeout: float) -> ModelResult:
+    def _post(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        timeout: float,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ModelResult:
         started = time.monotonic()
         response = httpx.post(endpoint, json=payload, timeout=timeout)
         response.raise_for_status()
@@ -74,8 +89,11 @@ class OpenAICompatAdapter:
         message = choice.get("message") or {}
         usage = body.get("usage") or {}
         timings = body.get("timings") or {}
+        content = message.get("content") or ""
+        if on_delta is not None and content:
+            on_delta(content)
         return ModelResult(
-            content=message.get("content") or "",
+            content=content,
             latency_ms=int((time.monotonic() - started) * 1000),
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
@@ -87,7 +105,13 @@ class OpenAICompatAdapter:
             streaming=False,
         )
 
-    def _stream(self, endpoint: str, payload: dict[str, Any], timeout: float) -> ModelResult:
+    def _stream(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        timeout: float,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ModelResult:
         started = time.monotonic()
         first_chunk: float | None = None
         content: list[str] = []
@@ -122,6 +146,8 @@ class OpenAICompatAdapter:
                     piece = delta.get("content")
                     if piece:
                         content.append(piece)
+                        if on_delta is not None:
+                            on_delta(piece)
                     thought = delta.get("reasoning_content") or delta.get("reasoning")
                     if thought:
                         reasoning.append(thought)
@@ -172,6 +198,8 @@ class OpenAICompatAdapter:
                 "type": "json_schema",
                 "json_schema": {"name": "harness_payload", "schema": schema},
             }
-        else:
+        elif fmt == "json_object":
             payload["response_format"] = {"type": "json_object"}
+        # "text" deliberately sends no response_format: the experiment compares
+        # constrained decoding against the model's unconstrained output.
         return payload

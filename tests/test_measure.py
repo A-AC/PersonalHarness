@@ -40,10 +40,11 @@ def test_report_tracks_corrections_and_usage(make_harness) -> None:
     interaction = h.sessions.record_interaction("I prefer concise answers")
     record = h.memory.submit(
         MemoryCandidate(
-            type="preference",
             content="The user prefers concise answers",
-            scope="global",
             origin="explicit",
+            type_hint="preference",
+            scope_hint="global",
+            default_scope="global",
             provenance={
                 "source_kind": "user_statement",
                 "source_refs": [interaction.id],

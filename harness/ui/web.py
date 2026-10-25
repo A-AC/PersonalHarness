@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
 from html import escape
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from jinja2 import Template
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from harness.app import Harness
+from harness.contracts.chat import TurnEvent
 from harness.contracts.profile import PersonaDraft
 from harness.contracts.settings import SettingsError
 from harness.measure import learning_report
+from harness.storage.atomic import new_id
 
 
 LAYOUT = Template(
@@ -27,16 +32,29 @@ table{border-collapse:collapse;width:100%}
 td,th{border-bottom:1px solid #333;padding:6px;text-align:left;vertical-align:top}
 pre{white-space:pre-wrap;background:#1b1b1b;padding:12px;overflow:auto}
 .err{color:#f66}
+.ok{color:#6f6}
 .muted{color:#999}
 textarea{width:100%;min-height:5em;background:#1b1b1b;color:#eee}
 input{background:#1b1b1b;color:#eee}
+.msg{border-left:3px solid #333;padding:8px 12px;margin:10px 0}
+.msg.user{border-color:#48a}
+.msg.assistant{border-color:#484}
+.msg .role{color:#999;font-size:.85em;margin-bottom:4px}
+.msg .text{white-space:pre-wrap}
+.msg .meta{margin-top:8px;font-size:.9em}
+.msg .meta ul{margin:4px 0;padding-left:20px}
+.env{padding:1px 5px;border:1px solid #555;border-radius:3px}
+.env.ok{border-color:#484}
+.env.err{border-color:#844;color:#f66}
+#live-stages{max-height:16em;overflow:auto}
+#live-tokens{max-height:16em}
 </style></head>
 <body>
 <nav>
-<a href="/">traces</a><a href="/memory">memory</a><a href="/persona">persona</a>
-<a href="/tasks">tasks</a><a href="/domains">domains</a><a href="/capabilities">capabilities</a>
+<a href="/chat">chat</a><a href="/">traces</a><a href="/memory">memory</a><a href="/persona">persona</a>
+<a href="/tasks">tasks</a><a href="/domains">domains</a><a href="/history">history</a><a href="/capabilities">capabilities</a>
 <a href="/consolidation">consolidation</a><a href="/settings">settings</a>
-<a href="/events">events</a><a href="/learning">learning</a>
+<a href="/events">events</a><a href="/learning">learning</a><a href="/reset">reset</a>
 </nav>
 <main>{{ body|safe }}</main></body></html>"""
 )
@@ -44,6 +62,124 @@ input{background:#1b1b1b;color:#eee}
 
 def _page(body: str) -> HTMLResponse:
     return HTMLResponse(LAYOUT.render(body=body))
+
+
+_CHAT_JS = """
+<script>
+(function () {
+  var form = document.getElementById('chat-form');
+  var input = document.getElementById('chat-text');
+  var send = document.getElementById('chat-send');
+  var live = document.getElementById('live');
+  var status = document.getElementById('live-status');
+  var stages = document.getElementById('live-stages');
+  var tokens = document.getElementById('live-tokens');
+  var error = document.getElementById('live-error');
+  var streamTokens = __STREAM_TOKENS__;
+  var labels = {
+    'session': 'session',
+    'structure_check': 'structure check',
+    'plan.prompt_build': 'task creation: prompt',
+    'plan.heuristic': 'task creation: heuristic',
+    'plan.model_call': 'task creation: model',
+    'plan.parse_validation': 'task creation: validation',
+    'plan.task_create': 'task creation: create tasks',
+    'domain_suggestion': 'structure suggestion',
+    'prompt_build': 'decision: prompt',
+    'model_call': 'decision: model',
+    'parse_validation': 'decision: validation',
+    'execution': 'execution',
+    'response': 'response',
+    'turn.response': 'response',
+    'error': 'error'
+  };
+  function label(name) { return labels[name] || name; }
+  function addStage(data) {
+    if (data.running) {
+      status.textContent = 'running: ' + label(data.stage);
+      return;
+    }
+    var li = document.createElement('li');
+    var text = label(data.stage) + ' - ' + data.duration_ms + ' ms';
+    if (data.start_ms !== undefined) text += ' (start ' + data.start_ms + ' ms)';
+    if (data.detail) {
+      try { text += ' ' + JSON.stringify(data.detail); } catch (ignore) {}
+    }
+    li.textContent = text;
+    stages.appendChild(li);
+    stages.scrollTop = stages.scrollHeight;
+  }
+  function fail(message) {
+    status.textContent = 'failed';
+    error.textContent = 'Turn failed: ' + message;
+    send.disabled = false;
+  }
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var text = input.value.trim();
+    if (!text) return;
+    send.disabled = true;
+    live.hidden = false;
+    status.textContent = 'starting...';
+    stages.textContent = '';
+    tokens.textContent = '';
+    error.textContent = '';
+    fetch('/chat/turn', {
+      method: 'POST',
+      headers: {'content-type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({text: text})
+    }).then(function (response) {
+      return response.text().then(function (body) {
+        var data;
+        try { data = JSON.parse(body); } catch (ignore) { data = {error: body || ('HTTP ' + response.status)}; }
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        return data;
+      });
+    }).then(function (data) {
+      status.textContent = 'running...';
+      var source = new EventSource('/chat/turns/' + encodeURIComponent(data.job_id) + '/events');
+      source.addEventListener('turn.started', function (event) {
+        var started = JSON.parse(event.data);
+        status.textContent = 'running ' + started.interaction_id;
+      });
+      source.addEventListener('stage', function (event) { addStage(JSON.parse(event.data)); });
+      source.addEventListener('token', function (event) {
+        if (!streamTokens) return;
+        var data = JSON.parse(event.data);
+        tokens.textContent += data.text;
+        tokens.scrollTop = tokens.scrollHeight;
+      });
+      source.addEventListener('turn.completed', function () {
+        source.close();
+        status.textContent = 'complete; reloading...';
+        window.location.reload();
+      });
+      source.addEventListener('turn.failed', function (event) {
+        source.close();
+        var data = JSON.parse(event.data);
+        fail(data.error || 'unknown error');
+        if (data.interaction_id) {
+          window.location.reload();
+        }
+      });
+      source.onerror = function () {
+        if (source.readyState === EventSource.CLOSED) {
+          fail('event stream closed before the turn finished');
+        } else {
+          status.textContent = 'stream interrupted; reconnecting...';
+        }
+      };
+    }).catch(function (err) { fail(err.message || String(err)); });
+  });
+})();
+</script>
+"""
+
+
+def _error_page(message: str, status_code: int) -> HTMLResponse:
+    response = _page(f"<h1>Error</h1><p class='err'>{_esc(message)}</p>")
+    response.status_code = status_code
+    return response
 
 
 def _esc(value: object) -> str:
@@ -65,13 +201,43 @@ def _form(request_body: bytes) -> dict[str, str]:
     return {key: values[0] for key, values in parsed.items() if values}
 
 
+def _form_all(request_body: bytes) -> dict[str, list[str]]:
+    return parse_qs(request_body.decode())
+
+
+def _sse(index: int, event: TurnEvent) -> str:
+    payload = json.dumps(event.data, ensure_ascii=False, default=str)
+    return f"id: {index}\nevent: {event.kind}\ndata: {payload}\n\n"
+
+
+class _TurnJob:
+    """In-memory buffer for one running/completed turn streamed over SSE."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.events: list[TurnEvent] = []
+        self.done = False
+        self.subscribers: list[asyncio.Queue] = []
+
+
 def create_app(harness: Harness) -> Starlette:
     async def guard(request: Request, call_next):
         if request.url.path == "/health":
             return await call_next(request)
         if not _authorized(request, harness):
             return Response("unauthorized", status_code=401)
-        response = await call_next(request)
+        if (
+            harness.reset.busy
+            and request.method not in {"GET", "HEAD", "OPTIONS"}
+            and request.url.path != "/reset"
+        ):
+            return JSONResponse({"error": "reset in progress"}, status_code=409)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # Never let an unhandled handler error become an opaque
+            # connection reset for the browser.
+            return _error_page(f"Internal error: {type(exc).__name__}: {exc}", 500)
         if request.query_params.get("token") == str(harness.settings.get("ui.access_token")):
             response.set_cookie("harness_token", str(harness.settings.get("ui.access_token")), httponly=True, samesite="strict")
         return response
@@ -99,9 +265,16 @@ def create_app(harness: Harness) -> Starlette:
     async def trace_detail(request: Request) -> HTMLResponse:
         item = harness.traces.get(request.path_params["trace_id"])
         if item is None:
-            return _page("<p>missing</p>")
-        included = "".join(f"<li>include {_esc(row)}</li>" for row in item.included)
-        excluded = "".join(f"<li>exclude {_esc(row)}</li>" for row in item.excluded)
+            return _error_page("trace not found", 404)
+        def rows(kind: str, values: list[dict]) -> str:
+            return "".join(
+                f"<li>{kind} <b>{_esc(row.get('section'))}</b> {_esc(row.get('item'))}"
+                f" <span class='muted'>{_esc(row.get('reason'))}</span></li>"
+                for row in values
+            )
+
+        included = rows("include", item.included)
+        excluded = rows("exclude", item.excluded)
         prompt = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in item.messages)
         timeline_rows = "".join(
             f"<tr><td>{_esc(row.get('stage'))}</td><td>{_esc(row.get('start_ms'))}</td>"
@@ -119,9 +292,15 @@ def create_app(harness: Harness) -> Starlette:
             f"<h2>Execution envelope</h2><pre>{_esc(envelope)}</pre>" if envelope else ""
         )
         duration = item.duration_ms if item.duration_ms is not None else item.latency_ms
+        interaction = (
+            f'<a href="/chat?interaction={quote(item.interaction_id)}#msg-{quote(item.interaction_id)}">'
+            f"{_esc(item.interaction_id)}</a>"
+            if item.interaction_id
+            else ""
+        )
         return _page(
             f"<h1>{_esc(item.id)}</h1><p>role {_esc(item.role)} task {_esc(item.task_id)} "
-            f"interaction {_esc(item.interaction_id)}</p>"
+            f"interaction {interaction}</p>"
             f"<p class='muted'>duration {_esc(duration)} ms, time to first token "
             f"{_esc(item.time_to_first_token_ms)} ms, tokens {_esc(item.token_counts)}, "
             f"thinking {_esc(item.thinking_produced)}, finish {_esc(item.finish_reason)}</p>"
@@ -133,66 +312,327 @@ def create_app(harness: Harness) -> Starlette:
             f"<h2>Parsed / validation</h2><pre>{_esc(item.parsed)}\n{_esc(item.validation)}</pre>"
         )
 
+    def _trace_links(detail) -> str:
+        if not detail.traces:
+            return "<span class='muted'>none</span>"
+        bits = []
+        for trace in detail.traces:
+            validation = trace.validation or {}
+            status = "ok" if validation.get("ok") else "invalid"
+            if validation.get("error"):
+                status = "error"
+            bits.append(
+                f'<a href="/traces/{_esc(trace.id)}">{_esc(trace.id)}</a>'
+                f"<span class='muted'> ({_esc(trace.role)} {_esc(status)})</span>"
+            )
+        return " ".join(bits)
+
+    def _execution_html(detail) -> str:
+        lines = []
+        for trace in detail.traces:
+            envelope = (trace.validation or {}).get("envelope")
+            if not isinstance(envelope, dict):
+                continue
+            status = str(envelope.get("status") or "")
+            css = "ok" if status == "succeeded" else "err"
+            category = (
+                f" ({_esc(envelope.get('error_category'))})"
+                if envelope.get("error_category")
+                else ""
+            )
+            lines.append(
+                f'<li><span class="env {css}">{_esc(envelope.get("capability"))}.'
+                f'{_esc(envelope.get("operation"))}: {_esc(status)}</span>{category} '
+                f'{_esc(envelope.get("message"))} '
+                f'<a href="/traces/{_esc(trace.id)}">trace</a></li>'
+            )
+        if not lines:
+            return ""
+        return f"<div class='meta'><b>executions</b><ul>{''.join(lines)}</ul></div>"
+
+    def _memory_html(item, detail) -> str:
+        memories = "".join(
+            f"<li><span class='muted'>{_esc(use.id)} {_esc(use.type)} {_esc(use.scope)}</span> "
+            f"{_esc(use.content)} <span class='muted'>({_esc(use.reason)})</span></li>"
+            for use in detail.memories
+        )
+        memories = (
+            f"<div class='meta'><b>memories retrieved</b><ul>{memories}</ul></div>"
+            if memories
+            else ""
+        )
+
+        def write_row(write) -> str:
+            restores = "".join(
+                f'<input type="hidden" name="restore_id" value="{_esc(rid)}">'
+                for rid in write.restore_ids
+            )
+            return (
+                f"<li><span class='muted'>{_esc(write.operation)}</span> "
+                f"{_esc(write.memory_id)} {_esc(write.message)} "
+                '<form method="post" action="/chat/memory/undo" style="display:inline">'
+                f'<input type="hidden" name="memory_id" value="{_esc(write.memory_id)}">'
+                f'<input type="hidden" name="mode" value="{_esc(write.undo)}">'
+                f"{restores}"
+                f'<input type="hidden" name="interaction" value="{_esc(item.id)}">'
+                "<button>undo</button></form></li>"
+            )
+
+        writes = "".join(write_row(item2) for item2 in detail.writes)
+        if writes:
+            writes = f"<div class='meta'><b>memory writes</b><ul>{writes}</ul></div>"
+        return memories + writes
+
+    def _render_interaction(item, detail) -> str:
+        reply = (
+            _esc(item.assistant_text)
+            if item.assistant_text
+            else "<span class='muted'>(no reply stored)</span>"
+        )
+        error = (
+            f"<p class='err'>Turn failed: {_esc(detail.error)}</p>"
+            if detail.error
+            else ""
+        )
+        return (
+            f'<div id="msg-{_esc(item.id)}">'
+            f'<div class="msg user"><div class="role">you · {_esc(item.ts)}</div>'
+            f'<div class="text">{_esc(item.user_text)}</div></div>'
+            f'<div class="msg assistant"><div class="role">assistant · '
+            f'{_esc(item.assistant_ts or "")}</div>'
+            f'<div class="text">{reply}</div>{error}'
+            f"{_execution_html(detail)}{_memory_html(item, detail)}"
+            f'<div class="meta">traces: {_trace_links(detail)}</div></div></div>'
+        )
+
+    jobs: dict[str, _TurnJob] = {}
+    jobs_lock = threading.Lock()
+
+    def _prune_jobs() -> None:
+        retention = int(harness.settings.get("ui.page_limit"))
+        with jobs_lock:
+            if len(jobs) <= retention:
+                return
+            for key, job in list(jobs.items()):
+                if job.done:
+                    jobs.pop(key, None)
+                if len(jobs) <= retention:
+                    break
+
+    def _start_turn(text: str) -> str:
+        job = _TurnJob()
+        job_id = new_id("job")
+        with jobs_lock:
+            jobs[job_id] = job
+        loop = asyncio.get_running_loop()
+
+        def listener(event: TurnEvent) -> None:
+            with job.lock:
+                index = len(job.events)
+                job.events.append(event)
+                queues = list(job.subscribers)
+            for queue in queues:
+                loop.call_soon_threadsafe(queue.put_nowait, (index, event))
+
+        def worker() -> None:
+            try:
+                harness.chat.submit(text, listener)
+            except Exception as exc:
+                event = TurnEvent(
+                    kind="turn.failed",
+                    data={"error": f"{type(exc).__name__}: {exc}", "interaction_id": ""},
+                )
+                with job.lock:
+                    index = len(job.events)
+                    job.events.append(event)
+                    queues = list(job.subscribers)
+                for queue in queues:
+                    loop.call_soon_threadsafe(queue.put_nowait, (index, event))
+            finally:
+                with job.lock:
+                    job.done = True
+                    queues = list(job.subscribers)
+                for queue in queues:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        threading.Thread(target=worker, daemon=True, name=f"turn-{job_id}").start()
+        _prune_jobs()
+        return job_id
+
+    async def chat(request: Request) -> HTMLResponse:
+        focus = request.query_params.get("interaction") or ""
+        limit = int(harness.settings.get("ui.page_limit"))
+        items = harness.sessions.list_interactions(limit=limit)
+        if focus and all(item.id != focus for item in items):
+            extra = harness.sessions.get_interaction(focus)
+            if extra is not None:
+                items = [extra, *items]
+        details = harness.chat.detail_many([item.id for item in items])
+        blocks = "".join(
+            _render_interaction(item, details[item.id]) for item in items
+        )
+        if not blocks:
+            blocks = "<p class='muted'>No messages yet.</p>"
+        focus_note = (
+            f"<p><a href='/chat'>show recent only</a> · focused on {_esc(focus)}</p>"
+            if focus
+            else ""
+        )
+        stream_tokens = bool(harness.settings.get("ui.chat_stream_tokens"))
+        return _page(
+            "<h1>Chat</h1>"
+            "<p class='muted'>One turn service shared with <code>harness turn</code>. "
+            "Stage progress and raw model tokens stream while the turn runs.</p>"
+            f"{focus_note}<div id='chat-log'>{blocks}</div>"
+            "<div id='live' hidden><h2>Live turn</h2>"
+            "<p id='live-status' class='muted'>starting...</p>"
+            "<ol id='live-stages'></ol><h3>Raw model stream</h3>"
+            "<pre id='live-tokens'></pre><p id='live-error' class='err'></p></div>"
+            "<h2>Send</h2><form id='chat-form'>"
+            "<textarea id='chat-text' placeholder='message'></textarea>"
+            "<p><button id='chat-send'>send</button></p></form>"
+            + _CHAT_JS.replace("__STREAM_TOKENS__", "true" if stream_tokens else "false")
+        )
+
+    async def chat_turn(request: Request) -> JSONResponse:
+        form = _form(await request.body())
+        text = (form.get("text") or "").strip()
+        if not text:
+            return JSONResponse({"error": "message text is required"}, status_code=400)
+        return JSONResponse({"job_id": _start_turn(text), "status": "started"}, status_code=202)
+
+    async def chat_events(request: Request) -> Response:
+        with jobs_lock:
+            job = jobs.get(request.path_params["job_id"])
+        if job is None:
+            return _error_page("turn job not found", 404)
+        last = request.headers.get("last-event-id")
+        start = 0
+        if last:
+            try:
+                start = int(last) + 1
+            except ValueError:
+                start = 0
+        queue: asyncio.Queue = asyncio.Queue()
+        with job.lock:
+            backlog = list(enumerate(job.events))
+            done = job.done
+            if not done:
+                job.subscribers.append(queue)
+
+        async def stream():
+            try:
+                for index, event in backlog:
+                    if index >= start:
+                        yield _sse(index, event)
+                if done:
+                    return
+                heartbeat = float(harness.settings.get("ui.sse_heartbeat_s"))
+                while True:
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=heartbeat)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    if item is None:
+                        return
+                    index, event = item
+                    yield _sse(index, event)
+            finally:
+                with job.lock:
+                    if queue in job.subscribers:
+                        job.subscribers.remove(queue)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def chat_memory_undo(request: Request) -> Response:
+        values = _form_all(await request.body())
+        memory_id = (values.get("memory_id") or [""])[0]
+        interaction_id = (values.get("interaction") or [""])[0]
+        mode = (values.get("mode") or ["retract"])[0]
+        if not memory_id:
+            return _error_page("missing memory id", 400)
+        if mode not in {"retract", "restore"}:
+            return _error_page(f"unknown undo mode: {mode}", 400)
+        try:
+            if mode == "restore":
+                harness.memory.restore(memory_id, "user")
+            else:
+                harness.memory.retract(memory_id, "user")
+        except KeyError as exc:
+            return _error_page(f"memory not found: {exc}", 404)
+        except ValueError as exc:
+            return _error_page(str(exc), 400)
+        for restore_id in values.get("restore_id") or []:
+            try:
+                harness.memory.restore(restore_id, "user")
+            except KeyError:
+                # The superseded record may already be gone; the retraction is
+                # still the important part of the undo.
+                continue
+        if interaction_id:
+            target = f"/chat?interaction={quote(interaction_id)}#msg-{quote(interaction_id)}"
+        else:
+            target = "/chat"
+        return RedirectResponse(target, status_code=303)
+
     async def memory(request: Request) -> HTMLResponse:
-        error = ""
         if request.method == "POST":
             form = _form(await request.body())
             action = form.get("action", "")
             mem_id = form.get("id", "")
             try:
                 if action == "retract":
+                    if not mem_id:
+                        return _error_page("missing memory id", 400)
                     harness.memory.retract(mem_id, "user")
-                elif action == "approve":
-                    harness.memory.approve(mem_id, "user")
-                elif action == "reject":
-                    harness.memory.reject(mem_id, "user")
+                elif action == "rollback_run":
+                    run_id = form.get("run_id", "")
+                    if not run_id:
+                        return _error_page("missing run id", 400)
+                    harness.consolidation.rollback(run_id, "user")
                 else:
-                    raise ValueError(f"unknown memory action: {action}")
-            except (KeyError, ValueError) as exc:
-                # A stale row or a non-proposed approval used to escape the
-                # handler as a 500. Surface the cause in the page instead.
-                error = f"{type(exc).__name__}: {exc}"
-            else:
-                return RedirectResponse("/memory", status_code=303)
+                    return _error_page(f"unknown memory action: {action}", 400)
+            except KeyError as exc:
+                return _error_page(f"memory not found: {exc}", 404)
+            except ValueError as exc:
+                return _error_page(str(exc), 400)
+            return RedirectResponse("/memory", status_code=303)
         rows = []
         for item in harness.memory.list():
             actions = ""
-            if item.status == "proposed":
-                actions = (
-                    '<button name="action" value="approve">approve</button>'
-                    '<button name="action" value="reject">reject</button>'
-                )
-            elif item.status == "active":
+            if item.status == "active":
                 actions = '<button name="action" value="retract">retract</button>'
             rows.append(
                 f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.type)}</td><td>{_esc(item.origin)}</td>"
                 f"<td>{_esc(item.status)}</td><td>{_esc(item.scope)}</td><td>{_esc(item.content)}</td>"
-                f"<td>{_esc(item.provenance)}</td>"
+                f"<td>{_esc(item.hint_notes)}</td><td>{_esc(item.provenance)}</td>"
                 f'<td><form method="post"><input type="hidden" name="id" value="{_esc(item.id)}">'
                 f'{actions}</form></td></tr>'
             )
         learned = "".join(
             f'<li>{_esc(item.id)} ({_esc(item.type)}, {_esc(item.scope)}): {_esc(item.content)} '
             f'<form method="post" style="display:inline"><input type="hidden" name="id" value="{_esc(item.id)}">'
-            f'<button name="action" value="retract">retract</button></form></li>'
+            f'<button name="action" value="retract">undo</button></form>'
+            + (
+                f'<form method="post" style="display:inline"><input type="hidden" name="run_id" value="{_esc(item.run_id)}">'
+                f'<button name="action" value="rollback_run">undo run</button></form>'
+                if item.run_id
+                else ""
+            )
+            + "</li>"
             for item in harness.memory.recently_learned(limit=int(harness.settings.get("memory.recent_limit")))
         )
-        pending = "".join(
-            f'<li>{_esc(item.id)}: {_esc(item.content)} ({_esc(item.provenance)}) '
-            f'<form method="post" style="display:inline"><input type="hidden" name="id" value="{_esc(item.id)}">'
-            f'<button name="action" value="approve">approve</button>'
-            f'<button name="action" value="reject">reject</button></form></li>'
-            for item in harness.memory.list(status="proposed")
-        )
         return _page(
-            ("<p class='err'>" + _esc(error) + "</p>" if error else "")
-            + "<h1>Memory</h1><h2>Awaiting approval</h2><ul>"
-            + pending
-            + "</ul><h2>Recently learned</h2><ul>"
-            + learned
+            "<h1>Memory</h1><h2>Recently learned</h2><ul>"
+            + (learned or "<li class='muted'>none</li>")
             + "</ul><h2>All records</h2>"
             "<table><tr><th>id</th><th>type</th><th>origin</th><th>status</th><th>scope</th>"
-            "<th>content</th><th>provenance</th><th></th></tr>"
+            "<th>content</th><th>hint notes</th><th>provenance</th><th></th></tr>"
             + "".join(rows)
             + "</table>"
         )
@@ -340,21 +780,32 @@ def create_app(harness: Harness) -> Starlette:
         if request.method == "POST":
             form = _form(await request.body())
             action = form.get("action", "")
-            if action == "run":
-                harness.consolidation.run(trigger="ui")
-            elif action == "rollback":
-                harness.consolidation.rollback(form.get("id", ""), "user")
+            try:
+                if action == "run":
+                    harness.consolidation.run(trigger="ui")
+                elif action == "rollback":
+                    run_id = form.get("id", "")
+                    if not run_id:
+                        return _error_page("missing run id", 400)
+                    harness.consolidation.rollback(run_id, "user")
+                else:
+                    return _error_page(f"unknown consolidation action: {action}", 400)
+            except KeyError as exc:
+                return _error_page(f"consolidation run not found: {exc}", 404)
+            except ValueError as exc:
+                return _error_page(str(exc), 400)
             return RedirectResponse("/consolidation", status_code=303)
         rows = "".join(
             f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.status)}</td><td>{_esc(item.rolled_back)}</td>"
-            f"<td>{_esc(item.proposals)}</td><td>{_esc(item.results)}</td><td>{_esc(item.findings)}</td>"
+            f"<td>{_esc(item.report)}</td><td>{_esc(item.proposals)}</td><td>{_esc(item.results)}</td>"
+            f"<td>{_esc(item.findings)}</td>"
             f'<td><form method="post"><input type="hidden" name="id" value="{_esc(item.id)}">'
             f'<button name="action" value="rollback">rollback</button></form></td></tr>'
             for item in harness.consolidation.list()
         )
         return _page(
             '<h1>Consolidation</h1><form method="post"><button name="action" value="run">Run</button></form>'
-            "<table><tr><th>id</th><th>status</th><th>rolled back</th><th>proposals</th>"
+            "<table><tr><th>id</th><th>status</th><th>rolled back</th><th>report</th><th>proposals</th>"
             "<th>results</th><th>findings</th><th></th></tr>"
             + rows
             + "</table>"
@@ -420,25 +871,160 @@ def create_app(harness: Harness) -> Starlette:
             + "</table>"
         )
 
+    async def history(_request: Request) -> HTMLResponse:
+        segments = harness.history.list_segments()
+        segment_rows = "".join(
+            f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.started_at)}</td><td>{_esc(item.ended_at)}</td>"
+            f"<td>{_esc(len(item.interaction_ids))}</td><td>{_esc(len(item.covered_ids))}</td>"
+            f"<td>{_esc(item.status)}</td><td>{_esc(item.summary)}</td><td>{_esc(item.error)}</td></tr>"
+            for item in segments
+        )
+        interactions = harness.sessions.list_interactions(limit=None)
+        interaction_rows = "".join(
+            f"<tr><td>{_esc(item.ts)}</td><td>{_esc(item.assistant_ts)}</td><td>{_esc(item.session_id)}</td>"
+            f"<td>{_esc(item.user_text)}</td><td>{_esc(item.assistant_text)}</td></tr>"
+            for item in reversed(interactions)
+        )
+        return _page(
+            f"<h1>Conversation history</h1><p class='muted'>Strategy "
+            f"{_esc(harness.settings.get('context.history.strategy'))}; budget "
+            f"{_esc(harness.settings.get('context.budgets.history'))} tokens. Everything here is "
+            "stored; the prompt view may include less.</p>"
+            "<h2>Segments and summaries</h2><table><tr><th>id</th><th>started</th><th>ended</th>"
+            "<th>turns</th><th>summarized</th><th>status</th><th>summary</th><th>error</th></tr>"
+            + segment_rows
+            + "</table><h2>Stored messages</h2><table><tr><th>user ts</th><th>assistant ts</th>"
+            "<th>session</th><th>user</th><th>assistant</th></tr>"
+            + interaction_rows
+            + "</table>"
+        )
+
     async def learning(_request: Request) -> HTMLResponse:
         report = learning_report(harness)
         rows = "".join(f"<tr><td>{_esc(key)}</td><td>{_esc(value)}</td></tr>" for key, value in report.items())
         return _page("<h1>Learning measurements</h1><table>" + rows + "</table>")
 
+    def _reset_result(report) -> HTMLResponse:
+        if report.removed:
+            removed = "".join(
+                f"<tr><td>{_esc(item.path)}</td><td>{_esc(item.files)}</td><td>{_esc(item.bytes)}</td></tr>"
+                for item in report.removed
+            )
+            removed_block = (
+                "<table><tr><th>path</th><th>files</th><th>bytes</th></tr>"
+                + removed
+                + "</table>"
+            )
+        else:
+            removed_block = "<p class='muted'>Nothing was present for this scope.</p>"
+        backup = (
+            f"<p>Backup: <code>{_esc(report.backup_path)}</code></p>"
+            if report.backup_path
+            else "<p class='muted'>Backup disabled.</p>"
+        )
+        seeded = ", ".join(report.seeded) if report.seeded else "nothing"
+        return _page(
+            f"<h1>Reset complete: {_esc(report.scope)}</h1>"
+            f"{backup}<p>Seeded: {_esc(seeded)}</p>"
+            f"<p>Stale references cleared: {_esc(report.cleared_references)}. "
+            f"Duration: {_esc(report.duration_ms)} ms.</p>"
+            f"<h2>Removed</h2>{removed_block}"
+            "<p><a href='/reset'>reset again</a> · <a href='/chat'>chat</a></p>"
+        )
+
+    async def reset_view(request: Request) -> HTMLResponse:
+        word = str(harness.settings.get("maintenance.reset.confirmation_word") or "").strip()
+        if not word:
+            return _error_page(
+                "reset confirmation word is empty; set maintenance.reset.confirmation_word first",
+                400,
+            )
+        if request.method == "POST":
+            form = _form(await request.body())
+            scope = form.get("scope", "full")
+            if scope not in harness.reset.scopes():
+                return _error_page(f"unknown reset scope: {scope}", 400)
+            if form.get("confirm", "") != word:
+                return _error_page("confirmation word does not match; nothing was removed", 400)
+            backup = form.get("backup") == "on"
+            try:
+                report = await asyncio.to_thread(
+                    harness.reset.run,
+                    scope,
+                    actor="ui",
+                    backup=backup,
+                )
+            except ValueError as exc:
+                return _error_page(str(exc), 400)
+            with jobs_lock:
+                jobs.clear()
+            return _reset_result(report)
+
+        scopes = "".join(
+            f"<li><label><input type='radio' name='scope' value='{_esc(scope)}'"
+            f"{' checked' if scope == 'full' else ''}> {_esc(scope)}</label></li>"
+            for scope in harness.reset.scopes()
+        )
+        backup_checked = " checked" if bool(harness.settings.get("maintenance.reset.backup")) else ""
+        return _page(
+            "<h1>Reset</h1>"
+            f"<p class='muted'>Data directory: <code>{_esc(harness.data_dir)}</code>. "
+            "A full reset also restores default settings, the code-defined persona, "
+            "and the reserved self domain.</p>"
+            "<form method='post'>"
+            f"<h2>Scope</h2><ul>{scopes}</ul>"
+            f"<p><label><input type='checkbox' name='backup' value='on'{backup_checked}> "
+            "write a timestamped backup archive first</label></p>"
+            f"<p>Type <b>{_esc(word)}</b> to confirm:<br>"
+            "<input name='confirm' autocomplete='off'></p>"
+            "<p><button>reset</button></p></form>"
+            "<p class='err'>This cannot be undone without the backup archive.</p>"
+        )
+
+    scheduler_task: asyncio.Task | None = None
+
+    async def scheduler_loop() -> None:
+        while True:
+            interval = max(60, int(harness.settings.get("consolidation.schedule_interval_s")))
+            await asyncio.sleep(interval)
+            try:
+                await asyncio.to_thread(harness.consolidation.run, trigger="schedule")
+            except Exception:
+                # A scheduled pass is best-effort; the UI can run one on demand
+                # and the failure stays in the events/trace record.
+                continue
+
+    async def on_startup() -> None:
+        nonlocal scheduler_task
+        if bool(harness.settings.get("consolidation.schedule_enabled")):
+            scheduler_task = asyncio.create_task(scheduler_loop())
+
+    async def on_shutdown() -> None:
+        nonlocal scheduler_task
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            scheduler_task = None
+
     routes = [
         Route("/health", health),
+        Route("/chat", chat),
+        Route("/chat/turn", chat_turn, methods=["POST"]),
+        Route("/chat/turns/{job_id}/events", chat_events),
+        Route("/chat/memory/undo", chat_memory_undo, methods=["POST"]),
         Route("/", traces),
         Route("/traces/{trace_id}", trace_detail),
         Route("/memory", memory, methods=["GET", "POST"]),
         Route("/persona", persona, methods=["GET", "POST"]),
         Route("/tasks", tasks),
         Route("/domains", domains, methods=["GET", "POST"]),
+        Route("/history", history),
         Route("/capabilities", capabilities),
         Route("/consolidation", consolidation, methods=["GET", "POST"]),
         Route("/settings", settings_view, methods=["GET", "POST"]),
         Route("/events", events),
         Route("/learning", learning),
+        Route("/reset", reset_view, methods=["GET", "POST"]),
     ]
-    app = Starlette(routes=routes)
+    app = Starlette(routes=routes, on_startup=[on_startup], on_shutdown=[on_shutdown])
     app.middleware("http")(guard)
     return app

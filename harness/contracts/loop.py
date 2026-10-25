@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from harness.contracts.tasks import Task
+
+
+@dataclass
+class TurnEvent:
+    """One item on the turn event channel (SSE or another transport)."""
+
+    kind: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+class TurnListener(Protocol):
+    def __call__(self, event: TurnEvent) -> None: ...
 
 
 @dataclass
@@ -15,4 +27,9 @@ class TurnResult:
 
 
 class InteractionLoop(Protocol):
-    def handle_turn(self, user_text: str) -> TurnResult: ...
+    def handle_turn(
+        self,
+        user_text: str,
+        *,
+        emit: TurnListener | None = None,
+    ) -> TurnResult: ...

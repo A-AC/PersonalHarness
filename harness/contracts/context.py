@@ -29,6 +29,7 @@ class ContextPackage:
     total_tokens: int
     included: list[InclusionRecord] = field(default_factory=list)
     excluded: list[InclusionRecord] = field(default_factory=list)
+    stats: dict[str, object] = field(default_factory=dict)
 
 
 class ContextBuilder(Protocol):

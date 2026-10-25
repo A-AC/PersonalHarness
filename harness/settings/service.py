@@ -66,8 +66,9 @@ class FileSettingsService:
         self._defs = {item.key: item for item in catalog()}
         self._values: dict[str, Any] = {}
         self._history_path = path.with_name("settings_history.jsonl")
+        self._env = dict(env or {})
         self._load()
-        self._apply_env(env or {})
+        self._apply_env(self._env)
 
     def attach_events(self, events: EventLog) -> None:
         self._events = events
@@ -223,3 +224,13 @@ class FileSettingsService:
 
     def as_dict(self) -> dict[str, Any]:
         return deepcopy(self._values)
+
+    def reload(self) -> None:
+        """Re-read the file, falling back to catalog defaults when it is gone.
+
+        A full reset removes the settings file and its change history; reloading
+        in place keeps every component's settings reference valid while the
+        values return to the seeded defaults (plus launch env overrides).
+        """
+        self._load()
+        self._apply_env(self._env)

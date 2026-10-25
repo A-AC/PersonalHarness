@@ -1,0 +1,488 @@
+{
+  "configs": {
+    "after_strict_full": {
+      "schema_version": 1,
+      "model": "qwen3.5-9b",
+      "endpoint": "http://192.168.50.40:8181/v1/chat/completions",
+      "response_format": "json_schema",
+      "action_schema": "strict",
+      "prompt_variant": "full",
+      "include_time": true,
+      "coerce_optional_arguments": true,
+      "disclose_enum_values": true,
+      "reject_placeholders": true,
+      "honesty_guard": true,
+      "internal_schema_ask_guard": true,
+      "temperature": 0.2,
+      "max_tokens": 1024,
+      "seed": null,
+      "thinking_budget_tokens": 64,
+      "enable_thinking": true,
+      "stream": true,
+      "max_iterations": 5,
+      "invalid_proposal_retries": 1,
+      "identical_retry_limit": 1,
+      "stop_after_nonretryable_failure": true,
+      "planning_mode": "heuristic",
+      "heuristic_max_chars": 160,
+      "heuristic_max_words": 24,
+      "heuristic_split_markers": "then|and also|after that|finally|;|, and"
+    },
+    "after_loose_full": {
+      "schema_version": 1,
+      "model": "qwen3.5-9b",
+      "endpoint": "http://192.168.50.40:8181/v1/chat/completions",
+      "response_format": "json_schema",
+      "action_schema": "loose",
+      "prompt_variant": "full",
+      "include_time": true,
+      "coerce_optional_arguments": true,
+      "disclose_enum_values": true,
+      "reject_placeholders": true,
+      "honesty_guard": true,
+      "internal_schema_ask_guard": true,
+      "temperature": 0.2,
+      "max_tokens": 1024,
+      "seed": null,
+      "thinking_budget_tokens": 64,
+      "enable_thinking": true,
+      "stream": true,
+      "max_iterations": 5,
+      "invalid_proposal_retries": 1,
+      "identical_retry_limit": 1,
+      "stop_after_nonretryable_failure": true,
+      "planning_mode": "heuristic",
+      "heuristic_max_chars": 160,
+      "heuristic_max_words": 24,
+      "heuristic_split_markers": "then|and also|after that|finally|;|, and"
+    },
+    "after_freeform_full": {
+      "schema_version": 1,
+      "model": "qwen3.5-9b",
+      "endpoint": "http://192.168.50.40:8181/v1/chat/completions",
+      "response_format": "text",
+      "action_schema": "loose",
+      "prompt_variant": "full",
+      "include_time": true,
+      "coerce_optional_arguments": true,
+      "disclose_enum_values": true,
+      "reject_placeholders": true,
+      "honesty_guard": true,
+      "internal_schema_ask_guard": true,
+      "temperature": 0.2,
+      "max_tokens": 1024,
+      "seed": null,
+      "thinking_budget_tokens": 64,
+      "enable_thinking": true,
+      "stream": true,
+      "max_iterations": 5,
+      "invalid_proposal_retries": 1,
+      "identical_retry_limit": 1,
+      "stop_after_nonretryable_failure": true,
+      "planning_mode": "heuristic",
+      "heuristic_max_chars": 160,
+      "heuristic_max_words": 24,
+      "heuristic_split_markers": "then|and also|after that|finally|;|, and"
+    }
+  },
+  "summaries": {
+    "after_strict_full": {
+      "runs": 32,
+      "passed": 32,
+      "by_category": {
+        "internal_schema": [
+          2,
+          2
+        ],
+        "memory": [
+          4,
+          4
+        ],
+        "missing_arg": [
+          4,
+          4
+        ],
+        "real_use": [
+          10,
+          10
+        ],
+        "tool_failure": [
+          6,
+          6
+        ],
+        "valid_call": [
+          6,
+          6
+        ]
+      },
+      "by_scenario": {
+        "arithmetic": [
+          2,
+          2
+        ],
+        "echo_missing_text": [
+          2,
+          2
+        ],
+        "echo_valid": [
+          2,
+          2
+        ],
+        "failed_remember_honesty": [
+          2,
+          2
+        ],
+        "failure_honesty": [
+          2,
+          2
+        ],
+        "real_ambiguous_figure_it_out": [
+          2,
+          2
+        ],
+        "real_failed_remember_no_claim": [
+          2,
+          2
+        ],
+        "real_no_internal_schema_question": [
+          2,
+          2
+        ],
+        "real_remember_name_long_history": [
+          2,
+          2
+        ],
+        "real_remember_nas_long_history": [
+          2,
+          2
+        ],
+        "real_resume_after_ask_long_history": [
+          2,
+          2
+        ],
+        "remember_name": [
+          2,
+          2
+        ],
+        "remember_preference": [
+          2,
+          2
+        ],
+        "retry_pressure": [
+          2,
+          2
+        ],
+        "status_missing_target": [
+          2,
+          2
+        ],
+        "status_valid": [
+          2,
+          2
+        ]
+      },
+      "turns": 36,
+      "model_calls": 64,
+      "proposal_validity": 1.0,
+      "invalid_proposals": 0,
+      "parse_failures": 0,
+      "malformed_output_rate": 0.0,
+      "honesty_rejections": 0,
+      "capability_calls": 28,
+      "failed_capability_calls": 10,
+      "tool_call_success_rate": 0.6428571428571429,
+      "turn_latency_ms_mean": 4700.796875,
+      "turn_duration_p50_ms": 9101.0,
+      "turn_duration_p95_ms": 11262.75,
+      "model_call_latency_p50_ms": 4722.0,
+      "model_call_latency_p95_ms": 5763.900000000001,
+      "ttft_p50_ms": 1077.5,
+      "ttft_p95_ms": 1681.8500000000001,
+      "thinking_call_ratio": 1.0,
+      "mean_completion_tokens": 106.75,
+      "mean_visible_output_tokens": 50.765625,
+      "mean_reasoning_tokens": 63.453125,
+      "task_states": {
+        "blocked": 10,
+        "completed": 26
+      },
+      "failures": []
+    },
+    "after_loose_full": {
+      "runs": 32,
+      "passed": 31,
+      "by_category": {
+        "internal_schema": [
+          2,
+          2
+        ],
+        "memory": [
+          4,
+          4
+        ],
+        "missing_arg": [
+          4,
+          4
+        ],
+        "real_use": [
+          9,
+          10
+        ],
+        "tool_failure": [
+          6,
+          6
+        ],
+        "valid_call": [
+          6,
+          6
+        ]
+      },
+      "by_scenario": {
+        "arithmetic": [
+          2,
+          2
+        ],
+        "echo_missing_text": [
+          2,
+          2
+        ],
+        "echo_valid": [
+          2,
+          2
+        ],
+        "failed_remember_honesty": [
+          2,
+          2
+        ],
+        "failure_honesty": [
+          2,
+          2
+        ],
+        "real_ambiguous_figure_it_out": [
+          1,
+          2
+        ],
+        "real_failed_remember_no_claim": [
+          2,
+          2
+        ],
+        "real_no_internal_schema_question": [
+          2,
+          2
+        ],
+        "real_remember_name_long_history": [
+          2,
+          2
+        ],
+        "real_remember_nas_long_history": [
+          2,
+          2
+        ],
+        "real_resume_after_ask_long_history": [
+          2,
+          2
+        ],
+        "remember_name": [
+          2,
+          2
+        ],
+        "remember_preference": [
+          2,
+          2
+        ],
+        "retry_pressure": [
+          2,
+          2
+        ],
+        "status_missing_target": [
+          2,
+          2
+        ],
+        "status_valid": [
+          2,
+          2
+        ]
+      },
+      "turns": 36,
+      "model_calls": 63,
+      "proposal_validity": 1.0,
+      "invalid_proposals": 0,
+      "parse_failures": 0,
+      "malformed_output_rate": 0.0,
+      "honesty_rejections": 0,
+      "capability_calls": 27,
+      "failed_capability_calls": 9,
+      "tool_call_success_rate": 0.6666666666666666,
+      "turn_latency_ms_mean": 4672.174603174603,
+      "turn_duration_p50_ms": 8462.0,
+      "turn_duration_p95_ms": 10702.75,
+      "model_call_latency_p50_ms": 4738.0,
+      "model_call_latency_p95_ms": 5780.5,
+      "ttft_p50_ms": 1061.0,
+      "ttft_p95_ms": 1669.4999999999998,
+      "thinking_call_ratio": 1.0,
+      "mean_completion_tokens": 106.26984126984127,
+      "mean_visible_output_tokens": 49.73015873015873,
+      "mean_reasoning_tokens": 63.523809523809526,
+      "task_states": {
+        "blocked": 9,
+        "completed": 27
+      },
+      "failures": [
+        {
+          "id": "real_ambiguous_figure_it_out",
+          "repeat": 1,
+          "reasons": [
+            "turn 2: response neither asked a question nor stated a limitation"
+          ]
+        }
+      ]
+    },
+    "after_freeform_full": {
+      "runs": 32,
+      "passed": 29,
+      "by_category": {
+        "internal_schema": [
+          2,
+          2
+        ],
+        "memory": [
+          4,
+          4
+        ],
+        "missing_arg": [
+          4,
+          4
+        ],
+        "real_use": [
+          7,
+          10
+        ],
+        "tool_failure": [
+          6,
+          6
+        ],
+        "valid_call": [
+          6,
+          6
+        ]
+      },
+      "by_scenario": {
+        "arithmetic": [
+          2,
+          2
+        ],
+        "echo_missing_text": [
+          2,
+          2
+        ],
+        "echo_valid": [
+          2,
+          2
+        ],
+        "failed_remember_honesty": [
+          2,
+          2
+        ],
+        "failure_honesty": [
+          2,
+          2
+        ],
+        "real_ambiguous_figure_it_out": [
+          2,
+          2
+        ],
+        "real_failed_remember_no_claim": [
+          2,
+          2
+        ],
+        "real_no_internal_schema_question": [
+          2,
+          2
+        ],
+        "real_remember_name_long_history": [
+          2,
+          2
+        ],
+        "real_remember_nas_long_history": [
+          1,
+          2
+        ],
+        "real_resume_after_ask_long_history": [
+          0,
+          2
+        ],
+        "remember_name": [
+          2,
+          2
+        ],
+        "remember_preference": [
+          2,
+          2
+        ],
+        "retry_pressure": [
+          2,
+          2
+        ],
+        "status_missing_target": [
+          2,
+          2
+        ],
+        "status_valid": [
+          2,
+          2
+        ]
+      },
+      "turns": 36,
+      "model_calls": 68,
+      "proposal_validity": 0.8970588235294118,
+      "invalid_proposals": 7,
+      "parse_failures": 7,
+      "malformed_output_rate": 0.10294117647058823,
+      "honesty_rejections": 0,
+      "capability_calls": 27,
+      "failed_capability_calls": 10,
+      "tool_call_success_rate": 0.6296296296296297,
+      "turn_latency_ms_mean": 4637.779411764706,
+      "turn_duration_p50_ms": 9334.0,
+      "turn_duration_p95_ms": 14943.0,
+      "model_call_latency_p50_ms": 4725.5,
+      "model_call_latency_p95_ms": 5771.3,
+      "ttft_p50_ms": 1080.5,
+      "ttft_p95_ms": 1698.8,
+      "thinking_call_ratio": 1.0,
+      "mean_completion_tokens": 104.20588235294117,
+      "mean_visible_output_tokens": 47.455882352941174,
+      "mean_reasoning_tokens": 62.220588235294116,
+      "task_states": {
+        "blocked": 10,
+        "completed": 24,
+        "failed": 2
+      },
+      "failures": [
+        {
+          "id": "real_remember_nas_long_history",
+          "repeat": 1,
+          "reasons": [
+            "turn 1: expected a task in state completed, got ['failed']"
+          ]
+        },
+        {
+          "id": "real_resume_after_ask_long_history",
+          "repeat": 1,
+          "reasons": [
+            "turn 2: response missing ['banana']",
+            "turn 2: expected a task in state completed, got ['failed']"
+          ]
+        },
+        {
+          "id": "real_resume_after_ask_long_history",
+          "repeat": 2,
+          "reasons": [
+            "turn 2: expected a successful mock.echo call with {'echo': 'banana'}; attempts: none"
+          ]
+        }
+      ]
+    }
+  }
+}

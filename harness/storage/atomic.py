@@ -18,7 +18,9 @@ RESERVED_NAMES = {
 
 
 def now_ts() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    # Microsecond precision keeps ordering deterministic for records written in
+    # the same second (duplicate/conflict resolution and recency tie-breaks).
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def new_id(prefix: str) -> str:

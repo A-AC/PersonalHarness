@@ -23,8 +23,9 @@ class FakeSources:
 def candidate(
     *,
     content: str = "The user prefers concise answers",
-    type: str = "preference",
-    scope: str = "global",
+    type_hint: str | None = None,
+    scope_hint: str | None = None,
+    default_scope: str = "global",
     origin: str = "explicit",
     ref: str = "int_1",
     source_kind: str = "user_statement",
@@ -43,10 +44,11 @@ def candidate(
     if structured_fields is not None:
         provenance["structured_fields"] = structured_fields
     return MemoryCandidate(
-        type=type,
         content=content,
-        scope=scope,
         origin=origin,
+        type_hint=type_hint,
+        scope_hint=scope_hint,
+        default_scope=default_scope,
         provenance=provenance,
         supersedes=supersedes,
         run_id=run_id,
@@ -70,91 +72,113 @@ def manager(request, tmp_path: Path) -> MemoryManager:
     return InMemoryMemoryManager(settings, events, sources, scopes)
 
 
-def test_explicit_memory_lifecycle(manager: MemoryManager) -> None:
+def test_explicit_memory_is_active_immediately(manager: MemoryManager) -> None:
     submitted = manager.submit(candidate())
     assert submitted.accepted and submitted.record is not None
     record = submitted.record
     assert record.status == MemoryStatus.ACTIVE
     assert record.origin == MemoryOrigin.EXPLICIT
+    assert record.type == "preference"
     assert manager.get(record.id).id == record.id
+    assert manager.retrieve("concise answers", ["global"], 5)[0].record.id == record.id
 
-    ranked = manager.retrieve("concise answers", ["global"], 5)
-    assert [item.record.id for item in ranked] == [record.id]
-    assert ranked[0].reason
 
+def test_bad_type_and_scope_hints_never_fail_the_write(manager: MemoryManager) -> None:
+    submitted = manager.submit(
+        candidate(content="Remember my name is Alex", type_hint="identity", scope_hint="personal")
+    )
+    assert submitted.accepted and submitted.record is not None
+    record = submitted.record
+    assert record.status == MemoryStatus.ACTIVE
+    assert record.type == "fact"
+    assert record.scope == "global"
+    assert any("identity" in note and "fact" in note for note in submitted.hint_notes)
+    assert any("personal" in note and "global" in note for note in submitted.hint_notes)
+
+
+def test_no_hints_uses_classifier_and_default_scope(manager: MemoryManager) -> None:
+    submitted = manager.submit(candidate(content="The user prefers concise answers"))
+    assert submitted.accepted and submitted.record is not None
+    assert submitted.record.type == "preference"
+    assert submitted.record.scope == "global"
+    assert submitted.hint_notes == []
+
+
+def test_default_scope_of_active_domain_is_used(manager: MemoryManager) -> None:
+    submitted = manager.submit(candidate(content="The NAS is at 192.168.1.10", default_scope="domain:dom_1"))
+    assert submitted.record is not None
+    assert submitted.record.scope == "domain:dom_1"
+
+
+def test_self_hint_is_ignored_for_a_user_fact(manager: MemoryManager) -> None:
+    submitted = manager.submit(candidate(content="The user's name is Alex", scope_hint="self"))
+    assert submitted.record is not None
+    assert submitted.record.scope == "global"
+    assert any("only for memories about the assistant" in note for note in submitted.hint_notes)
+
+
+def test_duplicate_remember_returns_the_existing_record(manager: MemoryManager) -> None:
+    first = manager.submit(candidate(content="The user's name is Alex")).record
+    assert first is not None
+    second = manager.submit(candidate(content="The user's name is Alex."))
+    assert second.accepted and second.duplicate
+    assert second.record is not None and second.record.id == first.id
+    assert len(manager.list(status="active")) == 1
+
+
+def test_conflicting_remember_supersedes_the_older_statement(manager: MemoryManager) -> None:
+    first = manager.submit(candidate(content="The user's name is Alex")).record
+    assert first is not None
+    second = manager.submit(candidate(content="The user's name is Bob"))
+    assert second.accepted and second.record is not None
+    assert second.replaced and second.replaced[0].id == first.id
+    assert manager.get(first.id).status == MemoryStatus.SUPERSEDED
+    assert manager.get(first.id).superseded_by == second.record.id
+    assert manager.get(second.record.id).supersedes == first.id
+    active = manager.list(status="active")
+    assert [item.content for item in active] == ["The user's name is Bob"]
+
+
+def test_explicit_correction_keeps_history(manager: MemoryManager) -> None:
+    original = manager.submit(candidate(content="The user's name is Alex")).record
+    assert original is not None
+    corrected = manager.submit(
+        candidate(content="The user's name is Alexandra", supersedes=original.id)
+    ).record
+    assert corrected is not None
+    assert manager.get(original.id).status == MemoryStatus.SUPERSEDED
+    assert manager.get(corrected.id).supersedes == original.id
+
+
+def test_retract_removes_from_retrieval(manager: MemoryManager) -> None:
+    record = manager.submit(candidate()).record
+    assert record is not None
     retracted = manager.retract(record.id, "user")
     assert retracted.status == MemoryStatus.RETRACTED
     assert manager.retrieve("concise answers", ["global"], 5) == []
 
 
-def test_correction_supersedes_and_keeps_history(manager: MemoryManager) -> None:
-    original = manager.submit(candidate()).record
-    assert original is not None
-    corrected = manager.submit(
-        candidate(content="The user prefers detailed answers", supersedes=original.id)
-    ).record
-    assert corrected is not None
-    assert manager.get(original.id).status == MemoryStatus.SUPERSEDED
-    assert manager.get(original.id).superseded_by == corrected.id
-    assert manager.get(corrected.id).supersedes == original.id
-
-
-def test_queues_inferred_conflict_with_explicit(manager: MemoryManager) -> None:
-    original = manager.submit(candidate(content="The user prefers concise answers")).record
-    assert original is not None
-    conflict = manager.submit(
-        candidate(
-            content="The user prefers concise answers.",
-            origin="inferred",
-            ref="int_2",
-            excerpt="different",
-        )
-    )
-    assert conflict.queued
-    assert conflict.record is not None and conflict.record.status == MemoryStatus.PROPOSED
-    assert manager.get(original.id).status == MemoryStatus.ACTIVE
-
-    approved = manager.approve(conflict.record.id, "user")
-    assert approved.status == MemoryStatus.ACTIVE
-    assert manager.get(original.id).status == MemoryStatus.SUPERSEDED
-
-
-def test_reject_proposal_leaves_store_unchanged(manager: MemoryManager) -> None:
-    original = manager.submit(candidate()).record
-    assert original is not None
-    queued = manager.submit(candidate(content="The user prefers concise answers.", origin="inferred", ref="int_2"))
-    assert queued.record is not None
-    rejected = manager.reject(queued.record.id, "user")
-    assert rejected.status == MemoryStatus.REJECTED
-    assert manager.get(original.id).status == MemoryStatus.ACTIVE
-    assert manager.retrieve("concise answers", ["global"], 5)[0].record.id == original.id
-
-
-def test_invalid_candidates_do_not_corrupt_store(manager: MemoryManager) -> None:
+def test_invalid_provenance_still_blocks_the_write(manager: MemoryManager) -> None:
     good = manager.submit(candidate()).record
     assert good is not None
     before = len(manager.list())
     bad = [
         candidate(content=""),
-        candidate(type="not-a-type"),
         candidate(origin="nonsense"),
-        candidate(scope="domain:missing"),
         candidate(ref="missing-ref"),
         candidate(excerpt="text that is not in the source"),
         candidate(source_kind="document"),
     ]
     for item in bad:
-        result = manager.submit(item)
-        assert not result.accepted
+        assert not manager.submit(item).accepted
     assert len(manager.list()) == before
-    assert manager.get(good.id).status == MemoryStatus.ACTIVE
 
 
 def test_execution_outcome_source_is_structured_only(manager: MemoryManager) -> None:
     ok = manager.submit(
         candidate(
             content="A retry with a changed argument recovered the call",
-            type="lesson",
+            type_hint="lesson",
             origin="inferred",
             ref="op_1",
             source_kind="execution_outcome",
@@ -165,7 +189,7 @@ def test_execution_outcome_source_is_structured_only(manager: MemoryManager) -> 
     bad = manager.submit(
         candidate(
             content="A lesson from free text",
-            type="lesson",
+            type_hint="lesson",
             origin="inferred",
             ref="op_1",
             source_kind="execution_outcome",
@@ -191,32 +215,60 @@ def test_usage_log_and_recently_learned(manager: MemoryManager) -> None:
         ]
     )
     assert manager.usage_log()[0].memory_id == explicit.id
-    learned = manager.recently_learned()
-    assert [item.id for item in learned] == [inferred.id]
+    assert [item.id for item in manager.recently_learned()] == [inferred.id]
 
 
-def test_rollback_run_retracts_records_and_restores_superseded(manager: MemoryManager) -> None:
-    original = manager.submit(candidate()).record
+def test_consolidation_retypes_merges_and_keeps_history(manager: MemoryManager) -> None:
+    first = manager.submit(candidate(content="The user's NAS is at 192.168.1.10")).record
+    assert first is not None
+    manager.set_type(first.id, "lesson", "test")
+    duplicate = manager.submit(
+        candidate(content="User's NAS is at 192.168.1.10", origin="inferred", ref="int_2", run_id="run_1")
+    ).record
+    assert duplicate is not None and duplicate.id != first.id
+
+    results = manager.consolidate("run_2", "consolidation")
+    retype = [item for item in results if item["kind"] == "retype" and item["memory_id"] == first.id]
+    assert retype and retype[0]["from"] == "lesson" and retype[0]["to"] == "fact"
+    merged = [item for item in results if item["kind"] == "merged"]
+    assert merged
+    loser_ids = {item["loser_id"] for item in merged}
+    assert len(loser_ids) == 1
+    assert len(manager.list(status="active")) == 1
+    loser = manager.get(next(iter(loser_ids)))
+    assert loser.status == MemoryStatus.SUPERSEDED
+
+
+def test_rollback_run_restores_the_superseded_record(manager: MemoryManager) -> None:
+    original = manager.submit(candidate(content="The user prefers concise answers")).record
     assert original is not None
-    submitted = manager.submit(
-        candidate(content="The user prefers concise answers.", origin="inferred", ref="int_2", run_id="run_1")
-    )
-    assert submitted.queued
-    inferred = submitted.record
+    inferred = manager.submit(
+        candidate(
+            content="The user prefers detailed answers",
+            origin="inferred",
+            ref="int_2",
+            supersedes=original.id,
+            run_id="run_1",
+        )
+    ).record
     assert inferred is not None
-    manager.approve(inferred.id, "user")
     assert manager.get(original.id).status == MemoryStatus.SUPERSEDED
-    assert manager.get(inferred.id).supersedes == original.id
+
     touched = manager.rollback_run("run_1", "user")
     assert inferred.id in touched
     assert manager.get(inferred.id).status == MemoryStatus.RETRACTED
     assert manager.get(original.id).status == MemoryStatus.ACTIVE
+    assert manager.get(original.id).superseded_by is None
 
 
 def test_scope_filtering(manager: MemoryManager) -> None:
     global_rec = manager.submit(candidate(content="global preference")).record
-    domain_rec = manager.submit(candidate(content="domain preference", scope="domain:dom_1", ref="int_2")).record
-    project_rec = manager.submit(candidate(content="project preference", scope="project:prj_1", ref="int_2")).record
+    domain_rec = manager.submit(
+        candidate(content="domain preference", scope_hint="domain:dom_1", ref="int_2")
+    ).record
+    project_rec = manager.submit(
+        candidate(content="project preference", scope_hint="project:prj_1", ref="int_2")
+    ).record
     assert global_rec and domain_rec and project_rec
     ids = {item.record.id for item in manager.retrieve("preference", ["domain:dom_1"], 10)}
     assert ids == {domain_rec.id}

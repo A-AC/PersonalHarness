@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 from harness.contracts.events import EventLog
-from harness.contracts.memory import MemoryCandidate, MemoryRecord, RankedMemory, SubmitResult, UsageEntry
+from harness.constants import CONVERSATION_REF_PREFIXES
+from harness.contracts.memory import MemoryCandidate, MemoryClassifier, MemoryRecord, RankedMemory, SubmitResult, UsageEntry
 from harness.contracts.settings import SettingsService
 from harness.contracts.sources import SourceResolver
 from harness.memory.core import MemoryCore
 
 
 class InMemoryMemoryManager:
-    def __init__(self, settings: SettingsService, events: EventLog, sources: SourceResolver, scope_check):
+    def __init__(
+        self,
+        settings: SettingsService,
+        events: EventLog,
+        sources: SourceResolver,
+        scope_check,
+        classifier: MemoryClassifier | None = None,
+    ):
         self._records: dict[str, MemoryRecord] = {}
         self._usage: list[UsageEntry] = []
         self._core = MemoryCore(
@@ -21,6 +29,7 @@ class InMemoryMemoryManager:
             usage_put=self._usage.append,
             usage_all=lambda: list(self._usage),
             scopes=scope_check,
+            classifier=classifier,
         )
 
     def get(self, memory_id: str) -> MemoryRecord:
@@ -38,11 +47,14 @@ class InMemoryMemoryManager:
     def retract(self, memory_id: str, actor: str) -> MemoryRecord:
         return self._core.retract(memory_id, actor)
 
-    def approve(self, memory_id: str, actor: str) -> MemoryRecord:
-        return self._core.approve(memory_id, actor)
+    def set_type(self, memory_id: str, type: str, actor: str) -> MemoryRecord:
+        return self._core.set_type(memory_id, type, actor)
 
-    def reject(self, memory_id: str, actor: str) -> MemoryRecord:
-        return self._core.reject(memory_id, actor)
+    def restore(self, memory_id: str, actor: str) -> MemoryRecord:
+        return self._core.restore(memory_id, actor)
+
+    def consolidate(self, run_id: str, actor: str) -> list[dict]:
+        return self._core.consolidate(run_id, actor)
 
     def record_usage(self, entries: list[UsageEntry]) -> None:
         self._core.record_usage(entries)
@@ -58,3 +70,21 @@ class InMemoryMemoryManager:
 
     def rollback_run(self, run_id: str, actor: str) -> list[str]:
         return self._core.rollback_run(run_id, actor)
+
+    def reset(self, *, keep_records: bool = False) -> None:
+        self._usage.clear()
+        if keep_records:
+            for record in self._records.values():
+                provenance = record.provenance or {}
+                refs = [str(item) for item in provenance.get("source_refs") or []]
+                kept = [item for item in refs if not item.startswith(CONVERSATION_REF_PREFIXES)]
+                if kept == refs:
+                    continue
+                provenance["source_refs"] = kept
+                provenance["reset_cleared_refs"] = sorted(
+                    set(provenance.get("reset_cleared_refs") or [])
+                    | (set(refs) - set(kept))
+                )
+                record.provenance = provenance
+            return
+        self._records.clear()

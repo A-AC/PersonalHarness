@@ -1,0 +1,2658 @@
+{
+  "tag": "history_full__ambiguous",
+  "config": {
+    "schema_version": 1,
+    "model": "qwen3.5-9b",
+    "endpoint": "http://192.168.50.40:8181/v1/chat/completions",
+    "response_format": "json_schema",
+    "action_schema": "strict",
+    "prompt_variant": "full",
+    "include_time": true,
+    "timezone": "America/Mexico_City",
+    "history_strategy": "full",
+    "history_budget": 800,
+    "history_verbatim_turns": 6,
+    "history_segment_gap_hours": 12.0,
+    "history_summary_tokens": 200,
+    "history_summaries": true,
+    "history_background": false,
+    "coerce_optional_arguments": true,
+    "disclose_enum_values": true,
+    "reject_placeholders": true,
+    "honesty_guard": true,
+    "internal_schema_ask_guard": true,
+    "temperature": 0.2,
+    "max_tokens": 1024,
+    "seed": null,
+    "thinking_budget_tokens": 64,
+    "enable_thinking": true,
+    "stream": true,
+    "max_iterations": 5,
+    "invalid_proposal_retries": 1,
+    "identical_retry_limit": 1,
+    "stop_after_nonretryable_failure": true,
+    "planning_mode": "heuristic",
+    "heuristic_max_chars": 160,
+    "heuristic_max_words": 24,
+    "heuristic_split_markers": "then|and also|after that|finally|;|, and"
+  },
+  "repeats": 6,
+  "summary": {
+    "runs": 6,
+    "passed": 6,
+    "by_category": {
+      "real_use": [
+        6,
+        6
+      ]
+    },
+    "by_scenario": {
+      "real_ambiguous_figure_it_out": [
+        6,
+        6
+      ]
+    },
+    "turns": 12,
+    "model_calls": 18,
+    "proposal_validity": 1.0,
+    "invalid_proposals": 0,
+    "parse_failures": 0,
+    "malformed_output_rate": 0.0,
+    "honesty_rejections": 0,
+    "capability_calls": 6,
+    "failed_capability_calls": 6,
+    "tool_call_success_rate": 0.0,
+    "turn_latency_ms_mean": 5914.944444444444,
+    "turn_duration_p50_ms": 8440.5,
+    "turn_duration_p95_ms": 12347.3,
+    "model_call_latency_p50_ms": 6342.5,
+    "model_call_latency_p95_ms": 6702.0,
+    "ttft_p50_ms": 2644.0,
+    "ttft_p95_ms": 2740.45,
+    "thinking_call_ratio": 1.0,
+    "mean_prompt_tokens": 2593.722222222222,
+    "mean_completion_tokens": 111.33333333333333,
+    "mean_visible_output_tokens": 51.333333333333336,
+    "mean_reasoning_tokens": 64.94444444444444,
+    "task_states": {
+      "blocked": 12
+    },
+    "failures": []
+  },
+  "results": [
+    {
+      "id": "real_ambiguous_figure_it_out",
+      "category": "real_use",
+      "repeat": 1,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "Echo the value in <text>.",
+          "messages": [
+            "What is the value you want me to echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_4d55197a361e04a9",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [
+            {
+              "id": "op_36aeb1699d66e7fb",
+              "capability": "mock",
+              "operation": "echo",
+              "status": "failed",
+              "error_category": "invalid_arguments",
+              "data": {
+                "argument_errors": [
+                  "invalid text \"Echo the value in <text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                ],
+                "argument_notes": []
+              },
+              "message": "invalid arguments: invalid text \"Echo the value in <text>\": contains unresolved placeholder <text>; ask the user for the real value"
+            }
+          ],
+          "traces": 2,
+          "trace_validation": [
+            {
+              "ok": true,
+              "execution": "failed",
+              "envelope": {
+                "operation_id": "op_36aeb1699d66e7fb",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"Echo the value in <text>\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:32:46.659367Z",
+                  "ended_at": "2026-10-25T21:32:46.660644Z",
+                  "confirmation": "failed",
+                  "sequence": 1792963966659372800,
+                  "operation_id": "op_36aeb1699d66e7fb"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"Echo the value in <text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6620,
+            4941
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6620,
+              "time_to_first_token_ms": 2593,
+              "prompt_tokens": 2458,
+              "completion_tokens": 119,
+              "visible_output_tokens": 61,
+              "reasoning_tokens": 66,
+              "thinking_produced": true
+            },
+            {
+              "role": "interactive",
+              "duration_ms": 4941,
+              "time_to_first_token_ms": 759,
+              "prompt_tokens": 2811,
+              "completion_tokens": 123,
+              "visible_output_tokens": 64,
+              "reasoning_tokens": 84,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 0,
+              "detail": {
+                "interaction_id": "int_e3aa2ed1bbe5f721"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 0,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 0,
+              "detail": {
+                "tasks": [
+                  "tsk_4d55197a361e04a9"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 8,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 16,
+              "duration_ms": 33,
+              "detail": {
+                "task_id": "tsk_4d55197a361e04a9",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_64e701bbf48fe742",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 50,
+              "duration_ms": 6620,
+              "detail": {
+                "task_id": "tsk_4d55197a361e04a9",
+                "trace_id": "trc_7f7a538350f7914b",
+                "duration_ms": 6620,
+                "prompt_tokens": 2458,
+                "completion_tokens": 119,
+                "visible_output_tokens": 61,
+                "reasoning_tokens": 66,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2593
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6671,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "act",
+                "action": "act"
+              }
+            },
+            {
+              "stage": "execution",
+              "start_ms": 6671,
+              "duration_ms": 2,
+              "detail": {
+                "operation_id": "op_36aeb1699d66e7fb",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"Echo the value in <text>\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:32:46.659367Z",
+                  "ended_at": "2026-10-25T21:32:46.660644Z",
+                  "confirmation": "failed",
+                  "sequence": 1792963966659372800,
+                  "operation_id": "op_36aeb1699d66e7fb"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"Echo the value in <text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 6675,
+              "duration_ms": 3,
+              "detail": {
+                "task_id": "tsk_4d55197a361e04a9",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_64e701bbf48fe742",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 6678,
+              "duration_ms": 4941,
+              "detail": {
+                "task_id": "tsk_4d55197a361e04a9",
+                "trace_id": "trc_9dfb1f9682043995",
+                "duration_ms": 4941,
+                "prompt_tokens": 2811,
+                "completion_tokens": 123,
+                "visible_output_tokens": 64,
+                "reasoning_tokens": 84,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 759
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 11620,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 11623,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_4d55197a361e04a9",
+                "text": "What is the value you want me to echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 11638,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What is the value you want me to echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 11639,
+          "turn": 1
+        },
+        {
+          "user": "i don't know, figure it out",
+          "messages": [
+            "What text should I echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_4d55197a361e04a9",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6672
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6672,
+              "time_to_first_token_ms": 2670,
+              "prompt_tokens": 2532,
+              "completion_tokens": 118,
+              "visible_output_tokens": 52,
+              "reasoning_tokens": 60,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_7db15e13741741b0"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 17,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 27,
+              "duration_ms": 10,
+              "detail": {
+                "task_id": "tsk_4d55197a361e04a9",
+                "tokens": 2275,
+                "included": 19,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_64e701bbf48fe742",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 15,
+                  "older_turns": 0,
+                  "interactions": 15
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 38,
+              "duration_ms": 6672,
+              "detail": {
+                "task_id": "tsk_4d55197a361e04a9",
+                "trace_id": "trc_4e6e2dcce8a9a7c9",
+                "duration_ms": 6672,
+                "prompt_tokens": 2532,
+                "completion_tokens": 118,
+                "visible_output_tokens": 52,
+                "reasoning_tokens": 60,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2670
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6710,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 6713,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_4d55197a361e04a9",
+                "text": "What text should I echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 6729,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 6731,
+          "turn": 2
+        }
+      ]
+    },
+    {
+      "id": "real_ambiguous_figure_it_out",
+      "category": "real_use",
+      "repeat": 2,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "Echo the value in <text>.",
+          "messages": [
+            "What text should I echo for you?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_05bf60194449f59a",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [
+            {
+              "id": "op_e2228d76eb3b744d",
+              "capability": "mock",
+              "operation": "echo",
+              "status": "failed",
+              "error_category": "invalid_arguments",
+              "data": {
+                "argument_errors": [
+                  "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                ],
+                "argument_notes": []
+              },
+              "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+            }
+          ],
+          "traces": 2,
+          "trace_validation": [
+            {
+              "ok": true,
+              "execution": "failed",
+              "envelope": {
+                "operation_id": "op_e2228d76eb3b744d",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:33:04.984338Z",
+                  "ended_at": "2026-10-25T21:33:04.985385Z",
+                  "confirmation": "failed",
+                  "sequence": 1792963984984343000,
+                  "operation_id": "op_e2228d76eb3b744d"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6442,
+            6699
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6442,
+              "time_to_first_token_ms": 2617,
+              "prompt_tokens": 2457,
+              "completion_tokens": 113,
+              "visible_output_tokens": 53,
+              "reasoning_tokens": 66,
+              "thinking_produced": true
+            },
+            {
+              "role": "interactive",
+              "duration_ms": 6699,
+              "time_to_first_token_ms": 2964,
+              "prompt_tokens": 2796,
+              "completion_tokens": 110,
+              "visible_output_tokens": 48,
+              "reasoning_tokens": 78,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_ae8aacbb23d09322"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 0,
+              "detail": {
+                "tasks": [
+                  "tsk_05bf60194449f59a"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 9,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 19,
+              "duration_ms": 23,
+              "detail": {
+                "task_id": "tsk_05bf60194449f59a",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_f6e3f6f7b12227ae",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 43,
+              "duration_ms": 6442,
+              "detail": {
+                "task_id": "tsk_05bf60194449f59a",
+                "trace_id": "trc_274900d2da2f04f1",
+                "duration_ms": 6442,
+                "prompt_tokens": 2457,
+                "completion_tokens": 113,
+                "visible_output_tokens": 53,
+                "reasoning_tokens": 66,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2617
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6486,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "act",
+                "action": "act"
+              }
+            },
+            {
+              "stage": "execution",
+              "start_ms": 6486,
+              "duration_ms": 2,
+              "detail": {
+                "operation_id": "op_e2228d76eb3b744d",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:33:04.984338Z",
+                  "ended_at": "2026-10-25T21:33:04.985385Z",
+                  "confirmation": "failed",
+                  "sequence": 1792963984984343000,
+                  "operation_id": "op_e2228d76eb3b744d"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 6489,
+              "duration_ms": 3,
+              "detail": {
+                "task_id": "tsk_05bf60194449f59a",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_f6e3f6f7b12227ae",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 6493,
+              "duration_ms": 6699,
+              "detail": {
+                "task_id": "tsk_05bf60194449f59a",
+                "trace_id": "trc_fe1144de8824d6ce",
+                "duration_ms": 6699,
+                "prompt_tokens": 2796,
+                "completion_tokens": 110,
+                "visible_output_tokens": 48,
+                "reasoning_tokens": 78,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2964
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 13192,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 13195,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_05bf60194449f59a",
+                "text": "What text should I echo for you?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 13212,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo for you?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 13213,
+          "turn": 1
+        },
+        {
+          "user": "i don't know, figure it out",
+          "messages": [
+            "What text should I echo for you?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_05bf60194449f59a",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6358
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6358,
+              "time_to_first_token_ms": 2666,
+              "prompt_tokens": 2529,
+              "completion_tokens": 109,
+              "visible_output_tokens": 45,
+              "reasoning_tokens": 59,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_d850784b5eb8fdff"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 17,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 26,
+              "duration_ms": 10,
+              "detail": {
+                "task_id": "tsk_05bf60194449f59a",
+                "tokens": 2273,
+                "included": 19,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_f6e3f6f7b12227ae",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 15,
+                  "older_turns": 0,
+                  "interactions": 15
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 37,
+              "duration_ms": 6358,
+              "detail": {
+                "task_id": "tsk_05bf60194449f59a",
+                "trace_id": "trc_deac0adf68447e00",
+                "duration_ms": 6358,
+                "prompt_tokens": 2529,
+                "completion_tokens": 109,
+                "visible_output_tokens": 45,
+                "reasoning_tokens": 59,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2666
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6395,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 6398,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_05bf60194449f59a",
+                "text": "What text should I echo for you?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 6414,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo for you?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 6415,
+          "turn": 2
+        }
+      ]
+    },
+    {
+      "id": "real_ambiguous_figure_it_out",
+      "category": "real_use",
+      "repeat": 3,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "Echo the value in <text>.",
+          "messages": [
+            "What text should I echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_68f74e13ffd4462c",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [
+            {
+              "id": "op_a8e48ed8055ef253",
+              "capability": "mock",
+              "operation": "echo",
+              "status": "failed",
+              "error_category": "invalid_arguments",
+              "data": {
+                "argument_errors": [
+                  "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                ],
+                "argument_notes": []
+              },
+              "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+            }
+          ],
+          "traces": 2,
+          "trace_validation": [
+            {
+              "ok": true,
+              "execution": "failed",
+              "envelope": {
+                "operation_id": "op_a8e48ed8055ef253",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:33:24.384398Z",
+                  "ended_at": "2026-10-25T21:33:24.385508Z",
+                  "confirmation": "failed",
+                  "sequence": 1792964004384408200,
+                  "operation_id": "op_a8e48ed8055ef253"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6077,
+            3956
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6077,
+              "time_to_first_token_ms": 2633,
+              "prompt_tokens": 2453,
+              "completion_tokens": 102,
+              "visible_output_tokens": 37,
+              "reasoning_tokens": 67,
+              "thinking_produced": true
+            },
+            {
+              "role": "interactive",
+              "duration_ms": 3956,
+              "time_to_first_token_ms": 732,
+              "prompt_tokens": 2779,
+              "completion_tokens": 95,
+              "visible_output_tokens": 44,
+              "reasoning_tokens": 53,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_441b7356554e6d94"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 1,
+              "detail": {
+                "tasks": [
+                  "tsk_68f74e13ffd4462c"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 8,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 17,
+              "duration_ms": 24,
+              "detail": {
+                "task_id": "tsk_68f74e13ffd4462c",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_3bb07a597ac2ae9a",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 42,
+              "duration_ms": 6077,
+              "detail": {
+                "task_id": "tsk_68f74e13ffd4462c",
+                "trace_id": "trc_f9f0fc6fb8ea6aed",
+                "duration_ms": 6077,
+                "prompt_tokens": 2453,
+                "completion_tokens": 102,
+                "visible_output_tokens": 37,
+                "reasoning_tokens": 67,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2633
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6120,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "act",
+                "action": "act"
+              }
+            },
+            {
+              "stage": "execution",
+              "start_ms": 6120,
+              "duration_ms": 2,
+              "detail": {
+                "operation_id": "op_a8e48ed8055ef253",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:33:24.384398Z",
+                  "ended_at": "2026-10-25T21:33:24.385508Z",
+                  "confirmation": "failed",
+                  "sequence": 1792964004384408200,
+                  "operation_id": "op_a8e48ed8055ef253"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 6124,
+              "duration_ms": 3,
+              "detail": {
+                "task_id": "tsk_68f74e13ffd4462c",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_3bb07a597ac2ae9a",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 6127,
+              "duration_ms": 3956,
+              "detail": {
+                "task_id": "tsk_68f74e13ffd4462c",
+                "trace_id": "trc_abcfc713fb1e2371",
+                "duration_ms": 3956,
+                "prompt_tokens": 2779,
+                "completion_tokens": 95,
+                "visible_output_tokens": 44,
+                "reasoning_tokens": 53,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 732
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 10084,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 10086,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_68f74e13ffd4462c",
+                "text": "What text should I echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 10102,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 10103,
+          "turn": 1
+        },
+        {
+          "user": "i don't know, figure it out",
+          "messages": [
+            "What text should I echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_68f74e13ffd4462c",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6327
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6327,
+              "time_to_first_token_ms": 2701,
+              "prompt_tokens": 2523,
+              "completion_tokens": 107,
+              "visible_output_tokens": 43,
+              "reasoning_tokens": 63,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_964a3edf9e33a6e7"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 17,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 27,
+              "duration_ms": 11,
+              "detail": {
+                "task_id": "tsk_68f74e13ffd4462c",
+                "tokens": 2271,
+                "included": 19,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_3bb07a597ac2ae9a",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 15,
+                  "older_turns": 0,
+                  "interactions": 15
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 39,
+              "duration_ms": 6327,
+              "detail": {
+                "task_id": "tsk_68f74e13ffd4462c",
+                "trace_id": "trc_69dfc9dfe9861ab1",
+                "duration_ms": 6327,
+                "prompt_tokens": 2523,
+                "completion_tokens": 107,
+                "visible_output_tokens": 43,
+                "reasoning_tokens": 63,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2701
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6366,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 6369,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_68f74e13ffd4462c",
+                "text": "What text should I echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 6384,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 6386,
+          "turn": 2
+        }
+      ]
+    },
+    {
+      "id": "real_ambiguous_figure_it_out",
+      "category": "real_use",
+      "repeat": 4,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "Echo the value in <text>.",
+          "messages": [
+            "What is the actual text you want me to echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_eb1979cf12e4dc5d",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [
+            {
+              "id": "op_d22da0d5c7e187e2",
+              "capability": "mock",
+              "operation": "echo",
+              "status": "failed",
+              "error_category": "invalid_arguments",
+              "data": {
+                "argument_errors": [
+                  "invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value"
+                ],
+                "argument_notes": []
+              },
+              "message": "invalid arguments: invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value"
+            }
+          ],
+          "traces": 2,
+          "trace_validation": [
+            {
+              "ok": true,
+              "execution": "failed",
+              "envelope": {
+                "operation_id": "op_d22da0d5c7e187e2",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:33:41.616355Z",
+                  "ended_at": "2026-10-25T21:33:41.617426Z",
+                  "confirmation": "failed",
+                  "sequence": 1792964021616361500,
+                  "operation_id": "op_d22da0d5c7e187e2"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6684,
+            4094
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6684,
+              "time_to_first_token_ms": 2655,
+              "prompt_tokens": 2456,
+              "completion_tokens": 119,
+              "visible_output_tokens": 60,
+              "reasoning_tokens": 66,
+              "thinking_produced": true
+            },
+            {
+              "role": "interactive",
+              "duration_ms": 4094,
+              "time_to_first_token_ms": 734,
+              "prompt_tokens": 2810,
+              "completion_tokens": 99,
+              "visible_output_tokens": 64,
+              "reasoning_tokens": 51,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_643391d335da0ced"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 0,
+              "detail": {
+                "tasks": [
+                  "tsk_eb1979cf12e4dc5d"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 10,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 19,
+              "duration_ms": 22,
+              "detail": {
+                "task_id": "tsk_eb1979cf12e4dc5d",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_c63d8bf712e3f29b",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 41,
+              "duration_ms": 6684,
+              "detail": {
+                "task_id": "tsk_eb1979cf12e4dc5d",
+                "trace_id": "trc_0581609d86958089",
+                "duration_ms": 6684,
+                "prompt_tokens": 2456,
+                "completion_tokens": 119,
+                "visible_output_tokens": 60,
+                "reasoning_tokens": 66,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2655
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6726,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "act",
+                "action": "act"
+              }
+            },
+            {
+              "stage": "execution",
+              "start_ms": 6726,
+              "duration_ms": 3,
+              "detail": {
+                "operation_id": "op_d22da0d5c7e187e2",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:33:41.616355Z",
+                  "ended_at": "2026-10-25T21:33:41.617426Z",
+                  "confirmation": "failed",
+                  "sequence": 1792964021616361500,
+                  "operation_id": "op_d22da0d5c7e187e2"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 6730,
+              "duration_ms": 3,
+              "detail": {
+                "task_id": "tsk_eb1979cf12e4dc5d",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_c63d8bf712e3f29b",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 6734,
+              "duration_ms": 4094,
+              "detail": {
+                "task_id": "tsk_eb1979cf12e4dc5d",
+                "trace_id": "trc_5a921aaca1ca1c9f",
+                "duration_ms": 4094,
+                "prompt_tokens": 2810,
+                "completion_tokens": 99,
+                "visible_output_tokens": 64,
+                "reasoning_tokens": 51,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 734
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 10828,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 10831,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_eb1979cf12e4dc5d",
+                "text": "What is the actual text you want me to echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 10847,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What is the actual text you want me to echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 10848,
+          "turn": 1
+        },
+        {
+          "user": "i don't know, figure it out",
+          "messages": [
+            "What text do you want me to echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_eb1979cf12e4dc5d",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6719
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6719,
+              "time_to_first_token_ms": 2684,
+              "prompt_tokens": 2531,
+              "completion_tokens": 119,
+              "visible_output_tokens": 53,
+              "reasoning_tokens": 60,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_c1ab620f68edfc46"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 17,
+              "duration_ms": 1,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 26,
+              "duration_ms": 10,
+              "detail": {
+                "task_id": "tsk_eb1979cf12e4dc5d",
+                "tokens": 2276,
+                "included": 19,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_c63d8bf712e3f29b",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 15,
+                  "older_turns": 0,
+                  "interactions": 15
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 37,
+              "duration_ms": 6719,
+              "detail": {
+                "task_id": "tsk_eb1979cf12e4dc5d",
+                "trace_id": "trc_0b6f39ffd0e44868",
+                "duration_ms": 6719,
+                "prompt_tokens": 2531,
+                "completion_tokens": 119,
+                "visible_output_tokens": 53,
+                "reasoning_tokens": 60,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2684
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6756,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 6759,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_eb1979cf12e4dc5d",
+                "text": "What text do you want me to echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 6776,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text do you want me to echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 6778,
+          "turn": 2
+        }
+      ]
+    },
+    {
+      "id": "real_ambiguous_figure_it_out",
+      "category": "real_use",
+      "repeat": 5,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "Echo the value in <text>.",
+          "messages": [
+            "What text should I echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_4f9355f9711b55c1",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [
+            {
+              "id": "op_ce490499f6cc2613",
+              "capability": "mock",
+              "operation": "echo",
+              "status": "failed",
+              "error_category": "invalid_arguments",
+              "data": {
+                "argument_errors": [
+                  "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                ],
+                "argument_notes": []
+              },
+              "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+            }
+          ],
+          "traces": 2,
+          "trace_validation": [
+            {
+              "ok": true,
+              "execution": "failed",
+              "envelope": {
+                "operation_id": "op_ce490499f6cc2613",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:33:58.821195Z",
+                  "ended_at": "2026-10-25T21:33:58.822331Z",
+                  "confirmation": "failed",
+                  "sequence": 1792964038821199800,
+                  "operation_id": "op_ce490499f6cc2613"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6116,
+            4704
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6116,
+              "time_to_first_token_ms": 2669,
+              "prompt_tokens": 2455,
+              "completion_tokens": 102,
+              "visible_output_tokens": 37,
+              "reasoning_tokens": 67,
+              "thinking_produced": true
+            },
+            {
+              "role": "interactive",
+              "duration_ms": 4704,
+              "time_to_first_token_ms": 731,
+              "prompt_tokens": 2781,
+              "completion_tokens": 117,
+              "visible_output_tokens": 53,
+              "reasoning_tokens": 62,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_aee369a0aad9bd80"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 1,
+              "detail": {
+                "tasks": [
+                  "tsk_4f9355f9711b55c1"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 9,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 19,
+              "duration_ms": 25,
+              "detail": {
+                "task_id": "tsk_4f9355f9711b55c1",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_531dd6f665d1ed7c",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 44,
+              "duration_ms": 6116,
+              "detail": {
+                "task_id": "tsk_4f9355f9711b55c1",
+                "trace_id": "trc_c2877a5db0c8225b",
+                "duration_ms": 6116,
+                "prompt_tokens": 2455,
+                "completion_tokens": 102,
+                "visible_output_tokens": 37,
+                "reasoning_tokens": 67,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2669
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6161,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "act",
+                "action": "act"
+              }
+            },
+            {
+              "stage": "execution",
+              "start_ms": 6161,
+              "duration_ms": 2,
+              "detail": {
+                "operation_id": "op_ce490499f6cc2613",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:33:58.821195Z",
+                  "ended_at": "2026-10-25T21:33:58.822331Z",
+                  "confirmation": "failed",
+                  "sequence": 1792964038821199800,
+                  "operation_id": "op_ce490499f6cc2613"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"<text>\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 6165,
+              "duration_ms": 3,
+              "detail": {
+                "task_id": "tsk_4f9355f9711b55c1",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_531dd6f665d1ed7c",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 6169,
+              "duration_ms": 4704,
+              "detail": {
+                "task_id": "tsk_4f9355f9711b55c1",
+                "trace_id": "trc_5a3210def725a9dc",
+                "duration_ms": 4704,
+                "prompt_tokens": 2781,
+                "completion_tokens": 117,
+                "visible_output_tokens": 53,
+                "reasoning_tokens": 62,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 731
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 10874,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 10876,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_4f9355f9711b55c1",
+                "text": "What text should I echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 10893,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 10895,
+          "turn": 1
+        },
+        {
+          "user": "i don't know, figure it out",
+          "messages": [
+            "What text should I echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_4f9355f9711b55c1",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6268
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6268,
+              "time_to_first_token_ms": 2677,
+              "prompt_tokens": 2525,
+              "completion_tokens": 106,
+              "visible_output_tokens": 43,
+              "reasoning_tokens": 65,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_fb78b63b7867a84b"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 16,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 26,
+              "duration_ms": 10,
+              "detail": {
+                "task_id": "tsk_4f9355f9711b55c1",
+                "tokens": 2271,
+                "included": 19,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_531dd6f665d1ed7c",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 15,
+                  "older_turns": 0,
+                  "interactions": 15
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 37,
+              "duration_ms": 6268,
+              "detail": {
+                "task_id": "tsk_4f9355f9711b55c1",
+                "trace_id": "trc_4c053a108cc08eca",
+                "duration_ms": 6268,
+                "prompt_tokens": 2525,
+                "completion_tokens": 106,
+                "visible_output_tokens": 43,
+                "reasoning_tokens": 65,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2677
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6306,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 6309,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_4f9355f9711b55c1",
+                "text": "What text should I echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 6328,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 6329,
+          "turn": 2
+        }
+      ]
+    },
+    {
+      "id": "real_ambiguous_figure_it_out",
+      "category": "real_use",
+      "repeat": 6,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "Echo the value in <text>.",
+          "messages": [
+            "What text should I echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_41da96d1dc1d83d8",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [
+            {
+              "id": "op_40482f87d5ea4ec8",
+              "capability": "mock",
+              "operation": "echo",
+              "status": "failed",
+              "error_category": "invalid_arguments",
+              "data": {
+                "argument_errors": [
+                  "invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value"
+                ],
+                "argument_notes": []
+              },
+              "message": "invalid arguments: invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value"
+            }
+          ],
+          "traces": 2,
+          "trace_validation": [
+            {
+              "ok": true,
+              "execution": "failed",
+              "envelope": {
+                "operation_id": "op_40482f87d5ea4ec8",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:34:16.465272Z",
+                  "ended_at": "2026-10-25T21:34:16.466318Z",
+                  "confirmation": "failed",
+                  "sequence": 1792964056465277400,
+                  "operation_id": "op_40482f87d5ea4ec8"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6401,
+            4987
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6401,
+              "time_to_first_token_ms": 2609,
+              "prompt_tokens": 2458,
+              "completion_tokens": 112,
+              "visible_output_tokens": 52,
+              "reasoning_tokens": 68,
+              "thinking_produced": true
+            },
+            {
+              "role": "interactive",
+              "duration_ms": 4987,
+              "time_to_first_token_ms": 770,
+              "prompt_tokens": 2805,
+              "completion_tokens": 124,
+              "visible_output_tokens": 67,
+              "reasoning_tokens": 72,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_a3caf42d90d0aeed"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 1,
+              "detail": {
+                "tasks": [
+                  "tsk_41da96d1dc1d83d8"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 10,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 19,
+              "duration_ms": 25,
+              "detail": {
+                "task_id": "tsk_41da96d1dc1d83d8",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_987841c2e114a692",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 44,
+              "duration_ms": 6401,
+              "detail": {
+                "task_id": "tsk_41da96d1dc1d83d8",
+                "trace_id": "trc_a140fea9bc6d4357",
+                "duration_ms": 6401,
+                "prompt_tokens": 2458,
+                "completion_tokens": 112,
+                "visible_output_tokens": 52,
+                "reasoning_tokens": 68,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2609
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6446,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "act",
+                "action": "act"
+              }
+            },
+            {
+              "stage": "execution",
+              "start_ms": 6446,
+              "duration_ms": 2,
+              "detail": {
+                "operation_id": "op_40482f87d5ea4ec8",
+                "status": "failed",
+                "capability": "mock",
+                "operation": "echo",
+                "error_category": "invalid_arguments",
+                "message": "invalid arguments: invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value",
+                "evidence": {
+                  "started_at": "2026-10-25T21:34:16.465272Z",
+                  "ended_at": "2026-10-25T21:34:16.466318Z",
+                  "confirmation": "failed",
+                  "sequence": 1792964056465277400,
+                  "operation_id": "op_40482f87d5ea4ec8"
+                },
+                "data": {
+                  "argument_errors": [
+                    "invalid text \"Echo the value in <text>.\": contains unresolved placeholder <text>; ask the user for the real value"
+                  ],
+                  "argument_notes": []
+                }
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 6450,
+              "duration_ms": 3,
+              "detail": {
+                "task_id": "tsk_41da96d1dc1d83d8",
+                "tokens": 2222,
+                "included": 18,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_987841c2e114a692",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 14,
+                  "older_turns": 0,
+                  "interactions": 14
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 6453,
+              "duration_ms": 4987,
+              "detail": {
+                "task_id": "tsk_41da96d1dc1d83d8",
+                "trace_id": "trc_f17afd0af1335e53",
+                "duration_ms": 4987,
+                "prompt_tokens": 2805,
+                "completion_tokens": 124,
+                "visible_output_tokens": 67,
+                "reasoning_tokens": 72,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 770
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 11441,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 11443,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_41da96d1dc1d83d8",
+                "text": "What text should I echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 11458,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 11460,
+          "turn": 1
+        },
+        {
+          "user": "i don't know, figure it out",
+          "messages": [
+            "What text should I echo?"
+          ],
+          "task_states": [
+            {
+              "id": "tsk_41da96d1dc1d83d8",
+              "state": "blocked",
+              "block_reason": "awaiting_user",
+              "goal": "Echo the value in <text>."
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "ask"
+            }
+          ],
+          "latency_ms": [
+            6404
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6404,
+              "time_to_first_token_ms": 2677,
+              "prompt_tokens": 2528,
+              "completion_tokens": 110,
+              "visible_output_tokens": 48,
+              "reasoning_tokens": 62,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_338d78ca2589072d"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 17,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 26,
+              "duration_ms": 11,
+              "detail": {
+                "task_id": "tsk_41da96d1dc1d83d8",
+                "tokens": 2271,
+                "included": 19,
+                "excluded": 0,
+                "history": {
+                  "mode": "full",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 1,
+                  "segment": "seg_987841c2e114a692",
+                  "summary_used": false,
+                  "summary_segments": [],
+                  "verbatim": 15,
+                  "older_turns": 0,
+                  "interactions": 15
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 37,
+              "duration_ms": 6404,
+              "detail": {
+                "task_id": "tsk_41da96d1dc1d83d8",
+                "trace_id": "trc_5fcf8dcf8527efd1",
+                "duration_ms": 6404,
+                "prompt_tokens": 2528,
+                "completion_tokens": 110,
+                "visible_output_tokens": 48,
+                "reasoning_tokens": 62,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2677
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6441,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "ask"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 6444,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "ask",
+                "task_id": "tsk_41da96d1dc1d83d8",
+                "text": "What text should I echo?"
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 6459,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "What text should I echo?"
+                ]
+              }
+            }
+          ],
+          "duration_ms": 6461,
+          "turn": 2
+        }
+      ]
+    }
+  ]
+}

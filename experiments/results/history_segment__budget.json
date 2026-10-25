@@ -1,0 +1,776 @@
+{
+  "tag": "history_segment__budget",
+  "config": {
+    "schema_version": 1,
+    "model": "qwen3.5-9b",
+    "endpoint": "http://192.168.50.40:8181/v1/chat/completions",
+    "response_format": "json_schema",
+    "action_schema": "strict",
+    "prompt_variant": "full",
+    "include_time": true,
+    "timezone": "America/Mexico_City",
+    "history_strategy": "segment",
+    "history_budget": 800,
+    "history_verbatim_turns": 6,
+    "history_segment_gap_hours": 12.0,
+    "history_summary_tokens": 200,
+    "history_summaries": true,
+    "history_background": false,
+    "coerce_optional_arguments": true,
+    "disclose_enum_values": true,
+    "reject_placeholders": true,
+    "honesty_guard": true,
+    "internal_schema_ask_guard": true,
+    "temperature": 0.2,
+    "max_tokens": 1024,
+    "seed": null,
+    "thinking_budget_tokens": 64,
+    "enable_thinking": true,
+    "stream": true,
+    "max_iterations": 5,
+    "invalid_proposal_retries": 1,
+    "identical_retry_limit": 1,
+    "stop_after_nonretryable_failure": true,
+    "planning_mode": "heuristic",
+    "heuristic_max_chars": 160,
+    "heuristic_max_words": 24,
+    "heuristic_split_markers": "then|and also|after that|finally|;|, and"
+  },
+  "repeats": 4,
+  "summary": {
+    "runs": 4,
+    "passed": 4,
+    "by_category": {
+      "time": [
+        4,
+        4
+      ]
+    },
+    "by_scenario": {
+      "time_fact_beyond_history_budget": [
+        4,
+        4
+      ]
+    },
+    "turns": 4,
+    "model_calls": 4,
+    "proposal_validity": 1.0,
+    "invalid_proposals": 0,
+    "parse_failures": 0,
+    "malformed_output_rate": 0.0,
+    "honesty_rejections": 0,
+    "capability_calls": 0,
+    "failed_capability_calls": 0,
+    "tool_call_success_rate": null,
+    "turn_latency_ms_mean": 5934.75,
+    "turn_duration_p50_ms": 5864.5,
+    "turn_duration_p95_ms": 6336.900000000001,
+    "model_call_latency_p50_ms": 5796.0,
+    "model_call_latency_p95_ms": 6270.45,
+    "ttft_p50_ms": 2274.5,
+    "ttft_p95_ms": 2298.2,
+    "thinking_call_ratio": 1.0,
+    "mean_prompt_tokens": 2179,
+    "mean_completion_tokens": 108,
+    "mean_visible_output_tokens": 47,
+    "mean_reasoning_tokens": 72.75,
+    "task_states": {
+      "completed": 4
+    },
+    "failures": []
+  },
+  "results": [
+    {
+      "id": "time_fact_beyond_history_budget",
+      "category": "time",
+      "repeat": 1,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "What did I tell you about where I left the spare key?",
+          "messages": [
+            "You told me the spare key was left in the blue drawer."
+          ],
+          "task_states": [
+            {
+              "id": "tsk_edcbe4b879a1a18c",
+              "state": "completed",
+              "block_reason": null,
+              "goal": "What did I tell you about where I left the spare key?"
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "respond"
+            }
+          ],
+          "latency_ms": [
+            5797
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 5797,
+              "time_to_first_token_ms": 2288,
+              "prompt_tokens": 2184,
+              "completion_tokens": 104,
+              "visible_output_tokens": 43,
+              "reasoning_tokens": 72,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_234892eba4372566"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 0,
+              "detail": {
+                "tasks": [
+                  "tsk_edcbe4b879a1a18c"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 9,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 16,
+              "duration_ms": 21,
+              "detail": {
+                "task_id": "tsk_edcbe4b879a1a18c",
+                "tokens": 2284,
+                "included": 7,
+                "excluded": 5,
+                "history": {
+                  "mode": "segment",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 2,
+                  "segment": "seg_891704a179155bcf",
+                  "summary_used": true,
+                  "summary_segments": [
+                    "seg_1b31edda64bf6647",
+                    "seg_891704a179155bcf"
+                  ],
+                  "verbatim": 5,
+                  "older_turns": 3,
+                  "interactions": 10
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 38,
+              "duration_ms": 5797,
+              "detail": {
+                "task_id": "tsk_edcbe4b879a1a18c",
+                "trace_id": "trc_8b1f6756433074c7",
+                "duration_ms": 5797,
+                "prompt_tokens": 2184,
+                "completion_tokens": 104,
+                "visible_output_tokens": 43,
+                "reasoning_tokens": 72,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2288
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 5835,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "respond"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 5838,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "respond",
+                "task_id": "tsk_edcbe4b879a1a18c",
+                "text": "You told me the spare key was left in the blue drawer."
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 5864,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "You told me the spare key was left in the blue drawer."
+                ]
+              }
+            }
+          ],
+          "duration_ms": 5866,
+          "turn": 1
+        }
+      ]
+    },
+    {
+      "id": "time_fact_beyond_history_budget",
+      "category": "time",
+      "repeat": 2,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "What did I tell you about where I left the spare key?",
+          "messages": [
+            "You told me on October 24 at 09:18 that you left the spare key in the blue drawer."
+          ],
+          "task_states": [
+            {
+              "id": "tsk_e260ea280cadc0e3",
+              "state": "completed",
+              "block_reason": null,
+              "goal": "What did I tell you about where I left the spare key?"
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "respond"
+            }
+          ],
+          "latency_ms": [
+            6354
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 6354,
+              "time_to_first_token_ms": 2300,
+              "prompt_tokens": 2181,
+              "completion_tokens": 118,
+              "visible_output_tokens": 57,
+              "reasoning_tokens": 68,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_4f6c4dde5bdddad1"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 0,
+              "detail": {
+                "tasks": [
+                  "tsk_e260ea280cadc0e3"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 11,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 20,
+              "duration_ms": 21,
+              "detail": {
+                "task_id": "tsk_e260ea280cadc0e3",
+                "tokens": 2269,
+                "included": 7,
+                "excluded": 5,
+                "history": {
+                  "mode": "segment",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 2,
+                  "segment": "seg_dfde15a8064ffddd",
+                  "summary_used": true,
+                  "summary_segments": [
+                    "seg_dfde15a8064ffddd",
+                    "seg_ef8263ed56532786"
+                  ],
+                  "verbatim": 5,
+                  "older_turns": 3,
+                  "interactions": 10
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 41,
+              "duration_ms": 6354,
+              "detail": {
+                "task_id": "tsk_e260ea280cadc0e3",
+                "trace_id": "trc_63c3c21d38d3a976",
+                "duration_ms": 6354,
+                "prompt_tokens": 2181,
+                "completion_tokens": 118,
+                "visible_output_tokens": 57,
+                "reasoning_tokens": 68,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2300
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 6396,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "respond"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 6398,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "respond",
+                "task_id": "tsk_e260ea280cadc0e3",
+                "text": "You told me on October 24 at 09:18 that you left the spare key in the blue drawer."
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 6419,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "You told me on October 24 at 09:18 that you left the spare key in the blue drawer."
+                ]
+              }
+            }
+          ],
+          "duration_ms": 6420,
+          "turn": 1
+        }
+      ]
+    },
+    {
+      "id": "time_fact_beyond_history_budget",
+      "category": "time",
+      "repeat": 3,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "What did I tell you about where I left the spare key?",
+          "messages": [
+            "You told me you left the spare key in the blue drawer."
+          ],
+          "task_states": [
+            {
+              "id": "tsk_31742546f018964f",
+              "state": "completed",
+              "block_reason": null,
+              "goal": "What did I tell you about where I left the spare key?"
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "respond"
+            }
+          ],
+          "latency_ms": [
+            5795
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 5795,
+              "time_to_first_token_ms": 2261,
+              "prompt_tokens": 2174,
+              "completion_tokens": 105,
+              "visible_output_tokens": 44,
+              "reasoning_tokens": 75,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_9610519941eba66e"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 1,
+              "detail": {
+                "tasks": [
+                  "tsk_31742546f018964f"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 11,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 19,
+              "duration_ms": 24,
+              "detail": {
+                "task_id": "tsk_31742546f018964f",
+                "tokens": 2269,
+                "included": 7,
+                "excluded": 5,
+                "history": {
+                  "mode": "segment",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 2,
+                  "segment": "seg_7dfa909521bc5bc4",
+                  "summary_used": true,
+                  "summary_segments": [
+                    "seg_7dfa909521bc5bc4",
+                    "seg_e1df5bdb252b43ca"
+                  ],
+                  "verbatim": 5,
+                  "older_turns": 3,
+                  "interactions": 10
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 43,
+              "duration_ms": 5795,
+              "detail": {
+                "task_id": "tsk_31742546f018964f",
+                "trace_id": "trc_4575806cc7e1d392",
+                "duration_ms": 5795,
+                "prompt_tokens": 2174,
+                "completion_tokens": 105,
+                "visible_output_tokens": 44,
+                "reasoning_tokens": 75,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2261
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 5839,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "respond"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 5841,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "respond",
+                "task_id": "tsk_31742546f018964f",
+                "text": "You told me you left the spare key in the blue drawer."
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 5862,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "You told me you left the spare key in the blue drawer."
+                ]
+              }
+            }
+          ],
+          "duration_ms": 5863,
+          "turn": 1
+        }
+      ]
+    },
+    {
+      "id": "time_fact_beyond_history_budget",
+      "category": "time",
+      "repeat": 4,
+      "passed": true,
+      "failures": [],
+      "turns": [
+        {
+          "user": "What did I tell you about where I left the spare key?",
+          "messages": [
+            "You told me you placed the spare key in the blue drawer."
+          ],
+          "task_states": [
+            {
+              "id": "tsk_9dee1fdc47ef550f",
+              "state": "completed",
+              "block_reason": null,
+              "goal": "What did I tell you about where I left the spare key?"
+            }
+          ],
+          "attempts": [],
+          "traces": 1,
+          "trace_validation": [
+            {
+              "ok": true,
+              "action": "respond"
+            }
+          ],
+          "latency_ms": [
+            5793
+          ],
+          "model_calls": [
+            {
+              "role": "interactive",
+              "duration_ms": 5793,
+              "time_to_first_token_ms": 2260,
+              "prompt_tokens": 2177,
+              "completion_tokens": 105,
+              "visible_output_tokens": 44,
+              "reasoning_tokens": 76,
+              "thinking_produced": true
+            }
+          ],
+          "timeline": [
+            {
+              "stage": "session",
+              "start_ms": 0,
+              "duration_ms": 1,
+              "detail": {
+                "interaction_id": "int_ea879253eda445df"
+              }
+            },
+            {
+              "stage": "structure_check",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "handled": false
+              }
+            },
+            {
+              "stage": "plan.prompt_build",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "messages": 2
+              }
+            },
+            {
+              "stage": "plan.heuristic",
+              "start_ms": 1,
+              "duration_ms": 0,
+              "detail": {
+                "max_chars": 160,
+                "max_words": 24,
+                "markers": "then|and also|after that|finally|;|, and"
+              }
+            },
+            {
+              "stage": "plan.task_create",
+              "start_ms": 2,
+              "duration_ms": 0,
+              "detail": {
+                "tasks": [
+                  "tsk_9dee1fdc47ef550f"
+                ]
+              }
+            },
+            {
+              "stage": "domain_suggestion",
+              "start_ms": 10,
+              "duration_ms": 0,
+              "detail": {
+                "suggested": false
+              }
+            },
+            {
+              "stage": "prompt_build",
+              "start_ms": 19,
+              "duration_ms": 22,
+              "detail": {
+                "task_id": "tsk_9dee1fdc47ef550f",
+                "tokens": 2273,
+                "included": 7,
+                "excluded": 5,
+                "history": {
+                  "mode": "segment",
+                  "budget": 800,
+                  "verbatim_turns": 6,
+                  "segments": 2,
+                  "segment": "seg_603e669ffce2c0ef",
+                  "summary_used": true,
+                  "summary_segments": [
+                    "seg_603e669ffce2c0ef",
+                    "seg_85cc31ee92914fd8"
+                  ],
+                  "verbatim": 5,
+                  "older_turns": 3,
+                  "interactions": 10
+                }
+              }
+            },
+            {
+              "stage": "model_call",
+              "start_ms": 41,
+              "duration_ms": 5793,
+              "detail": {
+                "task_id": "tsk_9dee1fdc47ef550f",
+                "trace_id": "trc_362cb6a619b3b4b6",
+                "duration_ms": 5793,
+                "prompt_tokens": 2177,
+                "completion_tokens": 105,
+                "visible_output_tokens": 44,
+                "reasoning_tokens": 76,
+                "thinking_produced": true,
+                "time_to_first_token_ms": 2260
+              }
+            },
+            {
+              "stage": "parse_validation",
+              "start_ms": 5834,
+              "duration_ms": 0,
+              "detail": {
+                "ok": true,
+                "kind": "respond"
+              }
+            },
+            {
+              "stage": "response",
+              "start_ms": 5837,
+              "duration_ms": 0,
+              "detail": {
+                "kind": "respond",
+                "task_id": "tsk_9dee1fdc47ef550f",
+                "text": "You told me you placed the spare key in the blue drawer."
+              }
+            },
+            {
+              "stage": "turn.response",
+              "start_ms": 5858,
+              "duration_ms": 0,
+              "detail": {
+                "messages": [
+                  "You told me you placed the spare key in the blue drawer."
+                ]
+              }
+            }
+          ],
+          "duration_ms": 5859,
+          "turn": 1
+        }
+      ]
+    }
+  ]
+}

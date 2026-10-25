@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-from harness.constants import PermissionLevel
+from harness.constants import MEMORY_SCOPE_PREFIXES, MemoryScopeKind, MemoryType, PermissionLevel
 from harness.contracts.capabilities import Manifest, OperationSpec
+
+
+# Generated from the real enums. Do not hand-write allowed values in an
+# operation description: the context builder renders these lists inline.
+MEMORY_TYPES = tuple(item.value for item in MemoryType)
+MEMORY_SCOPES = tuple(item.value for item in MemoryScopeKind) + tuple(
+    f"{prefix}:<id>" for prefix in MEMORY_SCOPE_PREFIXES
+)
 
 
 MEMORY_MANIFEST = Manifest(
@@ -12,13 +20,15 @@ MEMORY_MANIFEST = Manifest(
         OperationSpec(
             name="remember",
             description=(
-                "Store an explicit memory from the user's statement. type defaults to fact; "
-                "allowed types: fact, preference, decision, procedure, lesson. scope defaults "
-                "to global; allowed scopes: global, self, domain:<id>, project:<id>."
+                "Store a memory from an explicit user statement. Content must be a clear, "
+                "standalone statement. Type and scope are optional hints; the harness derives "
+                "them, so never ask the user to choose them."
             ),
             permission=PermissionLevel.WRITE,
             inputs={"type": "string", "content": "string", "scope": "string"},
             required=["content"],
+            enums={"type": MEMORY_TYPES, "scope": MEMORY_SCOPES},
+            hint_inputs=["type", "scope"],
         ),
         OperationSpec(
             name="correct",

@@ -241,6 +241,108 @@ def test_retryable_failure_is_not_stopped_by_the_cap(make_harness) -> None:
     assert result.tasks[0].succeeded_execution
 
 
+def test_failed_execution_rejects_a_success_claim(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("fail"),
+            act("mock", "fail", category="hard_failure"),
+            respond("I've noted that for you."),
+            respond("The call failed with hard_failure; nothing was noted."),
+        ],
+        settings={"loop": {"honesty_guard": True}},
+    )
+    result = h.loop.handle_turn("Try the failing call.")
+    assert result.tasks[0].state == TaskState.COMPLETED
+    assert "failed" in result.messages[0].lower()
+    assert "i've noted" not in result.messages[0].lower()
+    validations = [
+        item.validation
+        for item in h.traces.list_for(task_id=result.tasks[0].id, limit=20)
+        if item.validation
+    ]
+    assert any(item.get("failure_kind") == "honesty" for item in validations)
+
+
+def test_success_claim_without_any_execution_is_rejected(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("send email"),
+            respond("I sent the email to Bob."),
+            respond("I can't send email; no email capability is available."),
+        ],
+        settings={"loop": {"honesty_guard": True}},
+    )
+    result = h.loop.handle_turn("Send an email to Bob saying hi.")
+    assert result.tasks[0].state == TaskState.COMPLETED
+    assert "can't send email" in result.messages[0]
+    assert "i sent" not in result.messages[0].lower()
+    validations = [
+        item.validation
+        for item in h.traces.list_for(task_id=result.tasks[0].id, limit=20)
+        if item.validation
+    ]
+    assert any(item.get("failure_kind") == "honesty" for item in validations)
+
+
+def test_unknown_execution_requires_an_unknown_statement(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("write"),
+            act("mock", "write_note", text="hi"),
+            respond("Saved."),
+            respond("The outcome is unknown; I can't confirm it was written."),
+        ],
+        settings={"capabilities": {"policy": {"write": "allow"}}, "loop": {"honesty_guard": True}},
+    )
+    h.capabilities.script_next(
+        "mock",
+        {"status": ExecutionStatus.UNKNOWN, "data": {}, "message": "timeout after sending"},
+    )
+    result = h.loop.handle_turn("Write a note.")
+    assert "unknown" in result.messages[0].lower()
+    assert "saved" not in result.messages[0].lower()
+
+
+def test_decision_call_receives_the_failed_execution_envelope(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("fail"),
+            act("mock", "fail", category="hard_failure"),
+            respond("The call failed with hard_failure."),
+        ]
+    )
+    result = h.loop.handle_turn("Try the failing call.")
+    interactive = [
+        item for item in h.traces.list_for(task_id=result.tasks[0].id, limit=20) if item.model_called
+    ]
+    # The second decision prompt contains the assistant act and the failed
+    # envelope as a user message. The failure was visible; the old bug was the
+    # missing response guard, not a missing envelope.
+    second_prompt = "\n".join(item["content"] for item in interactive[1].messages)
+    assert "Execution result envelope" in second_prompt
+    assert '"status": "failed"' in second_prompt
+    assert "hard_failure" in second_prompt
+
+
+def test_internal_schema_question_is_rejected(make_harness) -> None:
+    h = make_harness(
+        [
+            plan("remember"),
+            ask("What type of memory should this be?", "type"),
+            respond("Okay, I will treat it as a fact."),
+        ],
+        settings={"loop": {"internal_schema_ask_guard": True}},
+    )
+    result = h.loop.handle_turn("Remember that my name is Alex.")
+    assert "what type" not in result.messages[0].lower()
+    validations = [
+        item.validation
+        for item in h.traces.list_for(task_id=result.tasks[0].id, limit=20)
+        if item.validation
+    ]
+    assert any(item.get("failure_kind") == "internal_schema_ask" for item in validations)
+
+
 def test_task_decomposition_and_dependencies(make_harness) -> None:
     plan_payload = {
         "tasks": [

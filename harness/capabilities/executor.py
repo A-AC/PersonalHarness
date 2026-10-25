@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from harness.constants import ExecutionStatus, PermissionLevel
+from harness.constants import SELF_DOMAIN_ID, ExecutionStatus, MemoryScopeKind, PermissionLevel
 from harness.contracts.actions import ExecutionResult
 from harness.contracts.capabilities import ExecuteRequest, Manifest, OperationSpec
 from harness.contracts.domains import DomainRegistry
@@ -17,6 +17,7 @@ from harness.capabilities.mcp import McpServerSpec, call_mcp_tool, load_mcp_mani
 from harness.capabilities.mock import MOCK_MANIFEST, run_mock
 from harness.capabilities.skills import load_skills
 from harness.storage.atomic import atomic_write_json, new_id, now_ts, read_json
+from harness.text import UNRESOLVED_PLACEHOLDER_RE
 
 
 class FileCapabilityExecutor:
@@ -136,10 +137,18 @@ class FileCapabilityExecutor:
                 "permission_denied",
             )
             return self._finish(result, started, sequence)
-        arg_error = self._validate_args(op, req.arguments)
-        if arg_error:
-            result = self._result(operation_id, req, ExecutionStatus.FAILED, {}, arg_error, "invalid_arguments")
+        normalized, arg_errors, notes = self._normalize_args(op, req.arguments)
+        if arg_errors:
+            result = self._result(
+                operation_id,
+                req,
+                ExecutionStatus.FAILED,
+                {"argument_errors": arg_errors, "argument_notes": notes},
+                "invalid arguments: " + "; ".join(arg_errors),
+                "invalid_arguments",
+            )
             return self._finish(result, started, sequence)
+        req = replace(req, arguments=normalized)
 
         scripted = None
         queue = self._scripts.get(req.capability) or []
@@ -150,6 +159,11 @@ class FileCapabilityExecutor:
         except Exception as exc:  # unexpected capability failure
             result = self._result(operation_id, req, ExecutionStatus.FAILED, {}, str(exc), "exception")
             return self._finish(result, started, sequence)
+        if notes:
+            data = dict(payload.get("data") or {})
+            existing = data.get("argument_notes")
+            data["argument_notes"] = [*(existing or []), *notes]
+            payload = {**payload, "data": data}
 
         status = payload.get("status", ExecutionStatus.FAILED)
         result = self._result(
@@ -177,25 +191,118 @@ class FileCapabilityExecutor:
                 return item
         return None
 
-    def _validate_args(self, op: OperationSpec, arguments: dict[str, Any]) -> str | None:
+    def _normalize_args(
+        self, op: OperationSpec, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[str], list[str]]:
+        """Validate every argument at once and normalize optional hints.
+
+        Required arguments are gates: a wrong value fails with the field, the
+        rejected value, and the allowed values. Optional arguments are hints:
+        an unusable enum value falls back to its default (or is omitted so the
+        dispatcher can derive it), and the adjustment is recorded as a note.
+        """
         if not isinstance(arguments, dict):
-            return "arguments must be an object"
+            return {}, ["arguments must be an object"], []
+        normalized = dict(arguments)
+        errors: list[str] = []
+        notes: list[str] = []
+        coerce_setting = bool(self._settings.get("capabilities.coerce_optional_arguments"))
+        allowed_names = ", ".join(op.inputs) or "none"
+
         for key in op.required:
-            if key not in arguments:
-                return f"missing required argument: {key}"
-        for key, value in arguments.items():
+            if key not in normalized:
+                errors.append(f"missing required argument: {key}")
+
+        for key, value in list(normalized.items()):
             expected = op.inputs.get(key)
             if expected is None:
-                return f"unexpected argument: {key}"
-            if expected == "string" and not isinstance(value, str):
-                return f"{key} must be a string"
-            if expected == "number" and (
-                not isinstance(value, (int, float)) or isinstance(value, bool)
-            ):
-                return f"{key} must be a number"
-            if expected == "boolean" and not isinstance(value, bool):
-                return f"{key} must be a boolean"
-        return None
+                errors.append(f'unexpected argument "{key}"; allowed: {allowed_names}')
+                continue
+            required = key in op.required
+            # Hint inputs are model guesses, never user decisions. A bad hint
+            # must not fail the call even when general coercion is disabled.
+            coerce_optional = coerce_setting or key in op.hint_inputs
+            enum = op.enums.get(key)
+            if enum:
+                text = value if isinstance(value, str) else str(value)
+                if not self._enum_allowed(text, enum):
+                    if key in op.hint_inputs:
+                        # Leave the raw hint in place: the owning component
+                        # knows the actual fallback and can record a precise
+                        # note (for example the classified memory type).
+                        continue
+                    if required or not coerce_optional:
+                        errors.append(
+                            f'invalid {key} "{text}"; allowed: {", ".join(enum)}'
+                        )
+                    else:
+                        fallback = op.defaults.get(key)
+                        if fallback is None:
+                            normalized.pop(key, None)
+                        else:
+                            normalized[key] = fallback
+                        notes.append(
+                            f'{key} "{text}" is not allowed; used '
+                            f'{fallback if fallback is not None else "the harness-derived default"}'
+                        )
+                    continue
+                normalized[key] = text
+                continue
+            if expected == "string":
+                if not isinstance(value, str):
+                    if required or not coerce_optional:
+                        errors.append(f'invalid {key} "{value}": must be a string')
+                    else:
+                        normalized[key] = str(value)
+                        notes.append(f"{key} was converted to a string")
+                elif required and bool(self._settings.get("capabilities.reject_placeholders")):
+                    placeholder = UNRESOLVED_PLACEHOLDER_RE.search(value)
+                    if placeholder:
+                        errors.append(
+                            f'invalid {key} "{value}": contains unresolved placeholder '
+                            f"{placeholder.group(0)}; ask the user for the real value"
+                        )
+            elif expected == "number":
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    if required or not coerce_optional:
+                        errors.append(f'invalid {key} "{value}": must be a number')
+                    else:
+                        try:
+                            normalized[key] = float(value)
+                            notes.append(f"{key} was converted to a number")
+                        except (TypeError, ValueError):
+                            normalized.pop(key, None)
+                            notes.append(f"{key} was not a number and was omitted")
+            elif expected == "boolean":
+                if not isinstance(value, bool):
+                    if required or not coerce_optional:
+                        errors.append(f'invalid {key} "{value}": must be a boolean')
+                    else:
+                        normalized[key] = str(value).strip().lower() in {"1", "true", "yes", "on"}
+                        notes.append(f"{key} was converted to a boolean")
+
+        for key, default in op.defaults.items():
+            if key not in normalized and key not in op.required:
+                normalized[key] = default
+        return normalized, errors, notes
+
+    @staticmethod
+    def _enum_allowed(value: str, allowed: tuple[str, ...]) -> bool:
+        for item in allowed:
+            if item.endswith(":<id>"):
+                prefix = item.split(":<id>", 1)[0] + ":"
+                # The literal pattern shown in the prompt is not an id, and an
+                # unresolved placeholder is not either.
+                if (
+                    len(value) > len(prefix)
+                    and value.startswith(prefix)
+                    and not UNRESOLVED_PLACEHOLDER_RE.search(value)
+                ):
+                    return True
+                continue
+            if item == value:
+                return True
+        return False
 
     def _dispatch(self, req: ExecuteRequest, scripted: dict[str, Any] | None) -> dict[str, Any]:
         if scripted is not None and req.capability != "harness_memory" and req.capability != "harness_structure":
@@ -225,46 +332,78 @@ class FileCapabilityExecutor:
         if self._memory is None:
             return {"status": ExecutionStatus.UNAVAILABLE, "data": {}, "message": "memory manager missing"}
         args = req.arguments
+        ref = req.interaction_id or ""
+        provenance = {
+            "source_kind": "user_statement",
+            "source_refs": [ref] if ref else [],
+            "evidence_status": "stated",
+        }
         if req.operation == "remember":
             result = self._memory.submit(
                 MemoryCandidate(
-                    type=str(args.get("type") or "fact"),
                     content=str(args["content"]),
-                    scope=str(args.get("scope") or "global"),
                     origin="explicit",
-                    provenance={
-                        "source_kind": "user_statement",
-                        "source_refs": [req.interaction_id or req.task_id],
-                        "evidence_status": "stated",
-                    },
+                    type_hint=args.get("type"),
+                    scope_hint=args.get("scope"),
+                    default_scope=self._derived_scope(req),
+                    provenance=provenance,
                 )
             )
-            if not result.accepted:
+            if not result.accepted or result.record is None:
                 return {"status": ExecutionStatus.FAILED, "data": {}, "message": result.reason, "error_category": "validation"}
-            return {"status": ExecutionStatus.SUCCEEDED, "data": {"memory_id": result.record.id if result.record else None}, "message": "remembered"}
+            record = result.record
+            data: dict[str, Any] = {
+                "memory_id": record.id,
+                "type": record.type,
+                "scope": record.scope,
+            }
+            if result.duplicate:
+                data["duplicate"] = True
+            if result.replaced:
+                data["replaced"] = [{"id": item.id, "content": item.content} for item in result.replaced]
+            if result.hint_notes:
+                data["argument_notes"] = list(result.hint_notes)
+            message = "already remembered" if result.duplicate else "remembered"
+            if result.replaced:
+                message = f'replaced previous memory: "{result.replaced[0].content}"'
+            return {"status": ExecutionStatus.SUCCEEDED, "data": data, "message": message}
         if req.operation == "correct":
-            old = self._memory.get(str(args["memory_id"]))
+            try:
+                old = self._memory.get(str(args["memory_id"]))
+            except KeyError:
+                return {"status": ExecutionStatus.FAILED, "data": {}, "message": "memory_id not found", "error_category": "not_found"}
             result = self._memory.submit(
                 MemoryCandidate(
-                    type=old.type,
                     content=str(args["content"]),
-                    scope=old.scope,
                     origin="explicit",
-                    provenance={
-                        "source_kind": "user_statement",
-                        "source_refs": [req.interaction_id or req.task_id],
-                        "evidence_status": "stated",
-                    },
+                    type_hint=old.type,
+                    scope_hint=old.scope,
+                    default_scope=old.scope,
+                    provenance=provenance,
                     supersedes=old.id,
                 )
             )
             if not result.accepted or result.record is None:
-                return {"status": ExecutionStatus.FAILED, "data": {}, "message": result.reason}
+                return {"status": ExecutionStatus.FAILED, "data": {}, "message": result.reason, "error_category": "validation"}
             return {"status": ExecutionStatus.SUCCEEDED, "data": {"memory_id": result.record.id, "supersedes": old.id}, "message": "corrected"}
         if req.operation == "retract":
-            record = self._memory.retract(str(args["memory_id"]), "user")
+            try:
+                record = self._memory.retract(str(args["memory_id"]), "user")
+            except KeyError:
+                return {"status": ExecutionStatus.FAILED, "data": {}, "message": "memory_id not found", "error_category": "not_found"}
             return {"status": ExecutionStatus.SUCCEEDED, "data": {"memory_id": record.id}, "message": "retracted"}
         return {"status": ExecutionStatus.FAILED, "data": {}, "message": "unknown memory operation"}
+
+    @staticmethod
+    def _derived_scope(req: ExecuteRequest) -> str:
+        """The authoritative default scope, independent of the model hint."""
+        if req.project_id:
+            return f"project:{req.project_id}"
+        if req.domain_id == SELF_DOMAIN_ID or req.self_request:
+            return MemoryScopeKind.SELF.value
+        if req.domain_id:
+            return f"domain:{req.domain_id}"
+        return MemoryScopeKind.GLOBAL.value
 
     def _result(self, operation_id: str, req: ExecuteRequest, status: str, data: dict, message: str, error_category: str | None) -> ExecutionResult:
         return ExecutionResult(

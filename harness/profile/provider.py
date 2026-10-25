@@ -35,17 +35,31 @@ class FileSelfProfile:
         self._history_path = directory / "history.json"
         self._proposals_dir = directory / "proposals"
         self._proposals_dir.mkdir(exist_ok=True)
-        if not self._current_path.exists():
-            persona = Persona(**asdict(DEFAULT_PERSONA))
-            persona.updated_at = now_ts()
-            retries, retry_s = self._rw()
-            atomic_write_json(self._current_path, asdict(persona), retries=retries, retry_s=retry_s)
-            atomic_write_json(
-                self._history_path,
-                [asdict(PersonaVersion(version=persona.version, persona=persona, actor="harness", ts=persona.updated_at, reason="initial"))],
-                retries=retries,
-                retry_s=retry_s,
-            )
+        self._ensure_seed()
+
+    def _ensure_seed(self) -> Persona:
+        if self._current_path.exists():
+            return self.current()
+        persona = Persona(**asdict(DEFAULT_PERSONA))
+        persona.updated_at = now_ts()
+        retries, retry_s = self._rw()
+        atomic_write_json(self._current_path, asdict(persona), retries=retries, retry_s=retry_s)
+        atomic_write_json(
+            self._history_path,
+            [asdict(PersonaVersion(version=persona.version, persona=persona, actor="harness", ts=persona.updated_at, reason="initial"))],
+            retries=retries,
+            retry_s=retry_s,
+        )
+        return persona
+
+    def reset(self) -> Persona:
+        """Drop versions and proposals, then re-apply the code-defined persona."""
+        self._current_path.unlink(missing_ok=True)
+        self._history_path.unlink(missing_ok=True)
+        self._proposals_dir.mkdir(parents=True, exist_ok=True)
+        for path in self._proposals_dir.glob("per_*.json"):
+            path.unlink(missing_ok=True)
+        return self._ensure_seed()
 
     def _rw(self) -> tuple[int, float]:
         return int(self._settings.get("storage.atomic_retries")), float(self._settings.get("storage.atomic_retry_s"))

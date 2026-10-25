@@ -6,11 +6,28 @@ import os
 from pathlib import Path
 
 from harness.app import build_harness
+from harness.contracts.maintenance import ResetReport
 from harness.measure import learning_report
 
 
 def _data_dir(args: argparse.Namespace) -> Path:
     return Path(args.data_dir or os.environ.get("HARNESS_DATA_DIR") or "./data")
+
+
+def format_reset_report(report: ResetReport) -> str:
+    lines = [f"Reset scope: {report.scope}"]
+    if report.removed:
+        lines.append("Removed:")
+        for item in report.removed:
+            lines.append(f"  {item.path}  ({item.files} files, {item.bytes} bytes)")
+    else:
+        lines.append("Removed: nothing (already empty)")
+    lines.append(f"Backup: {report.backup_path or 'disabled'}")
+    lines.append(f"Seeded: {', '.join(report.seeded) if report.seeded else 'nothing'}")
+    if report.cleared_references:
+        lines.append(f"Cleared stale references: {report.cleared_references}")
+    lines.append(f"Duration: {report.duration_ms} ms")
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,6 +39,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health")
     sub.add_parser("consolidate")
     sub.add_parser("measure")
+    reset = sub.add_parser("reset")
+    reset.add_argument(
+        "--scope",
+        choices=("full", "memories", "conversations"),
+        default="full",
+        help="full (default), memories only, or conversations/traces only",
+    )
+    reset.add_argument("--yes", action="store_true", help="required confirmation for the CLI")
+    reset.add_argument("--no-backup", action="store_true", help="skip the timestamped archive")
     turn = sub.add_parser("turn")
     turn.add_argument("text")
     evaluation = sub.add_parser("eval")
@@ -60,8 +86,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "health":
         print(json.dumps({"status": "ok", "data_dir": str(harness.data_dir)}))
         return 0
+    if args.command == "reset":
+        if not args.yes:
+            print("reset not run: pass --yes to confirm")
+            return 2
+        report = harness.reset.run(
+            args.scope,
+            actor="cli",
+            backup=False if args.no_backup else None,
+        )
+        print(format_reset_report(report))
+        return 0
     if args.command == "turn":
-        result = harness.loop.handle_turn(args.text)
+        result = harness.chat.submit(args.text)
         print("\n".join(result.messages))
         if result.error:
             print(result.error)

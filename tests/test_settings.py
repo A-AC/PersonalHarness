@@ -27,6 +27,17 @@ def test_defaults_are_written_and_readable(tmp_path: Path) -> None:
     assert service.get("tasks.planning_mode") == "heuristic"
     assert service.get("loop.stop_after_nonretryable_failure") is True
     assert service.get("models.interactive.enable_thinking") is True
+    # V1.1 real-use evidence: the strict per-kind action schema avoids
+    # incomplete actions, and the full prompt beat the trimmed one.
+    assert service.get("models.interactive.action_schema") == "strict"
+    assert service.get("models.interactive.response_format") == "json_schema"
+    assert service.get("context.prompt_variant") == "full"
+    assert service.get("context.include_time") is True
+    assert service.get("loop.honesty_guard") is True
+    assert service.get("loop.internal_schema_ask_guard") is True
+    assert service.get("capabilities.coerce_optional_arguments") is True
+    assert service.get("capabilities.disclose_enum_values") is True
+    assert service.get("capabilities.reject_placeholders") is True
 
 
 def test_unknown_file_key_fails_loudly(tmp_path: Path) -> None:

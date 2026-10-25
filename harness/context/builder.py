@@ -4,15 +4,23 @@ from harness.constants import MemoryType, SELF_DOMAIN_ID
 from harness.contracts.capabilities import CapabilityExecutor
 from harness.contracts.context import ContextPackage, ContextSection, InclusionRecord
 from harness.contracts.domains import DomainRegistry
+from harness.contracts.history import HistoryService
 from harness.contracts.memory import MemoryManager, UsageEntry
 from harness.contracts.model import Message
 from harness.contracts.profile import SelfProfile
 from harness.contracts.session import Session, SessionManager
 from harness.contracts.settings import SettingsService
 from harness.contracts.tasks import Task
-from harness.prompts import BASE_INSTRUCTIONS
+from harness.prompts import BASE_INSTRUCTIONS, TRIMMED_INSTRUCTIONS
 from harness.storage.atomic import now_ts
-from harness.text import estimate_tokens
+from harness.text import estimate_tokens, matches_keywords
+from harness.timefmt import (
+    current_time_block,
+    gap_between,
+    human_gap,
+    time_marker,
+    timezone_name,
+)
 
 
 SECTION_ORDER = [
@@ -35,6 +43,7 @@ class DefaultContextBuilder:
         domains: DomainRegistry,
         capabilities: CapabilityExecutor,
         sessions: SessionManager,
+        history: HistoryService,
     ):
         self._settings = settings
         self._memory = memory
@@ -42,6 +51,7 @@ class DefaultContextBuilder:
         self._domains = domains
         self._capabilities = capabilities
         self._sessions = sessions
+        self._history = history
 
     def build(self, task: Task, session: Session, *, trace_id: str | None = None) -> ContextPackage:
         persona = self._profile.current()
@@ -96,7 +106,7 @@ class DefaultContextBuilder:
                 continue
             block = (
                 f'<memory id="{ranked.record.id}" type="{ranked.record.type}" scope="{ranked.record.scope}" '
-                f'updated="{ranked.record.updated_at}" origin="{ranked.record.origin}">\n'
+                f'{self._memory_time(ranked.record.updated_at)} origin="{ranked.record.origin}">\n'
                 f"{ranked.record.content}\n</memory>"
             )
             mem_blocks.append(block)
@@ -111,7 +121,8 @@ class DefaultContextBuilder:
                 )
             )
         pref_text = "\n".join(
-            f'<memory id="{item.id}" type="preference" scope="global" updated="{item.updated_at}" origin="{item.origin}">\n{item.content}\n</memory>'
+            f'<memory id="{item.id}" type="preference" scope="global" '
+            f'{self._memory_time(item.updated_at)} origin="{item.origin}">\n{item.content}\n</memory>'
             for item in pref_records
         )
         for item in pref_records:
@@ -126,18 +137,29 @@ class DefaultContextBuilder:
                 )
             )
         domain_text = "\n".join(domain_text_parts + mem_blocks)
+        tz = timezone_name(self._settings)
+        now = now_ts()
         task_text = (
             f"Goal: {task.goal}\nState: {task.state}\n"
             f"Constraints: {', '.join(task.constraints) or 'none'}\n"
-            f"Dependencies: {', '.join(task.depends_on) or 'none'}"
+            f"Dependencies: {', '.join(task.depends_on) or 'none'}\n"
+            f"Created: {time_marker(task.created_at, timezone_name=tz, now=now)}"
         )
+        if bool(self._settings.get("context.include_time")):
+            task_text += f"\n{current_time_block(self._settings)}"
         if any(item.startswith("User reply:") for item in task.constraints):
             task_text += "\nResumed: the latest user message answers your pending question."
-        history_msgs = self._sessions.recent_history()
-        history_text = "\n".join(f"{m.role}: {m.content}" for m in history_msgs)
+        history_view = self._history.build()
+        history_text = history_view.text
+        for note in history_view.included:
+            included.append(InclusionRecord(item=note.item, reason=note.reason, section="history"))
+        for note in history_view.excluded:
+            excluded.append(InclusionRecord(item=note.item, reason=note.reason, section="history"))
         cap_text = self._capability_text(task.domain_id)
+        variant = str(self._settings.get("context.prompt_variant"))
+        instructions = TRIMMED_INSTRUCTIONS if variant == "trimmed" else BASE_INSTRUCTIONS
         raw = {
-            "base_instructions": BASE_INSTRUCTIONS.strip(),
+            "base_instructions": instructions.strip(),
             "persona": persona_text,
             "preferences": pref_text,
             "domain": domain_text,
@@ -191,7 +213,17 @@ class DefaultContextBuilder:
             total_tokens=sum(item.tokens for item in sections),
             included=included,
             excluded=excluded,
+            stats={"history": history_view.stats},
         )
+
+    def _memory_time(self, value: str) -> str:
+        tz = timezone_name(self._settings)
+        marker = time_marker(value, timezone_name=tz, now=now_ts())
+        age = gap_between(value, now_ts())
+        notable = float(self._settings.get("context.time.gap_hours")) * 3600
+        if age >= notable:
+            return f'updated="{marker}" age="{human_gap(age)}"'
+        return f'updated="{marker}"'
 
     def _persona_block(self, persona) -> str:
         principles = "\n".join(f"- {p}" for p in persona.operating_principles)
@@ -201,10 +233,9 @@ class DefaultContextBuilder:
         )
 
     def _is_assistant_request(self, goal: str) -> bool:
-        lowered = goal.lower()
-        raw = str(self._settings.get("context.self_scope_keywords") or "")
-        keywords = [item.strip().lower() for item in raw.split(",") if item.strip()]
-        return any(keyword in lowered for keyword in keywords)
+        return matches_keywords(
+            goal, str(self._settings.get("context.self_scope_keywords") or "")
+        )
 
     def _capability_text(self, domain_id: str | None) -> str:
         enabled = set()
@@ -224,7 +255,7 @@ class DefaultContextBuilder:
             if not manifest.operations:
                 lines.append("  operations: instructions only")
             for op in manifest.operations:
-                args = ", ".join(f"{key}:{kind}" for key, kind in op.inputs.items()) or "none"
+                args = ", ".join(self._argument_text(op, key, kind) for key, kind in op.inputs.items()) or "none"
                 required = ", ".join(op.required) or "none"
                 lines.append(
                     f"  - {op.name} ({op.permission}): {op.description} "
@@ -233,6 +264,18 @@ class DefaultContextBuilder:
             if manifest.skill_body:
                 lines.append(manifest.skill_body)
         return "\n".join(lines)
+
+    def _argument_text(self, op, key: str, kind: str) -> str:
+        text = f"{key}:{kind}"
+        allowed = op.enums.get(key)
+        if allowed and bool(self._settings.get("capabilities.disclose_enum_values")):
+            text += " (one of " + "|".join(allowed) + ")"
+        if key not in op.required:
+            text += " [optional"
+            if key in op.defaults:
+                text += f", default {op.defaults[key]}"
+            text += "]"
+        return text
 
     def _fit(self, name: str, text: str, budget: int) -> tuple[str, int, str]:
         # shorten by cutting trailing characters to the budget

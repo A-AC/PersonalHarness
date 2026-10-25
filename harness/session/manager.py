@@ -49,13 +49,14 @@ class FileSessionManager:
         retries, retry_s = self._rw()
         atomic_write_json(self._session_path, asdict(session), retries=retries, retry_s=retry_s)
 
-    def record_interaction(self, user_text: str) -> Interaction:
+    def record_interaction(self, user_text: str, *, ts: str | None = None) -> Interaction:
         item = Interaction(
             id=new_id("int"),
             session_id=self._session.id,
-            ts=now_ts(),
+            ts=ts or now_ts(),
             user_text=user_text,
             assistant_text=None,
+            assistant_ts=None,
             task_ids=[],
         )
         retries, retry_s = self._rw()
@@ -72,14 +73,21 @@ class FileSessionManager:
         )
         return item
 
-    def append_assistant(self, interaction_id: str, text: str, task_ids: list[str] | None = None) -> None:
+    def append_assistant(
+        self,
+        interaction_id: str,
+        text: str,
+        task_ids: list[str] | None = None,
+        *,
+        ts: str | None = None,
+    ) -> None:
         retries, retry_s = self._rw()
         append_jsonl(
             self._interactions_path,
             {
                 "kind": "assistant_update",
                 "id": interaction_id,
-                "ts": now_ts(),
+                "ts": ts or now_ts(),
                 "assistant_text": text,
                 "task_ids": list(task_ids or []),
             },
@@ -97,6 +105,7 @@ class FileSessionManager:
             if row.get("kind") == "assistant_update":
                 if ident in merged:
                     merged[ident]["assistant_text"] = row.get("assistant_text")
+                    merged[ident]["assistant_ts"] = row.get("ts")
                     if row.get("task_ids"):
                         merged[ident]["task_ids"] = row["task_ids"]
                 continue
@@ -108,6 +117,7 @@ class FileSessionManager:
                     "ts": row.get("ts", ""),
                     "user_text": row.get("user_text", ""),
                     "assistant_text": row.get("assistant_text"),
+                    "assistant_ts": row.get("assistant_ts") or row.get("ts"),
                     "task_ids": row.get("task_ids") or [],
                 }
         return [Interaction(**merged[ident]) for ident in order]
@@ -129,8 +139,11 @@ class FileSessionManager:
                 return row
         return None
 
-    def list_interactions(self, limit: int = 50) -> list[Interaction]:
-        return self._merged_interactions()[-limit:]
+    def list_interactions(self, limit: int | None = 50) -> list[Interaction]:
+        items = self._merged_interactions()
+        if limit is None or limit <= 0:
+            return items
+        return items[-limit:]
 
     def bump_subject(self, subject_key: str) -> int:
         hits = int(self._session.subject_hits.get(subject_key, 0)) + 1
