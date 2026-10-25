@@ -45,6 +45,29 @@ def test_unknown_file_key_fails_loudly(tmp_path: Path) -> None:
         make_service(tmp_path, {"loop": {"max_iterationz": 3}})
 
 
+def test_retired_file_keys_are_dropped_on_load(tmp_path: Path) -> None:
+    service = make_service(
+        tmp_path,
+        {
+            "loop": {"max_iterations": 3},
+            "memory": {
+                "auto_commit": {
+                    "inferred_new": False,
+                    "inferred_merge": False,
+                    "confidence_update": False,
+                }
+            },
+        },
+    )
+    assert service.get("loop.max_iterations") == 3
+    reloaded = yaml.safe_load((tmp_path / "settings.yaml").read_text(encoding="utf-8"))
+    assert "auto_commit" not in reloaded["memory"]
+    assert "loop" in reloaded and reloaded["loop"]["max_iterations"] == 3
+    # A retired prefix does not make genuinely unknown keys acceptable.
+    with pytest.raises(SettingsError, match="unknown setting"):
+        make_service(tmp_path, {"memory": {"auto_commit": {"not_a_setting": True}}})
+
+
 def test_out_of_bounds_and_enum_validation(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     with pytest.raises(SettingsError):

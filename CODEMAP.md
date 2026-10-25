@@ -276,7 +276,7 @@ The CLI is `harness reset [--scope full|memories|conversations] [--yes]
 
 | Path under data dir | Contents |
 | --- | --- |
-| `settings.yaml` | Fully materialized setting tree |
+| `settings.yaml` | Fully materialized setting tree; keys listed in `RETIRED_SETTINGS` are dropped on load, other unknown keys fail startup |
 | `settings_history.jsonl` | Append-only `SettingChange` rows |
 | `events/events.jsonl` | Append-only `Event` rows |
 | `traces/trc_*.json` | One trace per interactive model call |

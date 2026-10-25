@@ -3,6 +3,18 @@ from __future__ import annotations
 from harness.contracts.settings import SettingDef
 
 
+# Keys that older releases wrote to settings.yaml and later releases removed.
+# They are dropped on load so an existing data directory keeps starting after
+# an upgrade; any other unknown key is still treated as a typo.
+RETIRED_SETTINGS: frozenset[str] = frozenset(
+    {
+        "memory.auto_commit.inferred_new",
+        "memory.auto_commit.inferred_merge",
+        "memory.auto_commit.confidence_update",
+    }
+)
+
+
 def catalog() -> list[SettingDef]:
     d = SettingDef
     return [

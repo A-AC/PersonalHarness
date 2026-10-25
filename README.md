@@ -271,8 +271,10 @@ name**, sampling limits, permission policy, skills/MCP paths, context budgets,
 and most other settings must be changed in the UI **Settings** page or in
 `<data>/settings.yaml` while the service is stopped.
 
-The settings file is materialized on first start. Unknown keys fail startup;
-remove typos or restore a backup rather than leaving an unknown key in place.
+The settings file is materialized on first start. Keys retired in a later
+release are dropped automatically, so an existing data directory keeps starting
+after an upgrade. Any other unknown key fails startup; remove typos or restore a
+backup rather than leaving an unknown key in place.
 
 For skills and MCP:
 
@@ -676,8 +678,9 @@ python scripts/container_check.py
 
 Settings are stored in `<data-dir>/settings.yaml` and edited in the UI. Every
 key has a catalog definition with type, bounds, default, group, and whether it
-is live or requires restart. Unknown keys in the file fail startup. A history of
-changes is appended to `settings_history.jsonl`.
+is live or requires restart. Keys retired in a later release are dropped from
+the file on load; any other unknown key fails startup. A history of changes is
+appended to `settings_history.jsonl`.
 
 Important groups:
 
@@ -832,7 +835,7 @@ See [CODEMAP.md](CODEMAP.md) for module responsibilities and the data-flow map.
 | --- | --- |
 | Turn fails with `model_unavailable` | Endpoint unreachable, wrong URL, wrong model name, or timeout. Test `/v1/models` from the same host/container. |
 | UI returns 401 | Token mismatch or stale cookie. Use `?token=<current token>` or the Bearer header. Environment overrides beat `settings.yaml`. |
-| Startup fails on an unknown setting | A typo or removed key in `settings.yaml`. Fix it or restore a backup; do not leave unknown keys. |
+| Startup fails on an unknown setting | A typo in `settings.yaml`. Fix it or restore a backup; retired keys are dropped automatically, but other unknown keys are not. |
 | `permission denied` writing `/data` | Bind-mounted data is not writable by UID 10001. `chown -R 10001:10001` the host directory or use the named volume. |
 | Container is unhealthy | Check `docker compose logs harness`; `/health` only proves the app opened its data directory, not that the model is reachable. |
 | Execution is `unknown` | The call may have happened. Reconcile before retrying; identical unknown write/destructive retries are rejected. |

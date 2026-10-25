@@ -8,7 +8,7 @@ import yaml
 
 from harness.contracts.events import Event, EventLog
 from harness.contracts.settings import SettingChange, SettingDef, SettingsError
-from harness.settings.catalog import catalog
+from harness.settings.catalog import RETIRED_SETTINGS, catalog
 from harness.storage.atomic import atomic_write_text, new_id, now_ts, read_jsonl, append_jsonl
 
 
@@ -87,8 +87,13 @@ class FileSettingsService:
             if not isinstance(loaded, dict):
                 raise SettingsError("settings file must be a mapping")
             raw = loaded
+        dropped_retired = False
         for key in _flatten_keys(raw):
             if key not in self._defs:
+                if key in RETIRED_SETTINGS:
+                    _dot_delete(raw, key)
+                    dropped_retired = True
+                    continue
                 raise SettingsError(f"unknown setting in file: {key}")
         values: dict[str, Any] = {}
         for key, default in defaults.items():
@@ -99,7 +104,7 @@ class FileSettingsService:
         for key, value in values.items():
             self._validate(self._defs[key], value)
         self._values = values
-        if not self._path.exists():
+        if dropped_retired or not self._path.exists():
             self._persist()
 
     def _apply_env(self, env: dict[str, str]) -> None:
