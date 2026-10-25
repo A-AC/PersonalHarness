@@ -105,7 +105,8 @@ class DefaultContextBuilder:
             if ranked.record.id in pref_ids:
                 continue
             block = (
-                f'<memory id="{ranked.record.id}" type="{ranked.record.type}" scope="{ranked.record.scope}" '
+                f'<memory id="{ranked.record.id}" kind="{ranked.record.kind}" '
+                f'type="{ranked.record.type}" scope="{ranked.record.scope}" '
                 f'{self._memory_time(ranked.record.updated_at)} origin="{ranked.record.origin}">\n'
                 f"{ranked.record.content}\n</memory>"
             )
@@ -121,7 +122,7 @@ class DefaultContextBuilder:
                 )
             )
         pref_text = "\n".join(
-            f'<memory id="{item.id}" type="preference" scope="global" '
+            f'<memory id="{item.id}" kind="{item.kind}" type="preference" scope="global" '
             f'{self._memory_time(item.updated_at)} origin="{item.origin}">\n{item.content}\n</memory>'
             for item in pref_records
         )

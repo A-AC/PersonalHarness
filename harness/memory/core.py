@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Callable
 
-from harness.constants import MemoryOrigin, MemoryStatus, MemoryType, SourceKind
+from harness.constants import MemoryKind, MemoryOrigin, MemoryStatus, MemoryType, SourceKind
 from harness.contracts.events import Event, EventLog
 from harness.contracts.memory import (
     MemoryCandidate,
@@ -15,7 +15,7 @@ from harness.contracts.memory import (
 )
 from harness.contracts.settings import SettingsService
 from harness.contracts.sources import SourceResolver
-from harness.memory.classifier import KeywordMemoryClassifier
+from harness.memory.classifier import KeywordMemoryClassifier, kind_for_type
 from harness.memory.tokens import overlap, tokens
 from harness.storage.atomic import new_id, now_ts
 from harness.text import word_tokens
@@ -97,9 +97,10 @@ class MemoryCore:
 
         notes: list[str] = []
         assigned_type = self._assign_type(candidate.type_hint, content, notes)
+        assigned_kind = self._assign_kind(candidate.kind_hint, assigned_type, notes)
         scope = self._resolve_scope(candidate, notes)
 
-        existing = self._find_exact(content, scope)
+        existing = self._find_exact(content, scope, assigned_kind)
         if existing is not None:
             self._events.append(
                 Event(id=new_id("evt"), ts=now_ts(), actor="harness", operation="memory.duplicate", target=existing.id, result="active")
@@ -112,11 +113,24 @@ class MemoryCore:
                 hint_notes=notes,
             )
 
-        conflict = self._find_conflict(content, scope, assigned_type) if candidate.origin == MemoryOrigin.EXPLICIT else None
+        conflict = (
+            self._find_conflict(content, scope, assigned_type, assigned_kind)
+            if candidate.origin == MemoryOrigin.EXPLICIT
+            else None
+        )
+        supersedes = candidate.supersedes
+        if supersedes:
+            target = self._get(supersedes)
+            if target is not None and target.kind != assigned_kind:
+                notes.append(
+                    f'supersedes target is kind "{target.kind}", not "{assigned_kind}"; not superseded'
+                )
+                supersedes = None
         ts = candidate.updated_at or now_ts()
         record = MemoryRecord(
             id=new_id("mem"),
             type=assigned_type,
+            kind=assigned_kind,
             content=content,
             scope=scope,
             origin=candidate.origin,
@@ -125,7 +139,7 @@ class MemoryCore:
             updated_at=ts,
             provenance=dict(candidate.provenance),
             hint_notes=notes,
-            supersedes=candidate.supersedes or (conflict.id if conflict else None),
+            supersedes=supersedes or (conflict.id if conflict else None),
             run_id=candidate.run_id,
         )
         replaced: list[MemoryRecord] = []
@@ -141,8 +155,8 @@ class MemoryCore:
             self._events.append(
                 Event(id=new_id("evt"), ts=ts, actor="harness", operation="memory.supersede", target=old.id, result=record.id)
             )
-        elif candidate.supersedes:
-            old = self._get(candidate.supersedes)
+        elif supersedes:
+            old = self._get(supersedes)
             if old is not None:
                 old = replace(old, status=MemoryStatus.SUPERSEDED, superseded_by=record.id, updated_at=ts)
                 self._put(old)
@@ -179,6 +193,19 @@ class MemoryCore:
         elif value and value != classified:
             notes.append(f'type hint "{value}" was ignored; classified as "{classified}"')
         return classified
+
+    def _assign_kind(self, hint: str | None, assigned_type: str, notes: list[str]) -> str:
+        allowed = {item.value for item in MemoryKind}
+        derived = kind_for_type(assigned_type)
+        value = str(hint or "").strip()
+        if not value:
+            return derived
+        if value not in allowed:
+            notes.append(f'kind hint "{value}" is not a valid kind; used "{derived}"')
+            return derived
+        if value != derived:
+            notes.append(f'kind hint "{value}" overrides derived kind "{derived}"')
+        return value
 
     def _resolve_scope(self, candidate: MemoryCandidate, notes: list[str]) -> str:
         fallback = str(candidate.default_scope or self._settings.get("memory.default_scope") or "global")
@@ -279,7 +306,13 @@ class MemoryCore:
             for record in list(self._all()):
                 if record.status != MemoryStatus.ACTIVE:
                     continue
+                # Only the semantic subtype is classifier-owned. Procedural,
+                # episodic, and prospective rows keep their type and kind.
+                if record.kind != MemoryKind.SEMANTIC:
+                    continue
                 new_type = self._assign_type(None, record.content, [])
+                if kind_for_type(new_type) != record.kind:
+                    continue
                 if new_type != record.type:
                     old_type = record.type
                     updated = replace(record, type=new_type, updated_at=now_ts())
@@ -309,6 +342,8 @@ class MemoryCore:
                 if older.id in consumed or older.status != MemoryStatus.ACTIVE:
                     continue
                 if older.scope != current.scope:
+                    continue
+                if older.kind != current.kind:
                     continue
                 if normalize_content(older.content) == normalize_content(current.content):
                     kind = "merged"
@@ -431,22 +466,24 @@ class MemoryCore:
                 return "unstructured execution text is not a source"
         return None
 
-    def _find_exact(self, content: str, scope: str) -> MemoryRecord | None:
+    def _find_exact(self, content: str, scope: str, kind: str) -> MemoryRecord | None:
         normalized = normalize_content(content)
         for record in self._all():
             if record.status != MemoryStatus.ACTIVE or record.scope != scope:
+                continue
+            if record.kind != kind:
                 continue
             if normalize_content(record.content) == normalized:
                 return record
         return None
 
-    def _find_conflict(self, content: str, scope: str, type: str) -> MemoryRecord | None:
+    def _find_conflict(self, content: str, scope: str, type: str, kind: str) -> MemoryRecord | None:
         best: MemoryRecord | None = None
         best_score = 0.0
         for record in self._all():
             if record.status != MemoryStatus.ACTIVE or record.scope != scope:
                 continue
-            if record.type != type:
+            if record.type != type or record.kind != kind:
                 continue
             if normalize_content(record.content) == normalize_content(content):
                 continue

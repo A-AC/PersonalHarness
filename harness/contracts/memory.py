@@ -15,25 +15,34 @@ class MemoryRecord:
     created_at: str
     updated_at: str
     provenance: dict[str, Any]
+    kind: str = ""
     hint_notes: list[str] = field(default_factory=list)
     supersedes: str | None = None
     superseded_by: str | None = None
     run_id: str | None = None
+
+    def __post_init__(self) -> None:
+        # Legacy rows have no ``kind``. Derive it from the type so file and
+        # in-memory stores behave identically without a migration write. This
+        # mirrors constants.memory_kind_for_type; contracts may not import it.
+        if not self.kind:
+            self.kind = "procedural" if self.type in {"procedure", "lesson"} else "semantic"
 
 
 @dataclass
 class MemoryCandidate:
     """A write request from the harness.
 
-    ``type_hint``/``scope_hint`` are untrusted suggestions (usually from the
-    model). The memory core validates them, falls back to the classifier and
-    default scope, and never fails the write because of a bad hint.
-    ``provenance`` is harness-filled, not model-facing.
+    ``type_hint``/``kind_hint``/``scope_hint`` are untrusted suggestions
+    (usually from the model or a capture hook). The memory core validates them,
+    falls back to the classifier and default scope, and never fails the write
+    because of a bad hint. ``provenance`` is harness-filled, not model-facing.
     """
 
     content: str
     origin: str = "explicit"
     type_hint: str | None = None
+    kind_hint: str | None = None
     scope_hint: str | None = None
     default_scope: str | None = None
     provenance: dict[str, Any] = field(default_factory=dict)

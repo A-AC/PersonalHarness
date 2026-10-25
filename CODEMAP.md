@@ -67,12 +67,12 @@ It has no concrete imports.
 | `harness/profile/provider.py` | Persona versions and proposed edits |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
-| `harness/memory/core.py` | Candidate validation, classifier-driven typing, hint/scope fallback, duplicate/conflict policy, lifecycle, keyword retrieval with recency tie-break, usage, consolidation maintenance, rollback |
-| `harness/memory/classifier.py` | Replaceable deterministic (keyword-rule) memory type classifier |
-| `harness/memory/file_manager.py` | File-backed memory records and usage JSONL |
-| `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests |
+| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback, kind-aware duplicate/conflict policy, lifecycle, keyword retrieval with recency tie-break, usage, consolidation maintenance (semantic-only retype), rollback |
+| `harness/memory/classifier.py` | Replaceable deterministic (keyword-rule) memory type classifier plus the deterministic type-to-kind mapping |
+| `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
+| `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
 | `harness/memory/tokens.py` | Token/overlap aliases for retrieval |
-| `harness/context/builder.py` | Budgeted context sections, scopes, prompt variant, local current-time block, task created/memory updated age markers, bounded history, capability disclosure with enum values/defaults |
+| `harness/context/builder.py` | Budgeted context sections, scopes, prompt variant, local current-time block, task created/memory updated age markers, memory tags with kind, bounded history, capability disclosure with enum values/defaults |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
 | `harness/capabilities/harness_ops.py` | Memory and structure manifests; memory enums/defaults generated from `constants` |
 | `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records |
@@ -182,6 +182,7 @@ Memory policy is settings-driven: `memory.duplicate_overlap`,
 `memory.conflict_containment`/`conflict_overlap`, classifier rules,
 `memory.consolidation.retype`, `consolidation.extract_enabled`,
 `consolidation.schedule_enabled`/`schedule_interval_s`, and the source policy.
+The type-to-kind mapping is structural and needs no setting.
 `ui.chat_stream_tokens` controls raw token display in the chat panel,
 `ui.sse_heartbeat_s` controls SSE keepalive comments,
 `ui.chat_trace_scan` sets how many recent traces the chat page loads once for
@@ -207,24 +208,36 @@ default scope from project/domain/self context before honoring a valid hint.
 Rejected hints are written to `hint_notes` on the record and returned as
 `argument_notes`; explicit `self` is ignored outside an assistant-focused task.
 
+`kind` is an orthogonal axis: `semantic`, `episodic`, `procedural`, or
+`prospective`. `type` remains the semantic subtype. New writes persist the kind
+derived from the assigned type (`procedure`/`lesson` -> `procedural`;
+`fact`/`preference`/`decision` -> `semantic`), or a valid `kind_hint`; an invalid
+hint falls back to the derived kind with a `hint_notes` entry. Legacy records
+without `kind` derive it at load in both stores, so no migration write is
+needed. Dedupe, conflict supersession, explicit `supersedes`, and consolidation
+merge all require the same kind as well as the same scope/type.
+
 An explicit write activates immediately. Provenance is harness-filled
 (`source_kind=user_statement`, `source_refs=[interaction_id]`) and still passes
 the resolved-source and policy checks. Exact duplicate content in the same scope
-returns the existing active record. A newer explicit statement that passes both
-`memory.conflict_containment` and `memory.conflict_overlap` supersedes the older
-one; the execution message reports the replaced content. Statuses are only
-`active`, `superseded`, and `retracted`.
+and kind returns the existing active record. A newer explicit statement that
+passes both `memory.conflict_containment` and `memory.conflict_overlap`
+supersedes the older one; the execution message reports the replaced content.
+Statuses are only `active`, `superseded`, and `retracted`.
 
 Consolidation (`harness/consolidation/service.py`) runs off the turn path. It
 optionally asks the background model for inferred memories (verified source
 refs, `origin=inferred`, `run_id` attached), then runs the deterministic pass:
 re-type, merge exact/near-duplicates, and supersede older conflicting records by
-recency. Newest active records win; older rows remain as history with
-`superseded_by`. Each run writes an evidence snapshot and a report of added,
-merged, and superseded rows. Rollback retracts records created by the run,
-restores merged/superseded losers, and restores previous types; inferred rows
-can also be retracted individually. The UI exposes manual run/rollback and can
-start a periodic run when `consolidation.schedule_enabled` is true.
+recency. Re-typing is limited to semantic-kind records; procedural, episodic,
+and prospective rows keep their type and kind, and a classifier result that
+would move a record to another kind is ignored. Newest active records win;
+older rows remain as history with `superseded_by`. Each run writes an evidence
+snapshot and a report of added, merged, and superseded rows. Rollback retracts
+records created by the run, restores merged/superseded losers, and restores
+previous types; inferred rows can also be retracted individually. The UI exposes
+manual run/rollback and can start a periodic run when
+`consolidation.schedule_enabled` is true.
 
 Removed from V1: the proposed/approve/reject lifecycle, the memory approval
 queue and approve endpoint, inferred-vs-explicit approval gating, and the
