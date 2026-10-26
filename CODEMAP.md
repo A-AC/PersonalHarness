@@ -12,10 +12,10 @@ composition/edge layer.
 | Path | Responsibility |
 | --- | --- |
 | `harness/__main__.py` | CLI: `serve`, `health`, `turn`, `consolidate`, `measure`, `eval`, `reset` |
-| `harness/app.py` | `Harness` container and `build_harness()` wiring |
+| `harness/app.py` | `Harness` container and `build_harness()` wiring, including the structure hook (enter/leave/suggest with duplicate and cooldown checks) |
 | `harness/constants.py` | Schema version, ID prefixes, enums, reserved `self` id |
 | `harness/storage/atomic.py` | UTC timestamps, safe IDs/filenames, atomic JSON/text, JSONL append |
-| `harness/text.py` | Tokenization, reasoning stripping, overlap, token estimate, keyword matching, success-claim/unknown/placeholder checks shared by guards and evals |
+| `harness/text.py` | Tokenization, reasoning stripping, overlap, normalized name matching (`normalize_name`, `name_overlap`, `match_by_name`), token estimate, keyword matching, success-claim/unknown/placeholder checks shared by guards and evals |
 | `harness/timefmt.py` | UTC storage timestamps rendered as compact local markers, current-time block, human gap phrases, and summary window labels |
 | `harness/prompts.py` | Full and trimmed action instructions, task-plan instructions, and background summary instructions |
 
@@ -60,27 +60,28 @@ It has no concrete imports.
 | `harness/settings/service.py` | YAML load, validation/coercion, env overrides, history |
 | `harness/events/log.py` | Append-only event log with retention query |
 | `harness/traces/store.py` | Per-call trace files with prompt/inclusion/validation data |
-| `harness/session/manager.py` | Session resume, append-only interactions with user/assistant timestamps, subject hits |
+| `harness/session/manager.py` | Session resume (including old files without an active domain), append-only interactions with user/assistant timestamps, subject hits, persisted active domain |
 | `harness/session/turns.py` | `DefaultTurnService`: one serialized turn entry point for CLI and web, progress listener, trace/memory detail read model |
-| `harness/domains/registry.py` | Self domain, explicit structure creation, suggestions, enablement |
-| `harness/tasks/manager.py` | Task files, valid transitions, dependency release, sequencing |
+| `harness/domains/registry.py` | Self domain, explicit structure creation, suggestions, normalized suggestion cooldown, enablement |
+| `harness/tasks/manager.py` | Task files, valid transitions, dependency release, sequencing, running-task structure reassignment |
 | `harness/profile/provider.py` | Persona versions and proposed edits |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
-| `harness/memory/core.py` | Candidate validation, classifier-driven typing, hint/scope fallback, duplicate/conflict policy, lifecycle, keyword retrieval with recency tie-break, usage, consolidation maintenance, rollback |
-| `harness/memory/classifier.py` | Replaceable deterministic (keyword-rule) memory type classifier |
-| `harness/memory/file_manager.py` | File-backed memory records and usage JSONL |
-| `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests |
+| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback (procedural hints normalize non-procedure subtypes to `lesson`), kind-aware duplicate/conflict policy, lifecycle, keyword retrieval with recency tie-break, usage, consolidation maintenance (semantic-only retype), rollback |
+| `harness/memory/capture.py` | Deterministic execution-outcome capture: failure fingerprint dedupe, task-derived scope, resolving-success supersede, `memory.capture` events, no model call |
+| `harness/memory/classifier.py` | Replaceable deterministic (keyword-rule) memory type classifier plus the deterministic type-to-kind mapping |
+| `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
+| `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
 | `harness/memory/tokens.py` | Token/overlap aliases for retrieval |
-| `harness/context/builder.py` | Budgeted context sections, scopes, prompt variant, local current-time block, task created/memory updated age markers, bounded history, capability disclosure with enum values/defaults |
+| `harness/context/builder.py` | Budgeted context sections (including a bounded active-domain/project directory that drops whole entries), scopes, prompt variant, local current-time block, task created/memory updated age markers, memory tags with kind, bounded history, capability disclosure with enum values/defaults |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
-| `harness/capabilities/harness_ops.py` | Memory and structure manifests; memory enums/defaults generated from `constants` |
+| `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`, `suggest_project`); memory enums/defaults generated from `constants` |
 | `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records |
 | `harness/capabilities/skills.py` | `SKILL.md` discovery |
 | `harness/capabilities/mcp.py` | Optional stdio MCP discovery/call via the official SDK |
 | `harness/orchestrator/parse.py` | Pydantic parsing, loose/strict proposal JSON schemas, actionable parse errors |
 | `harness/orchestrator/machine.py` | Allowed-state and action-transition rules |
-| `harness/orchestrator/loop.py` | Turn handling, structure commands, heuristic/LLM planning, task loop, retry cap, honesty/internal-schema guards, turn timeline and metrics |
+| `harness/orchestrator/loop.py` | Turn handling, explicit structure commands (including switch/open/leave and suggestion confirmation hygiene), heuristic/LLM planning with the structure directory and active-domain inheritance, task loop, retry cap, honesty/internal-schema guards, turn timeline and metrics |
 | `harness/orchestrator/timeline.py` | Per-turn stage recorder (start offset, duration, detail) serialized into traces |
 | `harness/consolidation/service.py` | Evidence snapshot, optional model extraction, deterministic retype/merge/supersede pass, run report, rollback |
 | `harness/maintenance/reset.py` | Full/selective state wipe, timestamped backup archive, seed re-application, stale-reference scrub, reset audit event |
@@ -88,7 +89,7 @@ It has no concrete imports.
 | `harness/model/openai_http.py` | OpenAI-compatible HTTP adapter and health probe |
 | `harness/measure.py` | Learning report from stored events/tasks/memories/usage |
 | `harness/eval.py` | Isolated live eval, deterministic checks, long-history real-use and time-awareness scenarios, scripted honesty cases, p50/p95, malformed-output, prompt-token, and token metrics |
-| `harness/ui/web.py` | Authenticated server-rendered inspection/control UI (chat panel, memory actions, on-demand/scheduled consolidation, stored conversation history, turn timeline, execution envelope, confirm-gated reset); chat streams stage/token events over SSE and links messages to traces and back; malformed control requests return 4xx with a message |
+| `harness/ui/web.py` | Authenticated server-rendered inspection/control UI (viewport-sized chat panel with a scrollable log, collapsible live strip, composer pinned to the panel bottom, and an active-domain selector outside the SSE path; completed turns are appended from server-rendered fragments over SSE without reloading, memory actions, on-demand/scheduled consolidation, stored conversation history, turn timeline, execution envelope, confirm-gated reset); chat streams stage/token events over SSE and links messages to traces and back; malformed control requests return 4xx with a message |
 
 ## Turn data flow
 
@@ -96,14 +97,16 @@ It has no concrete imports.
 user text (CLI `turn` or web chat)
   -> DefaultTurnService.submit (one lock; shared by both clients)
   -> SessionManager.record_interaction (append-only, UTC ts)
-  -> structure command?  yes -> DomainRegistry.create_* / confirm / decline
+  -> structure command?  yes -> create / confirm / decline, or enter/leave/switch
+                                an existing domain (never create on switch)
                          no  -> short single request in heuristic mode?
                                   yes -> TaskManager.create(one code task)
-                                  no  -> ModelAdapter.complete(task plan)
+                                  no  -> ModelAdapter.complete(task plan with directory)
                                         -> TaskManager.create(sequence, deps)
   -> TaskManager.next_ready
-  -> ContextBuilder.build(task, trace_id)
-       persona + preferences + domain/project/workspace + task
+  -> ContextBuilder.build(task, session, trace_id)
+       persona + preferences + bounded structure directory
+       + domain/project/workspace + task
        + local current time + bounded history (full/summary/segment, compact ts
        and gap markers, memory updated/age markers)
        + enabled capability manifests with enum values/defaults;
@@ -129,7 +132,9 @@ completion/start markers, raw `token` deltas, and a final
 uses one SSE channel per turn job backed by this listener; the terminal calls
 the same `submit` without a listener. Completed payloads carry trace ids,
 execution envelopes, retrieved memory ids, and memory writes (with undo ids).
-The chat page resolves all visible details with one recent trace scan
+The chat page appends the completed turn by fetching its server-rendered
+fragment (`/chat/interactions/<id>`) instead of reloading the document. The
+chat page resolves all visible details with one recent trace scan
 (`detail_many`) and scans per message only for older focused links.
 
 Every model trace records `duration_ms`, `time_to_first_token_ms`,
@@ -145,7 +150,9 @@ traces.
 Planning is selectable through `tasks.planning_mode`: `llm` always asks the
 model to split, while `heuristic` (the default) creates one task in code for
 short single-request messages and reserves the model split for marker-bearing
-input. `loop.stop_after_nonretryable_failure` (default true) rejects further
+input. Both paths inherit `session.active_domain_id`; the planner prompt carries
+the same structure directory as the context and records unresolved names as
+`plan.structure_miss` events before falling back to the active domain. `loop.stop_after_nonretryable_failure` (default true) rejects further
 capability calls after a non-retryable execution failure and forces an honest
 failure response. `loop.honesty_guard` (default true) rejects a final response
 that claims success after the last execution failed, was denied/unavailable, or
@@ -163,7 +170,11 @@ instruction block, and `context.include_time` adds the current local time to the
 task section using `context.timezone` (default `America/Mexico_City`, falling
 back to UTC if the zone database is missing or invalid); `context.time.gap_hours`
 controls when history lines get a relative "N hours later" marker.
-`context.budgets.history` caps the history section. `context.history.strategy`
+`context.budgets.history` caps the history section. `context.budgets.structure`
+(default 300) caps the active-domain/project directory; overflow drops whole
+directory entries, and the total-budget drop order is history, structure,
+domain, preferences, capabilities. `domain.match_overlap` (default 0.8) is the
+name overlap at which a suggestion is treated as a duplicate. `context.history.strategy`
 selects `full`, rolling `summary` (default), or gap-based `segment`;
 `verbatim_turns`, `segment_gap_hours`, `summary_tokens`,
 `summary_batch_turns`, `summaries`, `background_summary`,
@@ -180,8 +191,10 @@ rejects required values that still contain `<...>`. The selected defaults are
 `include_time=true`, all three capability switches on, and both loop guards on.
 Memory policy is settings-driven: `memory.duplicate_overlap`,
 `memory.conflict_containment`/`conflict_overlap`, classifier rules,
-`memory.consolidation.retype`, `consolidation.extract_enabled`,
-`consolidation.schedule_enabled`/`schedule_interval_s`, and the source policy.
+`memory.consolidation.retype`, `memory.capture.execution_outcomes`,
+`consolidation.extract_enabled`, `consolidation.schedule_enabled`/
+`schedule_interval_s`, and the source policy.
+The type-to-kind mapping is structural and needs no setting.
 `ui.chat_stream_tokens` controls raw token display in the chat panel,
 `ui.sse_heartbeat_s` controls SSE keepalive comments,
 `ui.chat_trace_scan` sets how many recent traces the chat page loads once for
@@ -207,24 +220,62 @@ default scope from project/domain/self context before honoring a valid hint.
 Rejected hints are written to `hint_notes` on the record and returned as
 `argument_notes`; explicit `self` is ignored outside an assistant-focused task.
 
+`kind` is an orthogonal axis: `semantic`, `episodic`, `procedural`, or
+`prospective`. `type` remains the semantic subtype. New writes persist the kind
+derived from the assigned type (`procedure`/`lesson` -> `procedural`;
+`fact`/`preference`/`decision` -> `semantic`), or a valid `kind_hint`; an invalid
+hint falls back to the derived kind with a `hint_notes` entry. Legacy records
+without `kind` derive it at load in both stores, so no migration write is
+needed. Dedupe, conflict supersession, explicit `supersedes`, and consolidation
+merge all require the same kind as well as the same scope/type. A procedural
+hint that arrives with a non-`procedure`/`lesson` classifier subtype is
+normalized to `lesson` in the core, so the kind/type axes stay consistent;
+semantic writes and explicit `remember` calls (which pass no kind hint) are
+unaffected.
+
+Procedural capture (`harness/memory/capture.py`) is deterministic and needs no
+model call. It records only `failed`, `denied`, `unavailable`, and `unknown`
+executions, plus a `succeeded` execution that follows a non-succeeded attempt
+of the same `capability.operation` within the same task; routine successes stay
+silent. `memory.capture.execution_outcomes` (default true) and
+`memory.source_policy.execution_outcome` (`enabled_structured_only` or
+`disabled`) can both turn it off, and disabled means no write and no events.
+`harness_memory` and `harness_structure` executions are excluded. The candidate
+is `kind=procedural`, `origin=inferred`, with
+`source_kind=execution_outcome`, `source_refs=[operation_id]`,
+`evidence_status=observed`, and only the structured
+`{status, error_category, message, capability, operation}` fields. Its content
+is one deterministic sentence naming the operation and outcome (no user text),
+and the default scope follows the task: project, then a non-self domain, then
+self, then global. Before writing a failure, active procedural records in that
+scope are scanned and an existing record with the same
+`(capability, operation, status, error_category)` fingerprint suppresses the
+duplicate. A resolving success writes a resolution lesson and supersedes the
+failure by `memory_id`; nothing is auto-retracted. Each created record emits
+one `memory.capture` event with `target=memory_id`, `result=status`, and the
+fingerprint data; memory text is never inlined into the execution envelope.
+
 An explicit write activates immediately. Provenance is harness-filled
 (`source_kind=user_statement`, `source_refs=[interaction_id]`) and still passes
 the resolved-source and policy checks. Exact duplicate content in the same scope
-returns the existing active record. A newer explicit statement that passes both
-`memory.conflict_containment` and `memory.conflict_overlap` supersedes the older
-one; the execution message reports the replaced content. Statuses are only
-`active`, `superseded`, and `retracted`.
+and kind returns the existing active record. A newer explicit statement that
+passes both `memory.conflict_containment` and `memory.conflict_overlap`
+supersedes the older one; the execution message reports the replaced content.
+Statuses are only `active`, `superseded`, and `retracted`.
 
 Consolidation (`harness/consolidation/service.py`) runs off the turn path. It
 optionally asks the background model for inferred memories (verified source
 refs, `origin=inferred`, `run_id` attached), then runs the deterministic pass:
 re-type, merge exact/near-duplicates, and supersede older conflicting records by
-recency. Newest active records win; older rows remain as history with
-`superseded_by`. Each run writes an evidence snapshot and a report of added,
-merged, and superseded rows. Rollback retracts records created by the run,
-restores merged/superseded losers, and restores previous types; inferred rows
-can also be retracted individually. The UI exposes manual run/rollback and can
-start a periodic run when `consolidation.schedule_enabled` is true.
+recency. Re-typing is limited to semantic-kind records; procedural, episodic,
+and prospective rows keep their type and kind, and a classifier result that
+would move a record to another kind is ignored. Newest active records win;
+older rows remain as history with `superseded_by`. Each run writes an evidence
+snapshot and a report of added, merged, and superseded rows. Rollback retracts
+records created by the run, restores merged/superseded losers, and restores
+previous types; inferred rows can also be retracted individually. The UI exposes
+manual run/rollback and can start a periodic run when
+`consolidation.schedule_enabled` is true.
 
 Removed from V1: the proposed/approve/reject lifecycle, the memory approval
 queue and approve endpoint, inferred-vs-explicit approval gating, and the
@@ -248,9 +299,9 @@ composition root; it imports no concrete component.
 
 | Scope | Removes | Re-seeds / keeps |
 | --- | --- | --- |
-| `full` | settings file + history, sessions, traces, history, events, registry, tasks, persona, capability attempts, memories, consolidation | default settings from `settings/catalog.py`, code-defined `DEFAULT_PERSONA`, reserved `self` domain, a new session |
-| `memories` | `memory/`, `consolidation/`, memory ids in retained traces/events/attempts | conversations, tasks, domains, persona, settings stay |
-| `conversations` | sessions, traces, history, events, capability attempts, tasks, consolidation; memory usage and conversation source refs | memories, domains, persona, settings stay; a new session is created |
+| `full` | settings file + history, sessions, traces, history, events, registry, tasks, persona, capability attempts, memories, consolidation | default settings from `settings/catalog.py`, code-defined `DEFAULT_PERSONA`, reserved `self` domain, a new session with no active domain |
+| `memories` | `memory/`, `consolidation/`, memory ids in retained traces/events/attempts | conversations, tasks, domains, persona, settings, and the active domain stay |
+| `conversations` | sessions, traces, history, events, capability attempts, tasks, consolidation; memory usage and conversation source refs | memories, domains, persona, settings stay; a new session is created with no active domain |
 
 Before a wipe (unless `maintenance.reset.backup` is false or the CLI passes
 `--no-backup`) it writes `backups/reset_<scope>_<UTC timestamp>.zip` containing
@@ -280,7 +331,7 @@ The CLI is `harness reset [--scope full|memories|conversations] [--yes]
 | `settings_history.jsonl` | Append-only `SettingChange` rows |
 | `events/events.jsonl` | Append-only `Event` rows |
 | `traces/trc_*.json` | One trace per interactive model call |
-| `sessions/session.json` | Session id/timestamps/subject hits |
+| `sessions/session.json` | Session id/timestamps/subject hits/active domain id |
 | `sessions/session_meta.json` | Cooldown metadata |
 | `sessions/interactions.jsonl` | User rows plus assistant-update rows, each with UTC timestamps |
 | `history/segments/seg_*.json` | Stored history segment, covered interaction ids, rolling summary, status/error, and summary token counts |

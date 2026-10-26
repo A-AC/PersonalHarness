@@ -9,6 +9,7 @@ from harness.contracts.domains import Domain, Project, StructureDraft, Suggestio
 from harness.contracts.events import Event, EventLog
 from harness.contracts.settings import SettingsService
 from harness.storage.atomic import atomic_write_json, new_id, now_ts, read_json
+from harness.text import name_overlap, normalize_name
 
 
 class UnconfirmedError(ValueError):
@@ -278,8 +279,14 @@ class FileDomainRegistry:
 
     def suggestion_on_cooldown(self, key: str) -> bool:
         now = now_ts()
+        threshold = float(self._settings.get("domain.match_overlap"))
+        wanted = normalize_name(key)
         for suggestion in self.list_suggestions():
-            if suggestion.status == "declined" and suggestion.draft.name.lower() == key.lower():
-                if suggestion.cooldown_until and suggestion.cooldown_until > now:
-                    return True
+            if suggestion.status != "declined" or not suggestion.cooldown_until:
+                continue
+            if suggestion.cooldown_until <= now:
+                continue
+            name = suggestion.draft.name
+            if normalize_name(name) == wanted or name_overlap(name, key) >= threshold:
+                return True
         return False

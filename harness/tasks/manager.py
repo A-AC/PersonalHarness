@@ -168,6 +168,37 @@ class FileTaskManager:
         self._save(task)
         return task
 
+    def assign_structure(
+        self,
+        task_id: str,
+        *,
+        domain_id: str | None,
+        project_id: str | None,
+        workspace_id: str | None,
+    ) -> Task:
+        task = self._load(task_id)
+        task.domain_id = domain_id
+        task.project_id = project_id
+        task.workspace_id = workspace_id
+        task.updated_at = now_ts()
+        self._save(task)
+        self._events.append(
+            Event(
+                id=new_id("evt"),
+                ts=task.updated_at,
+                actor="harness",
+                operation="task.structure",
+                target=task.id,
+                result="ok",
+                data={
+                    "domain_id": domain_id,
+                    "project_id": project_id,
+                    "workspace_id": workspace_id,
+                },
+            )
+        )
+        return task
+
     def next_ready(self) -> Task | None:
         ready = self.list(states=[TaskState.READY])
         if not ready:

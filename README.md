@@ -50,20 +50,24 @@ The v1 scope is deliberately small:
   denied, unavailable, or unknown execution. Unknown outcomes must be reported
   as unknown, and the model is never allowed to ask the user to choose internal
   schema such as a memory type or scope.
-- **Memory with provenance.** Facts, preferences, decisions, procedures, and
-  lessons in global, self, domain, or project scope, with explicit/inferred
-  source rules, conflict handling, supersession, retraction, usage logging, and
-  consolidation rollback.
+- **Memory with provenance.** Semantic, episodic, procedural, and prospective
+  kinds over facts, preferences, decisions, procedures, and lessons in global,
+  self, domain, or project scope, with explicit/inferred source rules, conflict
+  handling, supersession, retraction, usage logging, and consolidation rollback.
 - **Domains, projects, and workspaces.** Structure is created only by an
-  explicit user command or confirmation; the model may only suggest.
+  explicit user command or confirmation; the model may only suggest. An active
+  domain turns a domain into the current project workspace: tasks inherit it,
+  domain-scoped memory accumulates, and the model or the chat selector can
+  enter/leave an existing domain without creating one.
 - **Budgeted context and full traces.** Each model call records the context
   sections included or excluded, the prompt, the raw response, validation
   result, duration, time to first token, prompt/completion/visible/reasoning
   tokens, and whether thinking occurred. Each turn also stores a stage timeline
   (prompt build, model calls, parse/validation, execution, response).
 - **Inspectable UI and files.** A small authenticated server-rendered UI exposes
-  tasks, traces, memory, settings, and consolidation state without a separate
-  database.
+  a viewport-sized chat panel (scrollable log, collapsible live progress strip,
+  composer pinned to the bottom) plus tasks, traces, memory, settings, and
+  consolidation state without a separate database.
 - **Deterministic tests and a live eval tier.** Behavior tests use a scripted
   adapter; the live eval runs real scenarios with deterministic checks,
   long-history real-use cases (remembering a name/NAS, ambiguous replies,
@@ -80,12 +84,15 @@ together. See [CODEMAP.md](CODEMAP.md) for the full module and storage map.
 ```text
 user text
   -> session interaction (append-only)
-  -> structure command?  yes -> registry create/confirm/decline
-                         no  -> model task plan, or one code task for a
-                                short single request in heuristic mode
+  -> structure command?  yes -> registry create/confirm/decline, or
+                                enter/leave/switch an existing domain
+                         no  -> model task plan (with the structure directory),
+                                or one code task for a short single request in
+                                heuristic mode; both inherit the active domain
   -> persisted tasks
   -> next ready task
-  -> budgeted context (persona, memory, domain/project, history, capabilities)
+  -> budgeted context (persona, memory, structure directory, domain/project,
+     history, capabilities)
   -> model proposal (respond / ask / act / continue / end), strict or loose schema
   -> validation + permission check + internal-schema/honesty guards
   -> capability dispatch -> attempt record + evidence + event
@@ -687,7 +694,8 @@ Important groups:
 - `models.interactive.*` and `models.background.*`: endpoint, model, limits,
   sampling, seed, thinking budget, timeout, retries, response format, strict or
   loose action schema
-- `context.budgets.*`: per-section and total token budgets
+- `context.budgets.*`: per-section and total token budgets, including
+  `context.budgets.structure` for the active-domain/project directory
 - `context.prompt_variant`, `context.include_time`: full/trimmed rules and the
   current UTC time in the task section
 - `context.self_scope_keywords`: phrases that load the reserved `self` domain
@@ -695,7 +703,8 @@ Important groups:
 - `consolidation.*`: extraction, schedule, evidence window, proposal limit
 - `capabilities.*`: permission policy, default enablement, skill/MCP paths,
   enum disclosure, optional-argument coercion, placeholder rejection
-- `domain.suggestion.*`: repeated-subject threshold and cooldown
+- `domain.suggestion.*`: repeated-subject threshold and cooldown;
+  `domain.match_overlap` is the name overlap at which a suggestion is a duplicate
 - `loop.*`: iteration/time/retry limits, honesty and internal-schema guards
 - `session.history_window`, `ui.*`, `events/traces.retention_days`
 
@@ -743,7 +752,11 @@ tasks.
 Important invariants:
 
 - The model may only **suggest** a domain or project (`harness_structure`).
-  Creation happens only after an explicit user command or confirmation.
+  Creation happens only after an explicit user command or confirmation. It may
+  enter or leave an existing domain, but never create one for a switch request.
+- A bare "yes" or "no" confirms or declines a suggestion only when exactly one
+  suggestion is pending and no task is awaiting the user; otherwise it is a
+  normal turn.
 - Capability execution is validated in this order: registration, availability,
   operation exists, idempotency key, domain enablement, permission policy,
   argument schema, dispatch, result recording. Argument validation reports every
@@ -763,9 +776,50 @@ Important invariants:
 - All timestamps are UTC ISO-8601 (`Z`). Files are UTF-8 with LF endings and
   writes use a temporary file plus `os.replace`.
 
+## Domains and projects
+
+Domains are project workspaces. A domain holds projects, workspaces, capability
+enablement, and its own memory scope. The reserved `self` domain holds memories
+about the assistant and loads on demand.
+
+The session stores an optional active domain. Every task planned from a turn
+inherits it, including the code-only heuristic plan and tasks whose planner
+names no domain or names one that does not exist. That is what makes
+`domain:<id>` memory accumulate while the user is working in a domain. The
+structure directory in the prompt lists the active domain, non-archived domains
+with project counts, projects with their domain, and pending suggestions; the
+planner receives the same directory. The section has its own
+`context.budgets.structure` budget and drops whole entries rather than cutting a
+line, and the total-budget drop order is history, structure, domain,
+preferences, capabilities.
+
+The user can switch with an explicit "work on", "switch to", or "open <domain>"
+command, or with the selector on the chat page. Both resolve an existing
+non-archived domain by exact then normalized name. A missing or ambiguous name
+returns the available/candidate names and never creates a domain. The model can
+use `harness_structure.enter_domain` and `leave_domain` for the same purpose; a
+succeeded call also reassigns the running task's structure so the next loop
+iteration rebuilds context in the new scope. `leave_domain` clears the domain,
+project, and workspace.
+
+Suggestions are deduplicated before they are recorded: an existing domain, a
+pending suggestion with the same normalized or overlapping name, or a declined
+suggestion still in cooldown returns duplicate/cooldown data instead of creating
+a second pending row. A bare confirmation is only interpreted as a suggestion
+answer when exactly one suggestion is pending and no task is awaiting the user.
+Conversations-only and full resets clear the active domain; a memory reset keeps
+it.
+
 ## Memory
 
-Memory types are `fact`, `preference`, `decision`, `procedure`, and `lesson`.
+Memory records have a `type` (`fact`, `preference`, `decision`, `procedure`,
+`lesson`) and an orthogonal `kind`: `semantic`, `episodic`, `procedural`, or
+`prospective`. For semantic-kind records, `type` is the semantic subtype. The
+harness derives the kind from the assigned type (`procedure`/`lesson` ->
+`procedural`; `fact`/`preference`/`decision` -> `semantic`) unless a valid
+`kind_hint` is supplied. `procedure` and `lesson` remain valid types for legacy
+rows, and records written before `kind` existed derive it on load, so old data
+needs no migration.
 Scopes are `global`, `self`, `domain:<id>`, and `project:<id>`. `remember` only
 requires `content`. The harness derives `type` with a configurable keyword
 classifier and `scope` from the task's project/domain (or `global`). The model's
@@ -776,14 +830,19 @@ user fact cannot be hidden from normal retrieval.
 
 Records keep harness-filled provenance and a three-state lifecycle: `active`,
 `superseded`, `retracted`. A newer explicit statement that conflicts with an
-older one supersedes it and the response names the replaced memory. Corrections
-supersede rather than delete. Usage is logged with task and trace ids.
+older one of the same kind supersedes it and the response names the replaced
+memory. Corrections supersede rather than delete. Duplicate detection, conflict
+supersession, explicit supersedes, and consolidation merges all require the same
+kind, so a procedural lesson cannot silently replace a semantic fact. Usage is
+logged with task and trace ids.
 
 Consolidation runs off the hot path (UI button or optional schedule). It first
 extracts inferred memories from recent conversation with verified source refs,
-then re-types, merges duplicates/near-duplicates, and resolves conflicts by
-recency. A run stores an input snapshot and a report of what was added, merged,
-and superseded; it can be rolled back as a whole (and inferred rows individually).
+then re-types only semantic-kind records, merges duplicates/near-duplicates, and
+resolves conflicts by recency. Procedural, episodic, and prospective records
+keep their type and kind. A run stores an input snapshot and a report of what was
+added, merged, and superseded; it can be rolled back as a whole (and inferred
+rows individually).
 
 ## Capabilities
 
@@ -792,7 +851,8 @@ Built-in manifests:
 - `mock`: pure-Python read operations (`ping`, `echo`, `status`, `add`), a
   structured `fail`, and write/destructive demos that are denied by default
 - `harness_memory`: `remember`, `correct`, `retract`
-- `harness_structure`: `suggest_domain` only
+- `harness_structure`: `enter_domain`, `leave_domain`, `suggest_domain`, and
+  `suggest_project` (the project's domain defaults to the active domain)
 
 Enablement is per domain; tasks without a domain use
 `capabilities.default_enabled`. Permission policy is separate:

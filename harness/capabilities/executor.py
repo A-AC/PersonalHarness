@@ -28,7 +28,7 @@ class FileCapabilityExecutor:
         events: EventLog,
         domains: DomainRegistry,
         memory: MemoryManager | None = None,
-        structure_hook: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+        structure_hook: Callable[[str, dict[str, Any], ExecuteRequest], dict[str, Any]] | None = None,
     ):
         self._dir = directory
         self._attempts_dir = directory / "attempts"
@@ -54,7 +54,9 @@ class FileCapabilityExecutor:
     def attach_memory(self, memory: MemoryManager) -> None:
         self._memory = memory
 
-    def attach_structure(self, hook: Callable[[str, dict[str, Any]], dict[str, Any]]) -> None:
+    def attach_structure(
+        self, hook: Callable[[str, dict[str, Any], ExecuteRequest], dict[str, Any]]
+    ) -> None:
         self._structure_hook = hook
 
     def list_manifests(self) -> list[Manifest]:
@@ -318,7 +320,7 @@ class FileCapabilityExecutor:
         if req.capability == "harness_structure":
             if self._structure_hook is None:
                 return {"status": ExecutionStatus.UNAVAILABLE, "data": {}, "message": "structure hook missing"}
-            return self._structure_hook(req.operation, req.arguments)
+            return self._structure_hook(req.operation, req.arguments, req)
         if req.capability in self._mcp_specs:
             return call_mcp_tool(
                 self._mcp_specs[req.capability],
@@ -354,6 +356,7 @@ class FileCapabilityExecutor:
             record = result.record
             data: dict[str, Any] = {
                 "memory_id": record.id,
+                "kind": record.kind,
                 "type": record.type,
                 "scope": record.scope,
             }
@@ -377,6 +380,7 @@ class FileCapabilityExecutor:
                     content=str(args["content"]),
                     origin="explicit",
                     type_hint=old.type,
+                    kind_hint=old.kind,
                     scope_hint=old.scope,
                     default_scope=old.scope,
                     provenance=provenance,

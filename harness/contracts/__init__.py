@@ -9,7 +9,16 @@ from harness.contracts.events import Event, EventLog
 from harness.contracts.history import HistoryNote, HistorySegment, HistoryService, HistoryView
 from harness.contracts.loop import InteractionLoop, TurnEvent, TurnListener, TurnResult
 from harness.contracts.maintenance import RemovedState, ResetReport, ResetService
-from harness.contracts.memory import MemoryCandidate, MemoryManager, MemoryRecord, RankedMemory, SubmitResult, UsageEntry
+from harness.contracts.memory import (
+    ExecutionOutcomeRecorder,
+    MemoryCandidate,
+    MemoryManager,
+    MemoryRecord,
+    OutcomeCapture,
+    RankedMemory,
+    SubmitResult,
+    UsageEntry,
+)
 from harness.contracts.model import Message, ModelAdapter, ModelResult
 from harness.contracts.profile import Persona, PersonaDraft, PersonaProposal, PersonaVersion, SelfProfile
 from harness.contracts.session import Interaction, Session, SessionManager
@@ -43,6 +52,7 @@ __all__ = [
     "Event",
     "EventLog",
     "ExecuteRequest",
+    "ExecutionOutcomeRecorder",
     "ExecutionResult",
     "HistoryNote",
     "HistorySegment",
@@ -61,6 +71,7 @@ __all__ = [
     "ModelAdapter",
     "ModelResult",
     "OperationSpec",
+    "OutcomeCapture",
     "Persona",
     "PersonaDraft",
     "PersonaProposal",

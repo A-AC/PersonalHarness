@@ -8,11 +8,13 @@ from harness.capabilities.executor import FileCapabilityExecutor
 from harness.consolidation.service import FileConsolidationService
 from harness.constants import SELF_DOMAIN_ID
 from harness.context.builder import DefaultContextBuilder
+from harness.contracts.capabilities import ExecuteRequest
 from harness.contracts.domains import StructureDraft
 from harness.domains.registry import FileDomainRegistry
 from harness.events.log import FileEventLog
 from harness.history.service import FileHistoryService
 from harness.maintenance.reset import FileResetService
+from harness.memory.capture import ExecutionOutcomeCapture
 from harness.memory.classifier import KeywordMemoryClassifier
 from harness.memory.file_manager import FileMemoryManager
 from harness.memory.inmemory import InMemoryMemoryManager
@@ -25,6 +27,7 @@ from harness.session.turns import DefaultTurnService
 from harness.settings.service import FileSettingsService
 from harness.sources import CompositeSourceResolver
 from harness.tasks.manager import FileTaskManager
+from harness.text import match_by_name, name_overlap, normalize_name
 from harness.traces.store import FileTraceStore
 
 
@@ -71,13 +74,144 @@ def build_harness(
     profile = FileSelfProfile(root / "persona", settings, events)
     capabilities = FileCapabilityExecutor(root / "capabilities", settings, events, domains)
 
-    def structure_hook(operation: str, arguments: dict) -> dict:
+    def same_name(left: str, right: str) -> bool:
+        if normalize_name(left) == normalize_name(right):
+            return True
+        threshold = float(settings.get("domain.match_overlap"))
+        return name_overlap(left, right) >= threshold
+
+    def pending_suggestion(kind: str, name: str):
+        for item in domains.list_suggestions():
+            if (
+                item.status == "pending"
+                and item.draft.kind == kind
+                and same_name(item.draft.name, name)
+            ):
+                return item
+        return None
+
+    def available_domains() -> list[str]:
+        return [item.name for item in domains.list_domains()]
+
+    def resolve_domain_failure(name: str, candidates: list[str]) -> dict:
+        if candidates:
+            return {
+                "status": "failed",
+                "data": {"candidates": candidates},
+                "message": f"ambiguous domain '{name}'; candidates: {', '.join(candidates)}",
+                "error_category": "ambiguous",
+            }
+        available = available_domains()
+        return {
+            "status": "failed",
+            "data": {"available": available},
+            "message": f"no existing domain named '{name}'; available: {', '.join(available)}",
+            "error_category": "not_found",
+        }
+
+    def structure_hook(operation: str, arguments: dict, req: ExecuteRequest) -> dict:
+        if operation == "enter_domain":
+            name = str(arguments.get("name") or "").strip()
+            domain, candidates = match_by_name(domains.list_domains(), name)
+            if domain is None:
+                return resolve_domain_failure(name, candidates)
+            sessions.set_active_domain(domain.id)
+            if req.task_id:
+                try:
+                    tasks.assign_structure(
+                        req.task_id, domain_id=domain.id, project_id=None, workspace_id=None
+                    )
+                except KeyError:
+                    # The task may already be gone; the session switch still
+                    # applies to the next turn.
+                    pass
+            return {
+                "status": "succeeded",
+                "data": {"domain_id": domain.id, "name": domain.name},
+                "message": f"entered domain '{domain.name}'",
+            }
+        if operation == "leave_domain":
+            sessions.set_active_domain(None)
+            if req.task_id:
+                try:
+                    tasks.assign_structure(
+                        req.task_id, domain_id=None, project_id=None, workspace_id=None
+                    )
+                except KeyError:
+                    pass
+            return {"status": "succeeded", "data": {}, "message": "left the active domain"}
         if operation == "suggest_domain":
+            name = str(arguments.get("name") or "").strip()
+            existing, _ = match_by_name(domains.list_domains(), name)
+            if existing is not None:
+                return {
+                    "status": "failed",
+                    "data": {"existing_domain": {"id": existing.id, "name": existing.name}},
+                    "message": f"domain '{existing.name}' already exists",
+                    "error_category": "duplicate",
+                }
+            if domains.suggestion_on_cooldown(name):
+                return {
+                    "status": "failed",
+                    "data": {"cooldown": True},
+                    "message": f"domain '{name}' is on suggestion cooldown",
+                    "error_category": "cooldown",
+                }
+            pending = pending_suggestion("domain", name)
+            if pending is not None:
+                return {
+                    "status": "failed",
+                    "data": {"duplicate": True, "suggestion_id": pending.id},
+                    "message": f"a pending suggestion for '{pending.draft.name}' already exists",
+                    "error_category": "duplicate",
+                }
             draft = StructureDraft(
                 kind="domain",
-                name=str(arguments["name"]),
+                name=name,
                 reason=str(arguments.get("reason") or "assistant suggestion"),
                 evidence="model proposal",
+            )
+            suggestion = domains.record_suggestion(draft)
+            return {"status": "succeeded", "data": {"suggestion_id": suggestion.id}, "message": "suggestion recorded"}
+        if operation == "suggest_project":
+            name = str(arguments.get("name") or "").strip()
+            domain_name = str(arguments.get("domain") or "").strip()
+            if domain_name:
+                domain, candidates = match_by_name(domains.list_domains(), domain_name)
+                if domain is None:
+                    return resolve_domain_failure(domain_name, candidates)
+                domain_id = domain.id
+            else:
+                domain_id = sessions.active_domain() or SELF_DOMAIN_ID
+            existing, _ = match_by_name(domains.list_projects(), name)
+            if existing is not None:
+                return {
+                    "status": "failed",
+                    "data": {"existing_project": {"id": existing.id, "name": existing.name}},
+                    "message": f"project '{existing.name}' already exists",
+                    "error_category": "duplicate",
+                }
+            if domains.suggestion_on_cooldown(name):
+                return {
+                    "status": "failed",
+                    "data": {"cooldown": True},
+                    "message": f"project '{name}' is on suggestion cooldown",
+                    "error_category": "cooldown",
+                }
+            pending = pending_suggestion("project", name)
+            if pending is not None:
+                return {
+                    "status": "failed",
+                    "data": {"duplicate": True, "suggestion_id": pending.id},
+                    "message": f"a pending suggestion for '{pending.draft.name}' already exists",
+                    "error_category": "duplicate",
+                }
+            draft = StructureDraft(
+                kind="project",
+                name=name,
+                reason=str(arguments.get("reason") or "assistant suggestion"),
+                evidence="model proposal",
+                domain_id=domain_id,
             )
             suggestion = domains.record_suggestion(draft)
             return {"status": "succeeded", "data": {"suggestion_id": suggestion.id}, "message": "suggestion recorded"}
@@ -128,6 +262,7 @@ def build_harness(
             model = OpenAICompatAdapter(settings)
     history = FileHistoryService(root / "history", settings, sessions, model, events)
     context = DefaultContextBuilder(settings, memory, profile, domains, capabilities, sessions, history)
+    outcomes = ExecutionOutcomeCapture(settings=settings, events=events, memory=memory)
     loop = DefaultInteractionLoop(
         settings=settings,
         model=model,
@@ -139,6 +274,7 @@ def build_harness(
         traces=traces,
         events=events,
         history=history,
+        outcomes=outcomes,
     )
     consolidation = FileConsolidationService(
         root / "consolidation",

@@ -35,6 +35,7 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
         "base_instructions",
         "persona",
         "preferences",
+        "structure",
         "domain",
         "task",
         "history",
@@ -61,6 +62,66 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
     assert "scope:string (one of global|self|domain:<id>|project:<id>) [optional]" in prompt
     assert "content:string" in prompt
     assert "Current time:" in prompt
+
+
+def test_structure_section_lists_active_domain_projects_and_suggestions(make_harness) -> None:
+    from harness.contracts.domains import StructureDraft
+
+    h = make_harness([])
+    domain = h.domains.create_domain(StructureDraft("domain", "Home Lab", "test", "test"), confirmed=True)
+    project = h.domains.create_project(
+        StructureDraft("project", "NAS", "test", "test", domain_id=domain.id), confirmed=True
+    )
+    suggestion = h.domains.record_suggestion(StructureDraft("domain", "Future Lab", "test", "test"))
+    h.sessions.set_active_domain(domain.id)
+    task = h.tasks.create(TaskSpec(goal="hello"))
+
+    package = h.context.build(task, h.sessions.current(), trace_id="trc_structure")
+    prompt = package.messages[0].content
+    names = [item.name for item in package.sections]
+    assert names.index("preferences") < names.index("structure") < names.index("domain")
+    assert "## structure" in prompt
+    assert f"Active domain: Home Lab ({domain.id})" in prompt
+    assert f"- {domain.id} | Home Lab | projects: 1" in prompt
+    assert f"- {project.id} | NAS | domain: Home Lab" in prompt
+    assert f"- {suggestion.id} | domain | Future Lab" in prompt
+    # Non-archived domains include the reserved self domain.
+    assert "- self | self | projects: 0" in prompt
+
+
+def test_structure_budget_drops_whole_entries_not_partial_lines(make_harness) -> None:
+    from harness.contracts.domains import StructureDraft
+
+    h = make_harness([], settings={"context": {"budgets": {"structure": 20}}})
+    domain = h.domains.create_domain(StructureDraft("domain", "Home Lab", "test", "test"), confirmed=True)
+    project = h.domains.create_project(
+        StructureDraft("project", "NAS", "test", "test", domain_id=domain.id), confirmed=True
+    )
+    suggestion = h.domains.record_suggestion(StructureDraft("domain", "Future Lab", "test", "test"))
+    h.sessions.set_active_domain(domain.id)
+    task = h.tasks.create(TaskSpec(goal="hello"))
+
+    package = h.context.build(task, h.sessions.current(), trace_id="trc_structure_budget")
+    section = next(item for item in package.sections if item.name == "structure")
+    assert section.tokens <= 20
+    assert f"Active domain: Home Lab ({domain.id})" in section.text
+    # Whole groups are dropped, never character-truncated mid-line.
+    assert "Domains:" not in section.text
+    assert "Projects:" not in section.text
+    assert project.id not in section.text
+    assert suggestion.id not in section.text
+    assert any(item.item == "structure:overflow" for item in package.excluded)
+
+
+def test_memory_tag_includes_kind(make_harness) -> None:
+    h = make_harness([])
+    semantic = remember(h, "The NAS is at 192.168.1.10")
+    procedural = remember(h, "Always restart the service after an update", type="lesson")
+    assert semantic is not None and procedural is not None
+    task = h.tasks.create(TaskSpec(goal="NAS restart service"))
+    prompt = h.context.build(task, h.sessions.current(), trace_id="trc_kind").messages[0].content
+    assert f'<memory id="{semantic.id}" kind="semantic"' in prompt
+    assert f'<memory id="{procedural.id}" kind="procedural"' in prompt
 
 
 def test_old_memory_carries_age_marker(make_harness) -> None:
