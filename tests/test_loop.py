@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from harness.app import build_harness
@@ -376,6 +377,22 @@ def test_restart_marks_running_tasks_interrupted(tmp_path: Path) -> None:
     resumed = restarted.tasks.get(task.id)
     assert resumed.state == TaskState.BLOCKED
     assert resumed.block_reason == BlockReason.INTERRUPTED
+
+
+def test_legacy_task_json_with_removed_structure_keys_loads(make_harness, tmp_path) -> None:
+    h = make_harness([])
+    task = h.tasks.create(TaskSpec(goal="legacy"))
+    path = tmp_path / "tasks" / f"{task.id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    # Rows written before the one-level collapse still carry these keys.
+    data["project_id"] = "prj_legacy"
+    data["workspace_id"] = "wks_legacy"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = h.tasks.get(task.id)
+    assert loaded.id == task.id
+    assert loaded.goal == "legacy"
+    assert loaded.domain_id is None
 
 
 def test_session_history_survives_restart(tmp_path: Path) -> None:

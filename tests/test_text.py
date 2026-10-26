@@ -17,7 +17,7 @@ from harness.text import claims_success, matches_keywords, states_unknown_outcom
         "Saved it.",
         "The task is complete.",
         "I've written the note.",
-        "I created the project.",
+        "I created the domain.",
         "I updated the record.",
         "I checked the NAS.",
         "I confirmed the booking.",

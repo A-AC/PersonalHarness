@@ -59,20 +59,21 @@ def test_context_contains_ordered_sections_and_capability_disclosure(make_harnes
     assert "prose-only suggestion is not recorded" in prompt
     # Enum values come from the real enums, and optional hints are marked.
     assert "type:string (one of fact|preference|decision|procedure|lesson) [optional]" in prompt
-    assert "scope:string (one of global|self|domain:<id>|project:<id>) [optional]" in prompt
+    assert "scope:string (one of global|self|domain:<id>) [optional]" in prompt
     assert "content:string" in prompt
     assert "Current time:" in prompt
 
 
-def test_structure_section_lists_active_domain_projects_and_suggestions(make_harness) -> None:
+def test_structure_section_lists_active_domain_and_suggestions(make_harness) -> None:
     from harness.contracts.domains import StructureDraft
 
     h = make_harness([])
-    domain = h.domains.create_domain(StructureDraft("domain", "Home Lab", "test", "test"), confirmed=True)
-    project = h.domains.create_project(
-        StructureDraft("project", "NAS", "test", "test", domain_id=domain.id), confirmed=True
+    domain = h.domains.create_domain(
+        StructureDraft(name="Home Lab", reason="test", evidence="test"), confirmed=True
     )
-    suggestion = h.domains.record_suggestion(StructureDraft("domain", "Future Lab", "test", "test"))
+    suggestion = h.domains.record_suggestion(
+        StructureDraft(name="Future Lab", reason="test", evidence="test")
+    )
     h.sessions.set_active_domain(domain.id)
     task = h.tasks.create(TaskSpec(goal="hello"))
 
@@ -82,22 +83,23 @@ def test_structure_section_lists_active_domain_projects_and_suggestions(make_har
     assert names.index("preferences") < names.index("structure") < names.index("domain")
     assert "## structure" in prompt
     assert f"Active domain: Home Lab ({domain.id})" in prompt
-    assert f"- {domain.id} | Home Lab | projects: 1" in prompt
-    assert f"- {project.id} | NAS | domain: Home Lab" in prompt
-    assert f"- {suggestion.id} | domain | Future Lab" in prompt
+    assert f"- {domain.id} | Home Lab" in prompt
+    assert f"- {suggestion.id} | Future Lab" in prompt
     # Non-archived domains include the reserved self domain.
-    assert "- self | self | projects: 0" in prompt
+    assert "- self | self" in prompt
+    assert "Projects:" not in prompt
 
 
 def test_structure_budget_drops_whole_entries_not_partial_lines(make_harness) -> None:
     from harness.contracts.domains import StructureDraft
 
     h = make_harness([], settings={"context": {"budgets": {"structure": 20}}})
-    domain = h.domains.create_domain(StructureDraft("domain", "Home Lab", "test", "test"), confirmed=True)
-    project = h.domains.create_project(
-        StructureDraft("project", "NAS", "test", "test", domain_id=domain.id), confirmed=True
+    domain = h.domains.create_domain(
+        StructureDraft(name="Home Lab", reason="test", evidence="test"), confirmed=True
     )
-    suggestion = h.domains.record_suggestion(StructureDraft("domain", "Future Lab", "test", "test"))
+    suggestion = h.domains.record_suggestion(
+        StructureDraft(name="Future Lab", reason="test", evidence="test")
+    )
     h.sessions.set_active_domain(domain.id)
     task = h.tasks.create(TaskSpec(goal="hello"))
 
@@ -107,8 +109,6 @@ def test_structure_budget_drops_whole_entries_not_partial_lines(make_harness) ->
     assert f"Active domain: Home Lab ({domain.id})" in section.text
     # Whole groups are dropped, never character-truncated mid-line.
     assert "Domains:" not in section.text
-    assert "Projects:" not in section.text
-    assert project.id not in section.text
     assert suggestion.id not in section.text
     assert any(item.item == "structure:overflow" for item in package.excluded)
 
@@ -194,25 +194,23 @@ def test_self_scope_loads_only_on_demand(make_harness) -> None:
     assert record.id in package.messages[0].content
 
 
-def test_project_and_workspace_refs_are_disclosed(make_harness) -> None:
+def test_domain_scope_loads_domain_memory(make_harness) -> None:
     from harness.contracts.domains import StructureDraft
 
     h = make_harness([])
-    domain = h.domains.create_domain(StructureDraft("domain", "homelab", "test", "test"), confirmed=True)
-    project = h.domains.create_project(
-        StructureDraft("project", "nas upgrade", "test", "test", domain_id=domain.id),
-        confirmed=True,
+    domain = h.domains.create_domain(
+        StructureDraft(name="homelab", reason="test", evidence="test"), confirmed=True
     )
-    workspace = h.domains.create_workspace(project.id, "rack notes")
-    task = h.tasks.create(TaskSpec(goal="plan the upgrade", project_id=project.id))
+    record = remember(h, "The rack is in the basement", scope=f"domain:{domain.id}")
+    task = h.tasks.create(TaskSpec(goal="plan the upgrade", domain_id=domain.id))
 
-    package = h.context.build(task, h.sessions.current(), trace_id="trc_project")
+    package = h.context.build(task, h.sessions.current(), trace_id="trc_domain")
     prompt = package.messages[0].content
     assert f"Domain: {domain.name}" in prompt
-    assert f"Project: {project.name}" in prompt
-    assert f"Workspace: {workspace.name}" in prompt
+    assert record.id in prompt
     included = {item.item for item in package.included}
-    assert {f"domain:{domain.id}", f"project:{project.id}", f"workspace:{workspace.id}"} <= included
+    assert f"domain:{domain.id}" in included
+    assert record.id in included
 
 
 def test_section_over_budget_is_shortened_and_recorded(make_harness) -> None:

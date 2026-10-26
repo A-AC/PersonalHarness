@@ -784,14 +784,14 @@ def create_app(harness: Harness) -> Starlette:
     async def tasks(_request: Request) -> HTMLResponse:
         rows = "".join(
             f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.state)}</td><td>{_esc(item.block_reason)}</td>"
-            f"<td>{_esc(item.domain_id)}</td><td>{_esc(item.project_id)}</td><td>{_esc(item.goal)}</td>"
+            f"<td>{_esc(item.domain_id)}</td><td>{_esc(item.goal)}</td>"
             f"<td>{_esc(item.depends_on)}</td><td>{_esc(item.outcome)}</td>"
             f"<td>{_esc(item.last_message)}</td></tr>"
             for item in harness.tasks.list()
         )
         return _page(
             "<h1>Tasks</h1><table><tr><th>id</th><th>state</th><th>reason</th><th>domain</th>"
-            "<th>project</th><th>goal</th><th>deps</th><th>outcome</th><th>last message</th></tr>"
+            "<th>goal</th><th>deps</th><th>outcome</th><th>last message</th></tr>"
             + rows
             + "</table>"
         )
@@ -806,15 +806,14 @@ def create_app(harness: Harness) -> Starlette:
             elif action == "decline":
                 harness.domains.decline_suggestion(ident)
             elif action == "rename":
-                harness.domains.rename(form.get("kind", "domain"), ident, form.get("name", ""))
+                harness.domains.rename(ident, form.get("name", ""))
             elif action == "archive":
-                harness.domains.archive(form.get("kind", "domain"), ident)
+                harness.domains.archive(ident)
             return RedirectResponse("/domains", status_code=303)
 
-        def actions(kind: str, ident: str, name: str) -> str:
+        def actions(ident: str, name: str) -> str:
             return (
-                f'<form method="post"><input type="hidden" name="kind" value="{_esc(kind)}">'
-                f'<input type="hidden" name="id" value="{_esc(ident)}">'
+                f'<form method="post"><input type="hidden" name="id" value="{_esc(ident)}">'
                 f'<input name="name" value="{_esc(name)}">'
                 f'<button name="action" value="rename">rename</button>'
                 f'<button name="action" value="archive">archive</button></form>'
@@ -823,13 +822,8 @@ def create_app(harness: Harness) -> Starlette:
         drows = "".join(
             f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.name)}</td><td>{_esc(item.created_by)}</td>"
             f"<td>{_esc(item.created_reason)}</td><td>{_esc(item.capability_names)}</td>"
-            f"<td>{_esc(item.memory_scope_id)}</td><td>{actions('domain', item.id, item.name)}</td></tr>"
+            f"<td>{actions(item.id, item.name)}</td></tr>"
             for item in harness.domains.list_domains(include_archived=True)
-        )
-        prows = "".join(
-            f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.name)}</td><td>{_esc(item.domain_id)}</td>"
-            f"<td>{_esc(item.created_reason)}</td><td>{actions('project', item.id, item.name)}</td></tr>"
-            for item in harness.domains.list_projects(include_archived=True)
         )
         srows = "".join(
             f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.status)}</td><td>{_esc(item.draft)}</td>"
@@ -840,11 +834,8 @@ def create_app(harness: Harness) -> Starlette:
         )
         return _page(
             "<h1>Domains</h1><table><tr><th>id</th><th>name</th><th>by</th><th>why</th><th>caps</th>"
-            "<th>memory scope</th><th>actions</th></tr>"
+            "<th>actions</th></tr>"
             + drows
-            + "</table><h2>Projects</h2><table><tr><th>id</th><th>name</th><th>domain</th>"
-            "<th>why</th><th>actions</th></tr>"
-            + prows
             + "</table><h2>Suggestions</h2><table><tr><th>id</th><th>status</th><th>draft</th><th></th></tr>"
             + srows
             + "</table>"

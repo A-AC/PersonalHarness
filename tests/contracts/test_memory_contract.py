@@ -68,7 +68,7 @@ def _make_manager(implementation: str, tmp_path: Path) -> MemoryManager:
             "op_1": "status=succeeded error_category=transient capability=mock operation=fail",
         }
     )
-    scopes = lambda scope: scope in {"global", "self", "domain:dom_1", "project:prj_1"}
+    scopes = lambda scope: scope in {"global", "self", "domain:dom_1", "domain:dom_2"}
     if implementation == "file":
         return FileMemoryManager(tmp_path / "memory", settings, events, sources, scopes)
     return InMemoryMemoryManager(settings, events, sources, scopes)
@@ -447,11 +447,11 @@ def test_scope_filtering(manager: MemoryManager) -> None:
     domain_rec = manager.submit(
         candidate(content="domain preference", scope_hint="domain:dom_1", ref="int_2")
     ).record
-    project_rec = manager.submit(
-        candidate(content="project preference", scope_hint="project:prj_1", ref="int_2")
+    second_domain_rec = manager.submit(
+        candidate(content="second domain preference", scope_hint="domain:dom_2", ref="int_2")
     ).record
-    assert global_rec and domain_rec and project_rec
+    assert global_rec and domain_rec and second_domain_rec
     ids = {item.record.id for item in manager.retrieve("preference", ["domain:dom_1"], 10)}
     assert ids == {domain_rec.id}
-    ids = {item.record.id for item in manager.retrieve("preference", ["project:prj_1"], 10)}
-    assert ids == {project_rec.id}
+    ids = {item.record.id for item in manager.retrieve("preference", ["domain:dom_2"], 10)}
+    assert ids == {second_domain_rec.id}

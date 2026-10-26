@@ -14,8 +14,8 @@ class OperationSpec:
     inputs: dict[str, str] = field(default_factory=dict)
     required: list[str] = field(default_factory=list)
     # Allowed values for enum-like arguments, generated from the real enums in
-    # constants. ``domain:<id>`` and ``project:<id>`` are patterns, not literal
-    # values, and are matched by prefix.
+    # constants. ``domain:<id>`` is a pattern, not a literal value, and is
+    # matched by prefix.
     enums: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # Defaults for optional arguments. The harness applies them before dispatch.
     defaults: dict[str, Any] = field(default_factory=dict)
@@ -47,7 +47,6 @@ class ExecuteRequest:
     permission_override: bool = False
     interaction_id: str | None = None
     idempotency_key: str | None = None
-    project_id: str | None = None
     # True when the task is about the assistant itself, so memory scope "self"
     # is the derived scope instead of an override.
     self_request: bool = False

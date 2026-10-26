@@ -6,7 +6,6 @@ from pathlib import Path
 
 from harness.capabilities.executor import FileCapabilityExecutor
 from harness.consolidation.service import FileConsolidationService
-from harness.constants import SELF_DOMAIN_ID
 from harness.context.builder import DefaultContextBuilder
 from harness.contracts.capabilities import ExecuteRequest
 from harness.contracts.domains import StructureDraft
@@ -80,11 +79,10 @@ def build_harness(
         threshold = float(settings.get("domain.match_overlap"))
         return name_overlap(left, right) >= threshold
 
-    def pending_suggestion(kind: str, name: str):
+    def pending_suggestion(name: str):
         for item in domains.list_suggestions():
             if (
                 item.status == "pending"
-                and item.draft.kind == kind
                 and same_name(item.draft.name, name)
             ):
                 return item
@@ -118,9 +116,7 @@ def build_harness(
             sessions.set_active_domain(domain.id)
             if req.task_id:
                 try:
-                    tasks.assign_structure(
-                        req.task_id, domain_id=domain.id, project_id=None, workspace_id=None
-                    )
+                    tasks.assign_domain(req.task_id, domain.id)
                 except KeyError:
                     # The task may already be gone; the session switch still
                     # applies to the next turn.
@@ -134,9 +130,7 @@ def build_harness(
             sessions.set_active_domain(None)
             if req.task_id:
                 try:
-                    tasks.assign_structure(
-                        req.task_id, domain_id=None, project_id=None, workspace_id=None
-                    )
+                    tasks.assign_domain(req.task_id, None)
                 except KeyError:
                     pass
             return {"status": "succeeded", "data": {}, "message": "left the active domain"}
@@ -157,7 +151,7 @@ def build_harness(
                     "message": f"domain '{name}' is on suggestion cooldown",
                     "error_category": "cooldown",
                 }
-            pending = pending_suggestion("domain", name)
+            pending = pending_suggestion(name)
             if pending is not None:
                 return {
                     "status": "failed",
@@ -166,52 +160,9 @@ def build_harness(
                     "error_category": "duplicate",
                 }
             draft = StructureDraft(
-                kind="domain",
                 name=name,
                 reason=str(arguments.get("reason") or "assistant suggestion"),
                 evidence="model proposal",
-            )
-            suggestion = domains.record_suggestion(draft)
-            return {"status": "succeeded", "data": {"suggestion_id": suggestion.id}, "message": "suggestion recorded"}
-        if operation == "suggest_project":
-            name = str(arguments.get("name") or "").strip()
-            domain_name = str(arguments.get("domain") or "").strip()
-            if domain_name:
-                domain, candidates = match_by_name(domains.list_domains(), domain_name)
-                if domain is None:
-                    return resolve_domain_failure(domain_name, candidates)
-                domain_id = domain.id
-            else:
-                domain_id = sessions.active_domain() or SELF_DOMAIN_ID
-            existing, _ = match_by_name(domains.list_projects(), name)
-            if existing is not None:
-                return {
-                    "status": "failed",
-                    "data": {"existing_project": {"id": existing.id, "name": existing.name}},
-                    "message": f"project '{existing.name}' already exists",
-                    "error_category": "duplicate",
-                }
-            if domains.suggestion_on_cooldown(name):
-                return {
-                    "status": "failed",
-                    "data": {"cooldown": True},
-                    "message": f"project '{name}' is on suggestion cooldown",
-                    "error_category": "cooldown",
-                }
-            pending = pending_suggestion("project", name)
-            if pending is not None:
-                return {
-                    "status": "failed",
-                    "data": {"duplicate": True, "suggestion_id": pending.id},
-                    "message": f"a pending suggestion for '{pending.draft.name}' already exists",
-                    "error_category": "duplicate",
-                }
-            draft = StructureDraft(
-                kind="project",
-                name=name,
-                reason=str(arguments.get("reason") or "assistant suggestion"),
-                evidence="model proposal",
-                domain_id=domain_id,
             )
             suggestion = domains.record_suggestion(draft)
             return {"status": "succeeded", "data": {"suggestion_id": suggestion.id}, "message": "suggestion recorded"}
@@ -231,12 +182,6 @@ def build_harness(
         if scope.startswith("domain:"):
             try:
                 domains.get_domain(scope.split(":", 1)[1])
-                return True
-            except KeyError:
-                return False
-        if scope.startswith("project:"):
-            try:
-                domains.get_project(scope.split(":", 1)[1])
                 return True
             except KeyError:
                 return False

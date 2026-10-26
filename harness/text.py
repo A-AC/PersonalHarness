@@ -80,7 +80,7 @@ def word_tokens(text: str) -> set[str]:
 
 
 def normalize_name(value: str) -> str:
-    """Normalize a domain/project name for matching.
+    """Normalize a domain name for matching.
 
     Lowercases and keeps alphanumeric tokens only, so punctuation and repeated
     whitespace do not make two names look different.

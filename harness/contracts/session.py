@@ -12,7 +12,7 @@ class Session:
     created_at: str
     updated_at: str
     subject_hits: dict[str, int]
-    # The workspace the user is currently working in. ``None`` means no active
+    # The domain the user is currently working in. ``None`` means no active
     # domain, so tasks use the global/default scope.
     active_domain_id: str | None = None
 

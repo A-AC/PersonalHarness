@@ -442,8 +442,8 @@ def _real_history() -> list[tuple[str, str]]:
             "We haven't recorded a decision about the garage lights yet. If you tell me the choice, I can remember it.",
         ),
         (
-            "Explain the difference between a project and a domain in one sentence each.",
-            "A domain is an ongoing area of interest; a project is a bounded piece of work inside it.",
+            "Explain what a domain means in this assistant.",
+            "A domain is an ongoing area of interest that also scopes memory.",
         ),
         (
             "Draft a short packing list for a weekend trip.",
@@ -940,7 +940,7 @@ def scenario() -> list[EvalScenario]:
                 ("I met the building manager yesterday.", "Noted.", iso_ago(77)),
                 ("The printer needs a new toner cartridge.", "Understood.", iso_ago(76)),
                 ("My desk phone extension is 4412.", "Noted.", iso_ago(75)),
-                ("The meeting room has a projector.", "Okay.", iso_ago(74.5)),
+                ("The meeting room has a display.", "Okay.", iso_ago(74.5)),
                 ("I usually arrive around nine.", "Noted.", iso_ago(74)),
             ],
         ),

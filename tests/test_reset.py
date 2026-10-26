@@ -49,7 +49,7 @@ def test_full_reset_wipes_reseeds_and_next_conversation_works(make_harness) -> N
     assert h.tasks.list()
     assert h.sessions.list_interactions(limit=None)
     domain = h.domains.create_domain(
-        StructureDraft("domain", "homelab", "test", "test"), confirmed=True
+        StructureDraft(name="homelab", reason="test", evidence="test"), confirmed=True
     )
     h.sessions.set_active_domain(domain.id)
     assert h.sessions.active_domain() == domain.id
@@ -140,7 +140,7 @@ def test_conversations_only_reset_keeps_memories_and_drops_dangling_refs(make_ha
     old_session = h.sessions.current().id
     h.chat.submit("hello")
     domain = h.domains.create_domain(
-        StructureDraft("domain", "homelab", "test", "test"), confirmed=True
+        StructureDraft(name="homelab", reason="test", evidence="test"), confirmed=True
     )
     h.sessions.set_active_domain(domain.id)
 
@@ -219,7 +219,7 @@ def test_session_active_domain_persists_and_old_files_resume(tmp_path: Path) -> 
     write_settings(tmp_path, TEST_BASELINE)
     h = build_harness(tmp_path, model=ScriptedAdapter([]))
     domain = h.domains.create_domain(
-        StructureDraft("domain", "homelab", "test", "test"), confirmed=True
+        StructureDraft(name="homelab", reason="test", evidence="test"), confirmed=True
     )
     h.sessions.set_active_domain(domain.id)
 
