@@ -98,6 +98,7 @@ def catalog() -> list[SettingDef]:
         d("domain.suggestion.threshold", "int", 3, "Hits before suggesting a domain.", minimum=1, maximum=50, group="domain"),
         d("domain.suggestion.subject_words", "int", 3, "Leading words used as a subject key.", minimum=1, maximum=10, group="domain"),
         d("domain.suggestion.cooldown_s", "int", 86400, "Cooldown after a declined suggestion.", minimum=0, maximum=2592000, group="domain"),
+        d("domain.match_overlap", "float", 0.8, "Name overlap at which a domain/project suggestion is treated as a duplicate of an existing name or a declined one.", minimum=0.0, maximum=1.0, group="domain"),
         d("loop.max_iterations", "int", 5, "Decision-loop iteration limit.", minimum=1, maximum=20, group="loop"),
         d("loop.time_limit_s", "float", 120.0, "Per-task wall time limit.", minimum=1.0, maximum=1800.0, group="loop"),
         d("loop.identical_retry_limit", "int", 1, "Allowed identical retries of a failed call when retryable.", minimum=0, maximum=5, group="loop"),

@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("jinja2")
 
+from harness.contracts.domains import StructureDraft  # noqa: E402
 from harness.contracts.memory import MemoryCandidate  # noqa: E402
 from harness.ui.web import create_app  # noqa: E402
 from tests.conftest import act, plan, respond  # noqa: E402
@@ -170,6 +171,30 @@ def test_chat_page_is_a_scrollable_panel_with_the_composer_inside(make_harness) 
     assert "#live-stages{max-height:12em;overflow:auto}" in page
     assert "#live-tokens{max-height:12em;overflow:auto" in page
     assert page.count("scrollLog();") >= 2
+
+
+def test_chat_shows_active_domain_and_selector_outside_the_stream(make_harness) -> None:
+    h = make_harness([])
+    domain = h.domains.create_domain(
+        StructureDraft("domain", "Home Lab", "test", "test"), confirmed=True
+    )
+    h.sessions.set_active_domain(domain.id)
+
+    page = _request(h, "GET", "/chat")
+    assert page.status_code == 200
+    assert "Active domain: Home Lab" in page.text
+    assert "action='/chat/domain'" in page.text
+    assert f"value='{domain.id}' selected" in page.text
+    assert "EventSource" in page.text  # selector is outside the SSE path
+
+    cleared = _request(h, "POST", "/chat/domain", "domain_id=")
+    assert cleared.status_code == 303
+    assert h.sessions.active_domain() is None
+    assert "Active domain: none" in _request(h, "GET", "/chat").text
+
+    selected = _request(h, "POST", "/chat/domain", f"domain_id={domain.id}")
+    assert selected.status_code == 303
+    assert h.sessions.active_domain() == domain.id
 
 
 def test_non_chat_pages_keep_the_normal_document_flow(make_harness) -> None:

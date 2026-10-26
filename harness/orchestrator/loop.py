@@ -35,6 +35,8 @@ from harness.text import (
     estimate_tokens,
     match_by_name,
     matches_keywords,
+    name_overlap,
+    normalize_name,
     states_unknown_outcome,
     strip_reasoning,
 )
@@ -225,13 +227,39 @@ class DefaultInteractionLoop:
         affirmative = lowered in {"yes", "yeah", "yep", "sure", "ok", "okay", "do it", "confirm", "go ahead"}
         negative = lowered in {"no", "nope", "not now", "don't", "do not", "cancel", "not yet"}
         pending = [item for item in self._domains.list_suggestions() if item.status == "pending"]
-        if pending and (affirmative or negative):
-            suggestion = sorted(pending, key=lambda item: item.ts)[-1]
+        waiting = [
+            task
+            for task in self._tasks.list(states=[TaskState.BLOCKED])
+            if task.block_reason == BlockReason.AWAITING_USER
+        ]
+        # A bare "yes"/"no" is a suggestion answer only when it cannot be a
+        # reply to a pending question and there is exactly one suggestion.
+        if len(pending) == 1 and not waiting and (affirmative or negative):
+            suggestion = pending[0]
             if affirmative:
                 created = self._domains.confirm_suggestion(suggestion.id)
                 return [f"Created {suggestion.draft.kind} '{created.name}' ({created.id})."]
             self._domains.decline_suggestion(suggestion.id)
             return ["Okay, I won't create that. I'll wait before suggesting it again."]
+
+        switched = re.match(
+            r"(?:please\s+)?(?:work\s+on|switch\s+to|open)\s+(?:the\s+)?(.+?)\s*[.!?]*$",
+            text,
+            re.IGNORECASE,
+        )
+        if switched:
+            name = switched.group(1).strip().strip("\"'")
+            domain, candidates = match_by_name(self._domains.list_domains(), name)
+            if domain is not None:
+                self._sessions.set_active_domain(domain.id)
+                return [f"Active domain: '{domain.name}' ({domain.id})."]
+            if candidates:
+                return [
+                    f"I found more than one domain for '{name}': "
+                    f"{', '.join(candidates)}. Please use the exact name."
+                ]
+            names = ", ".join(item.name for item in self._domains.list_domains()) or "none"
+            return [f"I don't know a domain named '{name}'. Available domains: {names}."]
 
         for kind, pattern in (
             ("domain", r"(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?domain(?:\s+(?:where|about|for|to talk about))?\s*[:\-]?\s*(.*)"),
@@ -505,9 +533,19 @@ class DefaultInteractionLoop:
             return None
         if self._domains.suggestion_on_cooldown(key):
             return None
-        if self._domains.find_domain_by_name(key):
+        existing, _ = match_by_name(self._domains.list_domains(), key)
+        if existing is not None:
             return None
-        if any(item.draft.name == key and item.status == "pending" for item in self._domains.list_suggestions()):
+        threshold = float(self._settings.get("domain.match_overlap"))
+        if any(
+            item.status == "pending"
+            and item.draft.kind == "domain"
+            and (
+                normalize_name(item.draft.name) == normalize_name(key)
+                or name_overlap(item.draft.name, key) >= threshold
+            )
+            for item in self._domains.list_suggestions()
+        ):
             return None
         self._domains.record_suggestion(
             StructureDraft(kind="domain", name=key, reason="repeated subject hits", evidence=f"hits={hits}")
