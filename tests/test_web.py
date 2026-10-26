@@ -176,7 +176,7 @@ def test_chat_page_is_a_scrollable_panel_with_the_composer_inside(make_harness) 
 def test_chat_shows_active_domain_and_selector_outside_the_stream(make_harness) -> None:
     h = make_harness([])
     domain = h.domains.create_domain(
-        StructureDraft("domain", "Home Lab", "test", "test"), confirmed=True
+        StructureDraft(name="Home Lab", reason="test", evidence="test"), confirmed=True
     )
     h.sessions.set_active_domain(domain.id)
 

@@ -8,14 +8,14 @@ from harness.domains.registry import UnconfirmedError
 from tests.conftest import plan, respond
 
 
-def draft(name: str, kind: str = "domain", **kwargs) -> StructureDraft:
-    return StructureDraft(kind=kind, name=name, reason="test", evidence="test", **kwargs)
+def draft(name: str, **kwargs) -> StructureDraft:
+    return StructureDraft(name=name, reason="test", evidence="test", **kwargs)
 
 
 def test_self_domain_is_created_once(make_harness) -> None:
     h = make_harness([])
     self_domain = h.domains.get_domain(SELF_DOMAIN_ID)
-    assert self_domain.memory_scope_id == "self"
+    assert self_domain.name == "self"
     assert h.domains.ensure_self().id == SELF_DOMAIN_ID
     assert [item.id for item in h.domains.list_domains()] == [SELF_DOMAIN_ID]
 
@@ -24,21 +24,14 @@ def test_creation_requires_confirmation(make_harness) -> None:
     h = make_harness([])
     with pytest.raises(UnconfirmedError):
         h.domains.create_domain(draft("homelab"), confirmed=False)
-    with pytest.raises(UnconfirmedError):
-        h.domains.create_project(draft("nas", "project"), confirmed=False)
     assert len(h.domains.list_domains()) == 1
 
 
-def test_domain_and_project_creation_are_idempotent_by_name(make_harness) -> None:
+def test_domain_creation_is_idempotent_by_name(make_harness) -> None:
     h = make_harness([])
     first = h.domains.create_domain(draft("Homelab"), confirmed=True)
     second = h.domains.create_domain(draft("homelab"), confirmed=True)
     assert first.id == second.id
-
-    project = h.domains.create_project(draft("NAS", "project", domain_id=first.id), confirmed=True)
-    again = h.domains.create_project(draft("nas", "project", domain_id=first.id), confirmed=True)
-    assert project.id == again.id
-    assert h.domains.find_project_by_name("nas").domain_id == first.id
 
 
 def test_explicit_user_command_creates_structure_without_model(make_harness) -> None:
@@ -47,11 +40,6 @@ def test_explicit_user_command_creates_structure_without_model(make_harness) -> 
     assert "Created domain 'homelab automation'" in result.messages[0]
     domain = h.domains.find_domain_by_name("homelab automation")
     assert domain is not None and domain.created_by == "user"
-
-    project = h.loop.handle_turn("Create a new project called rack upgrade")
-    assert "Created project 'rack upgrade'" in project.messages[0]
-    created_project = h.domains.find_project_by_name("rack upgrade")
-    assert created_project is not None and created_project.domain_id == SELF_DOMAIN_ID
 
 
 def test_creation_without_a_name_asks(make_harness) -> None:
@@ -98,16 +86,14 @@ def test_repeated_subject_creates_one_suggestion(make_harness) -> None:
     assert len(h.domains.list_suggestions()) == 1
 
 
-def test_plan_reuses_existing_domain_and_project(make_harness) -> None:
+def test_plan_reuses_existing_domain(make_harness) -> None:
     h = make_harness([])
     domain = h.domains.create_domain(draft("homelab"), confirmed=True)
-    project = h.domains.create_project(draft("nas", "project", domain_id=domain.id), confirmed=True)
     plan_payload = {
         "tasks": [
             {
                 "goal": "check nas",
                 "domain_name": "homelab",
-                "project_name": "nas",
                 "depends_on": [],
             }
         ]
@@ -117,31 +103,20 @@ def test_plan_reuses_existing_domain_and_project(make_harness) -> None:
     result = h.loop.handle_turn("check the nas")
     task = result.tasks[-1]
     assert task.domain_id == domain.id
-    assert task.project_id == project.id
 
 
 def test_rename_and_archive_are_reflected_in_listings(make_harness) -> None:
     h = make_harness([])
     domain = h.domains.create_domain(draft("homelab"), confirmed=True)
-    project = h.domains.create_project(draft("nas", "project", domain_id=domain.id), confirmed=True)
-    workspace = h.domains.create_workspace(project.id, "rack")
 
-    h.domains.rename("domain", domain.id, "home lab")
-    h.domains.rename("project", project.id, "nas build")
-    h.domains.rename("workspace", workspace.id, "rack notes")
+    h.domains.rename(domain.id, "home lab")
     assert h.domains.get_domain(domain.id).name == "home lab"
-    assert h.domains.get_project(project.id).name == "nas build"
-    assert h.domains.get_workspace(workspace.id).name == "rack notes"
 
-    h.domains.archive("workspace", workspace.id)
-    h.domains.archive("project", project.id)
-    h.domains.archive("domain", domain.id)
+    h.domains.archive(domain.id)
     assert h.domains.list_domains() == [h.domains.get_domain(SELF_DOMAIN_ID)]
-    assert h.domains.list_projects() == []
-    assert h.domains.list_workspaces() == []
     assert len(h.domains.list_domains(include_archived=True)) == 2
     with pytest.raises(ValueError):
-        h.domains.archive("domain", SELF_DOMAIN_ID)
+        h.domains.archive(SELF_DOMAIN_ID)
 
 
 def test_planner_prompt_includes_the_structure_directory(make_harness) -> None:
@@ -160,7 +135,7 @@ def test_planner_prompt_includes_the_structure_directory(make_harness) -> None:
     system = planner.messages[0]["content"]
     assert "Structure directory:" in system
     assert f"Active domain: homelab ({domain.id})" in system
-    assert f"- {domain.id} | homelab | projects: 0" in system
+    assert f"- {domain.id} | homelab" in system
 
 
 def test_plan_resolves_normalized_names_and_reports_unresolved_misses(make_harness) -> None:

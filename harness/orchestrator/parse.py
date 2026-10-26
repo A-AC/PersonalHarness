@@ -126,7 +126,6 @@ TASK_PLAN_SCHEMA = {
                 "properties": {
                     "goal": {"type": "string"},
                     "domain_name": {"type": ["string", "null"]},
-                    "project_name": {"type": ["string", "null"]},
                     "depends_on": {"type": "array", "items": {"type": "integer"}},
                 },
                 "required": ["goal"],

@@ -187,33 +187,27 @@ def test_harness_memory_and_structure_executions_are_excluded(make_harness) -> N
     assert capture_events(h) == []
 
 
-def test_scope_follows_the_task_domain_and_project(make_harness) -> None:
+def test_scope_follows_the_task_domain(make_harness) -> None:
     h = make_harness(
         [
-            plan("domain failure"),
+            plan("global failure"),
             act("mock", "fail", category="hard_failure"),
             respond("The call failed."),
-            plan("project failure", project="nas"),
+            plan("domain failure", domain="homelab"),
             act("mock", "fail", category="hard_failure"),
             respond("The call failed."),
         ]
     )
     domain = h.domains.create_domain(
-        StructureDraft("domain", "homelab", "test", "test"), confirmed=True
+        StructureDraft(name="homelab", reason="test", evidence="test"), confirmed=True
     )
-    project = h.domains.create_project(
-        StructureDraft(
-            "project", "nas", "test", "test", domain_id=domain.id
-        ),
-        confirmed=True,
-    )
-    h.sessions.set_active_domain(domain.id)
 
     h.loop.handle_turn("Try it.")
+    h.sessions.set_active_domain(domain.id)
     h.loop.handle_turn("Try it again.")
 
     scopes = sorted(item.scope for item in procedural(h))
-    assert scopes == [f"domain:{domain.id}", f"project:{project.id}"]
+    assert scopes == [f"domain:{domain.id}", "global"]
 
 
 def test_a_second_resolution_reuses_the_lesson_and_retires_the_new_failure(make_harness) -> None:

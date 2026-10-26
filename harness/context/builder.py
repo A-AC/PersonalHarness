@@ -63,38 +63,15 @@ class DefaultContextBuilder:
         domain_text_parts: list[str] = []
         included: list[InclusionRecord] = []
         excluded: list[InclusionRecord] = []
-        project = None
         domain_id = task.domain_id
-        if task.project_id:
-            try:
-                project = self._domains.get_project(task.project_id)
-                if domain_id is None:
-                    domain_id = project.domain_id
-            except KeyError:
-                excluded.append(InclusionRecord(item=f"project:{task.project_id}", reason="missing project", section="domain"))
         if domain_id:
-            scopes.append(f"domain:{domain_id}" if domain_id != SELF_DOMAIN_ID else "self")
+            scopes.append("self" if domain_id == SELF_DOMAIN_ID else f"domain:{domain_id}")
             try:
                 domain = self._domains.get_domain(domain_id)
                 domain_text_parts.append(f"Domain: {domain.name} ({domain.id})")
                 included.append(InclusionRecord(item=f"domain:{domain.id}", reason="task domain", section="domain"))
             except KeyError:
                 excluded.append(InclusionRecord(item=f"domain:{domain_id}", reason="missing domain", section="domain"))
-        if project is not None:
-            scopes.append(f"project:{project.id}")
-            domain_text_parts.append(f"Project: {project.name} ({project.id})")
-            included.append(InclusionRecord(item=f"project:{project.id}", reason="task project", section="domain"))
-            if project.workspace_id:
-                try:
-                    workspace = self._domains.get_workspace(project.workspace_id)
-                    domain_text_parts.append(f"Workspace: {workspace.name} ({workspace.id})")
-                    included.append(
-                        InclusionRecord(item=f"workspace:{workspace.id}", reason="project workspace", section="domain")
-                    )
-                except KeyError:
-                    excluded.append(
-                        InclusionRecord(item=f"workspace:{project.workspace_id}", reason="missing workspace", section="domain")
-                    )
         if assistant_request and "self" not in scopes:
             scopes.append("self")
             included.append(InclusionRecord(item="self", reason="request is about the assistant", section="domain"))
@@ -182,8 +159,7 @@ class DefaultContextBuilder:
                     raise ValueError(f"{name} exceeds its token budget and must not be truncated")
                 if name == "structure":
                     # The directory is a list of entries. Drop whole entries so
-                    # a half-rendered domain or project line never reaches the
-                    # prompt.
+                    # a half-rendered domain line never reaches the prompt.
                     text, tokens, dropped = self._fit_structure(text, budget, chars_per_token)
                 else:
                     text, tokens, dropped = self._fit(name, text, budget)
@@ -227,7 +203,7 @@ class DefaultContextBuilder:
         )
 
     def structure_text(self, session: Session) -> str:
-        """Render the compact domain/project directory.
+        """Render the compact domain directory.
 
         The context section and the task planner both use this exact text so
         the model sees the same structure in both prompts.
@@ -236,7 +212,6 @@ class DefaultContextBuilder:
 
     def _structure_lines(self, session: Session) -> list[str]:
         domains = self._domains.list_domains()
-        projects = self._domains.list_projects()
         active_id = session.active_domain_id
         active_name: str | None = None
         if active_id:
@@ -247,31 +222,19 @@ class DefaultContextBuilder:
         lines = [
             f"Active domain: {active_name} ({active_id})" if active_id else "Active domain: none"
         ]
-        counts: dict[str, int] = {}
-        for project in projects:
-            counts[project.domain_id] = counts.get(project.domain_id, 0) + 1
-        domain_names = {domain.id: domain.name for domain in domains}
         lines.append("Domains:")
         for domain in domains:
-            lines.append(f"- {domain.id} | {domain.name} | projects: {counts.get(domain.id, 0)}")
-        lines.append("Projects:")
-        if not projects:
-            lines.append("- none")
-        for project in projects:
-            lines.append(
-                f"- {project.id} | {project.name} | domain: "
-                f"{domain_names.get(project.domain_id, project.domain_id)}"
-            )
+            lines.append(f"- {domain.id} | {domain.name}")
         pending = [item for item in self._domains.list_suggestions() if item.status == "pending"]
         lines.append("Pending suggestions:")
         if not pending:
             lines.append("- none")
         for item in pending:
-            lines.append(f"- {item.id} | {item.draft.kind} | {item.draft.name}")
+            lines.append(f"- {item.id} | {item.draft.name}")
         return lines
 
     def _fit_structure(self, text: str, budget: int, chars_per_token: int) -> tuple[str, int, str]:
-        """Drop whole directory blocks (active, domains, projects, suggestions)."""
+        """Drop whole directory blocks (active, domains, suggestions)."""
         lines = text.splitlines()
         if not lines:
             return "", 0, ""

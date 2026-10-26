@@ -11,13 +11,12 @@ from harness.app import Harness, build_harness
 from harness.model.scripted import ScriptedAdapter
 
 
-def plan(*goals: str, project: str | None = None) -> dict[str, Any]:
+def plan(*goals: str, domain: str | None = None) -> dict[str, Any]:
     return {
         "tasks": [
             {
                 "goal": goal,
-                "domain_name": None,
-                "project_name": project,
+                "domain_name": domain,
                 "depends_on": [],
             }
             for goal in goals

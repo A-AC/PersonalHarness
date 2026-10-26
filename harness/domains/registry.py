@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from harness.constants import SELF_DOMAIN_ID, SELF_DOMAIN_NAME
-from harness.contracts.domains import Domain, Project, StructureDraft, Suggestion, Workspace
+from harness.contracts.domains import Domain, StructureDraft, Suggestion
 from harness.contracts.events import Event, EventLog
 from harness.contracts.settings import SettingsService
 from harness.storage.atomic import atomic_write_json, new_id, now_ts, read_json
@@ -22,8 +22,6 @@ class FileDomainRegistry:
         self._settings = settings
         self._events = events
         (directory / "domains").mkdir(parents=True, exist_ok=True)
-        (directory / "projects").mkdir(parents=True, exist_ok=True)
-        (directory / "workspaces").mkdir(parents=True, exist_ok=True)
         (directory / "suggestions").mkdir(parents=True, exist_ok=True)
         self.ensure_self()
 
@@ -52,7 +50,6 @@ class FileDomainRegistry:
             created_reason="reserved assistant domain",
             evidence="spec 6.7",
             capability_names=self._default_capabilities(),
-            memory_scope_id="self",
         )
         self._save("domains", domain.id, asdict(domain))
         return domain
@@ -94,7 +91,6 @@ class FileDomainRegistry:
             created_reason=draft.reason,
             evidence=draft.evidence,
             capability_names=names,
-            memory_scope_id=f"domain:{ident}",
         )
         self._save("domains", domain.id, asdict(domain))
         self._events.append(
@@ -102,114 +98,36 @@ class FileDomainRegistry:
         )
         return domain
 
-    def get_project(self, project_id: str) -> Project:
-        path = self._dir / "projects" / f"{project_id}.json"
-        if not path.exists():
-            raise KeyError(project_id)
-        return Project(**read_json(path))
-
-    def find_project_by_name(self, name: str) -> Project | None:
-        wanted = name.strip().lower()
-        for project in self.list_projects(include_archived=True):
-            if project.name.lower() == wanted:
-                return project
-        return None
-
-    def list_projects(self, *, include_archived: bool = False) -> list[Project]:
-        items = [Project(**read_json(path)) for path in sorted((self._dir / "projects").glob("*.json"))]
-        if not include_archived:
-            items = [item for item in items if not item.archived]
-        return items
-
-    def create_project(self, draft: StructureDraft, *, confirmed: bool) -> Project:
-        if not confirmed:
-            raise UnconfirmedError("project creation requires confirmation")
-        existing = self.find_project_by_name(draft.name)
-        if existing and not existing.archived:
-            return existing
-        domain_id = draft.domain_id or SELF_DOMAIN_ID
-        self.get_domain(domain_id)
-        ts = now_ts()
-        project = Project(
-            id=new_id("prj"),
-            name=draft.name,
-            domain_id=domain_id,
-            status="active",
-            created_at=ts,
-            created_by="user",
-            created_reason=draft.reason,
-            evidence=draft.evidence,
-        )
-        self._save("projects", project.id, asdict(project))
-        self._events.append(
-            Event(id=new_id("evt"), ts=ts, actor="user", operation="project.create", target=project.id, result="ok")
-        )
-        return project
-
-    def get_workspace(self, workspace_id: str) -> Workspace:
-        path = self._dir / "workspaces" / f"{workspace_id}.json"
-        if not path.exists():
-            raise KeyError(workspace_id)
-        return Workspace(**read_json(path))
-
-    def list_workspaces(self, *, include_archived: bool = False) -> list[Workspace]:
-        items = [Workspace(**read_json(path)) for path in sorted((self._dir / "workspaces").glob("*.json"))]
-        if not include_archived:
-            items = [item for item in items if not item.archived]
-        return items
-
-    def create_workspace(self, project_id: str, name: str) -> Workspace:
-        self.get_project(project_id)
-        workspace = Workspace(id=new_id("wks"), name=name, project_id=project_id, created_at=now_ts())
-        self._save("workspaces", workspace.id, asdict(workspace))
-        project = self.get_project(project_id)
-        project.workspace_id = workspace.id
-        self._save("projects", project.id, asdict(project))
-        return workspace
-
-    def rename(self, kind: str, item_id: str, name: str) -> None:
-        folder = {"domain": "domains", "project": "projects"}.get(kind, "workspaces")
-        if kind == "domain":
-            item = self.get_domain(item_id)
-        elif kind == "project":
-            item = self.get_project(item_id)
-        else:
-            item = self.get_workspace(item_id)
-        item.name = name
-        self._save(folder, item.id, asdict(item))
+    def rename(self, item_id: str, name: str) -> None:
+        domain = self.get_domain(item_id)
+        domain.name = name
+        self._save("domains", domain.id, asdict(domain))
         self._events.append(
             Event(
                 id=new_id("evt"),
                 ts=now_ts(),
                 actor="user",
-                operation=f"{kind}.rename",
-                target=item.id,
+                operation="domain.rename",
+                target=domain.id,
                 result="ok",
                 data={"name": name},
             )
         )
 
-    def archive(self, kind: str, item_id: str) -> None:
-        folder = {"domain": "domains", "project": "projects"}.get(kind, "workspaces")
-        if kind == "domain":
-            if item_id == SELF_DOMAIN_ID:
-                raise ValueError("cannot archive self")
-            item = self.get_domain(item_id)
-            item.status = "archived"
-        elif kind == "project":
-            item = self.get_project(item_id)
-            item.status = "archived"
-        else:
-            item = self.get_workspace(item_id)
-        item.archived = True
-        self._save(folder, item.id, asdict(item))
+    def archive(self, item_id: str) -> None:
+        if item_id == SELF_DOMAIN_ID:
+            raise ValueError("cannot archive self")
+        domain = self.get_domain(item_id)
+        domain.status = "archived"
+        domain.archived = True
+        self._save("domains", domain.id, asdict(domain))
         self._events.append(
             Event(
                 id=new_id("evt"),
                 ts=now_ts(),
                 actor="user",
-                operation=f"{kind}.archive",
-                target=item.id,
+                operation="domain.archive",
+                target=domain.id,
                 result="archived",
             )
         )
@@ -249,14 +167,10 @@ class FileDomainRegistry:
         )
         return suggestion
 
-    def confirm_suggestion(self, suggestion_id: str) -> Domain | Project:
+    def confirm_suggestion(self, suggestion_id: str) -> Domain:
         data = read_json(self._dir / "suggestions" / f"{suggestion_id}.json")
         draft = StructureDraft(**data["draft"])
-        created: Domain | Project
-        if draft.kind == "project":
-            created = self.create_project(draft, confirmed=True)
-        else:
-            created = self.create_domain(draft, confirmed=True)
+        created = self.create_domain(draft, confirmed=True)
         data["status"] = "confirmed"
         self._save("suggestions", data["id"], data)
         return created

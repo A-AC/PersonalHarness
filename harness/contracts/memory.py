@@ -106,7 +106,6 @@ class ExecutionOutcomeRecorder(Protocol):
         self,
         execution: ExecutionResult,
         *,
-        project_id: str | None,
         domain_id: str | None,
         self_request: bool,
         prior_failure: ExecutionResult | None = None,
