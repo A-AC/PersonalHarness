@@ -52,6 +52,8 @@ body.chat-page main{flex:1 1 auto;min-height:0;max-width:none;padding:0;overflow
 .chat-panel{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;width:100%;max-width:1200px;margin:0 auto;padding:12px 16px 0;box-sizing:border-box}
 .chat-head{flex:0 0 auto}
 .chat-head h1{margin:0 0 4px}
+.chat-domain{margin:0 0 6px}
+.chat-domain select{background:#1b1b1b;color:#eee}
 #chat-log{flex:1 1 auto;min-height:0;overflow-y:auto;padding:4px 8px 4px 0}
 #live{flex:0 0 auto;max-height:32vh;overflow:auto;border-top:1px solid #333;padding:6px 0}
 #live summary{cursor:pointer;color:#9cf}
@@ -524,10 +526,30 @@ def create_app(harness: Harness) -> Starlette:
             if focus
             else ""
         )
+        active_id = harness.sessions.active_domain()
+        active_name = None
+        if active_id:
+            try:
+                active_name = harness.domains.get_domain(active_id).name
+            except KeyError:
+                active_id = None
+        domain_options = "".join(
+            f"<option value='{_esc(item.id)}'"
+            f"{' selected' if item.id == active_id else ''}>{_esc(item.name)}</option>"
+            for item in harness.domains.list_domains()
+        )
+        domain_bar = (
+            "<div class='chat-domain'>"
+            f"<span class='muted'>Active domain: {_esc(active_name) if active_name else 'none'}</span> "
+            "<form method='post' action='/chat/domain' style='display:inline'>"
+            "<select name='domain_id'><option value=''>none</option>"
+            f"{domain_options}</select><button>switch</button></form></div>"
+        )
         stream_tokens = bool(harness.settings.get("ui.chat_stream_tokens"))
         return _page(
             "<div class='chat-panel'>"
             "<div class='chat-head'><h1>Chat</h1>"
+            f"{domain_bar}"
             "<p class='muted'>One turn service shared with <code>harness turn</code>. "
             "Stage progress and raw model tokens stream while the turn runs.</p>"
             f"{focus_note}</div>"
@@ -551,6 +573,21 @@ def create_app(harness: Harness) -> Starlette:
             return _error_page("interaction not found", 404)
         detail = harness.chat.detail(interaction_id)
         return HTMLResponse(_render_interaction(item, detail))
+
+    async def chat_domain(request: Request) -> Response:
+        form = _form(await request.body())
+        domain_id = (form.get("domain_id") or "").strip()
+        if not domain_id:
+            harness.sessions.set_active_domain(None)
+            return RedirectResponse("/chat", status_code=303)
+        try:
+            domain = harness.domains.get_domain(domain_id)
+        except KeyError:
+            return _error_page("domain not found", 404)
+        if domain.archived:
+            return _error_page("domain is archived", 400)
+        harness.sessions.set_active_domain(domain.id)
+        return RedirectResponse("/chat", status_code=303)
 
     async def chat_turn(request: Request) -> JSONResponse:
         form = _form(await request.body())
@@ -1066,6 +1103,7 @@ def create_app(harness: Harness) -> Starlette:
     routes = [
         Route("/health", health),
         Route("/chat", chat),
+        Route("/chat/domain", chat_domain, methods=["POST"]),
         Route("/chat/interactions/{interaction_id}", chat_interaction),
         Route("/chat/turn", chat_turn, methods=["POST"]),
         Route("/chat/turns/{job_id}/events", chat_events),

@@ -33,7 +33,10 @@ from harness.storage.atomic import new_id, now_ts
 from harness.text import (
     claims_success,
     estimate_tokens,
+    match_by_name,
     matches_keywords,
+    name_overlap,
+    normalize_name,
     states_unknown_outcome,
     strip_reasoning,
 )
@@ -224,13 +227,41 @@ class DefaultInteractionLoop:
         affirmative = lowered in {"yes", "yeah", "yep", "sure", "ok", "okay", "do it", "confirm", "go ahead"}
         negative = lowered in {"no", "nope", "not now", "don't", "do not", "cancel", "not yet"}
         pending = [item for item in self._domains.list_suggestions() if item.status == "pending"]
-        if pending and (affirmative or negative):
-            suggestion = sorted(pending, key=lambda item: item.ts)[-1]
+        waiting = [
+            task
+            for task in self._tasks.list(states=[TaskState.BLOCKED])
+            if task.block_reason == BlockReason.AWAITING_USER
+        ]
+        # A bare "yes"/"no" is a suggestion answer only when it cannot be a
+        # reply to a pending question and there is exactly one suggestion.
+        if len(pending) == 1 and not waiting and (affirmative or negative):
+            suggestion = pending[0]
             if affirmative:
                 created = self._domains.confirm_suggestion(suggestion.id)
                 return [f"Created {suggestion.draft.kind} '{created.name}' ({created.id})."]
             self._domains.decline_suggestion(suggestion.id)
             return ["Okay, I won't create that. I'll wait before suggesting it again."]
+
+        switched = re.match(
+            r"(?:please\s+)?(?:work\s+on|switch\s+to|open)\s+(?:the\s+)?(.+?)\s*[.!?]*$",
+            text,
+            re.IGNORECASE,
+        )
+        if switched:
+            name = switched.group(1).strip().strip("\"'")
+            domain, candidates = match_by_name(self._domains.list_domains(), name)
+            if domain is not None:
+                self._sessions.set_active_domain(domain.id)
+                return [f"Active domain: '{domain.name}' ({domain.id})."]
+            if candidates:
+                return [
+                    f"I found more than one domain for '{name}': "
+                    f"{', '.join(candidates)}. Please use the exact name."
+                ]
+            # No match: this is probably ordinary prose ("work on the parser
+            # bug"), so fall through to normal planning. The model sees the
+            # structure directory and can report an unknown name itself.
+            return None
 
         for kind, pattern in (
             ("domain", r"(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?domain(?:\s+(?:where|about|for|to talk about))?\s*[:\-]?\s*(.*)"),
@@ -266,8 +297,12 @@ class DefaultInteractionLoop:
     ) -> None:
         trace_id = new_id("trc")
         prompt_started = time.monotonic()
+        directory = self._context.structure_text(self._sessions.current())
+        system_content = TASK_PLAN_INSTRUCTIONS.strip()
+        if directory:
+            system_content += "\n\nStructure directory:\n" + directory
         prompt = [
-            Message(role="system", content=TASK_PLAN_INSTRUCTIONS.strip()),
+            Message(role="system", content=system_content),
             Message(role="user", content=user_text),
         ]
         timeline.record("plan.prompt_build", prompt_started, {"messages": len(prompt)})
@@ -300,6 +335,8 @@ class DefaultInteractionLoop:
                 [{"goal": user_text, "domain_name": None, "project_name": None, "depends_on": []}],
                 user_text,
                 interaction_id,
+                trace_id=trace_id,
+                timeline=timeline,
             )
             timeline.record("plan.task_create", create_started, {"tasks": [task.id for task in created]})
             self._events.append(
@@ -376,32 +413,62 @@ class DefaultInteractionLoop:
         if not plan:
             plan = [{"goal": user_text, "domain_name": None, "project_name": None, "depends_on": []}]
         create_started = time.monotonic()
-        created = self._create_plan_tasks(plan, user_text, interaction_id)
+        created = self._create_plan_tasks(
+            plan, user_text, interaction_id, trace_id=trace_id, timeline=timeline
+        )
         timeline.record("plan.task_create", create_started, {"tasks": [task.id for task in created]})
 
-    def _create_plan_tasks(self, plan: list[dict[str, Any]], user_text: str, interaction_id: str) -> list[Task]:
+    def _create_plan_tasks(
+        self,
+        plan: list[dict[str, Any]],
+        user_text: str,
+        interaction_id: str,
+        *,
+        trace_id: str | None = None,
+        timeline: TurnTimeline | None = None,
+    ) -> list[Task]:
         created: list[Task] = []
+        active_domain = self._sessions.active_domain()
+        misses: list[dict[str, Any]] = []
         for spec in plan:
             depends: list[str] = []
             for idx in spec.get("depends_on") or []:
                 if isinstance(idx, int) and 0 <= idx < len(created):
                     depends.append(created[idx].id)
-            domain_id: str | None = None
+            # Tasks without a named domain inherit the session's active domain,
+            # so domain-scoped memory accumulates for the workspace the user is
+            # working in (including the code-only heuristic plan).
+            domain_id: str | None = active_domain
             name = spec.get("domain_name")
             if name:
-                if str(name).strip().lower() == SELF_DOMAIN_ID:
+                text = str(name).strip()
+                if text.lower() == SELF_DOMAIN_ID:
                     domain_id = SELF_DOMAIN_ID
                 else:
-                    found = self._domains.find_domain_by_name(str(name))
+                    found, candidates = match_by_name(self._domains.list_domains(), text)
                     if found is not None:
                         domain_id = found.id
+                    else:
+                        misses.append(
+                            {"kind": "domain", "requested": text, "candidates": candidates}
+                        )
             project_id: str | None = None
             project_name = spec.get("project_name")
             if project_name:
-                project = self._domains.find_project_by_name(str(project_name))
+                project, candidates = match_by_name(
+                    self._domains.list_projects(), str(project_name)
+                )
                 if project is not None:
                     project_id = project.id
                     domain_id = project.domain_id
+                else:
+                    misses.append(
+                        {
+                            "kind": "project",
+                            "requested": str(project_name),
+                            "candidates": candidates,
+                        }
+                    )
             created.append(
                 self._tasks.create(
                     TaskSpec(
@@ -413,6 +480,27 @@ class DefaultInteractionLoop:
                     )
                 )
             )
+        if misses:
+            # Never silently write None: the planner miss is observable even
+            # though the task falls back to the active domain.
+            self._events.append(
+                Event(
+                    id=new_id("evt"),
+                    ts=now_ts(),
+                    actor="harness",
+                    operation="plan.structure_miss",
+                    target=trace_id or interaction_id,
+                    result="fallback",
+                    trigger_ref=interaction_id,
+                    data={"misses": misses, "active_domain_id": active_domain},
+                )
+            )
+            if timeline is not None:
+                timeline.record(
+                    "plan.structure_miss",
+                    time.monotonic(),
+                    {"misses": misses, "active_domain_id": active_domain},
+                )
         return created
 
     def _heuristic_single_task(self, user_text: str) -> bool:
@@ -447,9 +535,19 @@ class DefaultInteractionLoop:
             return None
         if self._domains.suggestion_on_cooldown(key):
             return None
-        if self._domains.find_domain_by_name(key):
+        existing, _ = match_by_name(self._domains.list_domains(), key)
+        if existing is not None:
             return None
-        if any(item.draft.name == key and item.status == "pending" for item in self._domains.list_suggestions()):
+        threshold = float(self._settings.get("domain.match_overlap"))
+        if any(
+            item.status == "pending"
+            and item.draft.kind == "domain"
+            and (
+                normalize_name(item.draft.name) == normalize_name(key)
+                or name_overlap(item.draft.name, key) >= threshold
+            )
+            for item in self._domains.list_suggestions()
+        ):
             return None
         self._domains.record_suggestion(
             StructureDraft(kind="domain", name=key, reason="repeated subject hits", evidence=f"hits={hits}")

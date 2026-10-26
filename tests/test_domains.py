@@ -142,3 +142,58 @@ def test_rename_and_archive_are_reflected_in_listings(make_harness) -> None:
     assert len(h.domains.list_domains(include_archived=True)) == 2
     with pytest.raises(ValueError):
         h.domains.archive("domain", SELF_DOMAIN_ID)
+
+
+def test_planner_prompt_includes_the_structure_directory(make_harness) -> None:
+    h = make_harness([])
+    domain = h.domains.create_domain(draft("homelab"), confirmed=True)
+    h.sessions.set_active_domain(domain.id)
+    h.model.push(plan("check nas"))
+    h.model.push(respond("done"))
+    result = h.loop.handle_turn("check the nas")
+
+    planner = [
+        item
+        for item in h.traces.list_for(interaction_id=result.interaction_id)
+        if item.role == "planner"
+    ][0]
+    system = planner.messages[0]["content"]
+    assert "Structure directory:" in system
+    assert f"Active domain: homelab ({domain.id})" in system
+    assert f"- {domain.id} | homelab | projects: 0" in system
+
+
+def test_plan_resolves_normalized_names_and_reports_unresolved_misses(make_harness) -> None:
+    h = make_harness([])
+    domain = h.domains.create_domain(draft("Home Lab"), confirmed=True)
+    active = h.domains.create_domain(draft("Other"), confirmed=True)
+    h.sessions.set_active_domain(active.id)
+    h.model.push(
+        {
+            "tasks": [
+                {"goal": "a", "domain_name": "home-lab", "depends_on": []},
+                {"goal": "b", "domain_name": "missing lab", "depends_on": []},
+            ]
+        }
+    )
+    h.model.push(respond("a done"))
+    h.model.push(respond("b done"))
+    result = h.loop.handle_turn("do a and b")
+
+    tasks = {item.goal: item for item in result.tasks}
+    assert tasks["a"].domain_id == domain.id
+    # An unresolved name falls back to the active domain and is recorded.
+    assert tasks["b"].domain_id == active.id
+    misses = h.events.query(operation="plan.structure_miss")
+    assert misses
+    assert misses[-1].data["misses"][0]["requested"] == "missing lab"
+    assert misses[-1].data["active_domain_id"] == active.id
+
+
+def test_heuristic_plan_inherits_the_active_domain(make_harness) -> None:
+    h = make_harness([respond("hi")], settings={"tasks": {"planning_mode": "heuristic"}})
+    domain = h.domains.create_domain(draft("homelab"), confirmed=True)
+    h.sessions.set_active_domain(domain.id)
+
+    result = h.loop.handle_turn("hello")
+    assert result.tasks[-1].domain_id == domain.id

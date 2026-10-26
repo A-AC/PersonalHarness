@@ -27,6 +27,7 @@ SECTION_ORDER = [
     "base_instructions",
     "persona",
     "preferences",
+    "structure",
     "domain",
     "task",
     "history",
@@ -138,6 +139,7 @@ class DefaultContextBuilder:
                 )
             )
         domain_text = "\n".join(domain_text_parts + mem_blocks)
+        structure_text = self.structure_text(session)
         tz = timezone_name(self._settings)
         now = now_ts()
         task_text = (
@@ -163,6 +165,7 @@ class DefaultContextBuilder:
             "base_instructions": instructions.strip(),
             "persona": persona_text,
             "preferences": pref_text,
+            "structure": structure_text,
             "domain": domain_text,
             "task": task_text,
             "history": history_text,
@@ -177,12 +180,18 @@ class DefaultContextBuilder:
             if tokens > budget:
                 if name in {"base_instructions", "persona"}:
                     raise ValueError(f"{name} exceeds its token budget and must not be truncated")
-                text, tokens, dropped = self._fit(name, text, budget)
+                if name == "structure":
+                    # The directory is a list of entries. Drop whole entries so
+                    # a half-rendered domain or project line never reaches the
+                    # prompt.
+                    text, tokens, dropped = self._fit_structure(text, budget, chars_per_token)
+                else:
+                    text, tokens, dropped = self._fit(name, text, budget)
                 excluded.append(InclusionRecord(item=f"{name}:overflow", reason=dropped, section=name))
             sections.append(ContextSection(name=name, text=text, tokens=tokens))
         total_budget = int(self._settings.get("context.budgets.total"))
         total = sum(item.tokens for item in sections)
-        drop_order = ["history", "domain", "preferences", "capabilities"]
+        drop_order = ["history", "structure", "domain", "preferences", "capabilities"]
         while total > total_budget:
             reduced = False
             for name in drop_order:
@@ -216,6 +225,76 @@ class DefaultContextBuilder:
             excluded=excluded,
             stats={"history": history_view.stats},
         )
+
+    def structure_text(self, session: Session) -> str:
+        """Render the compact domain/project directory.
+
+        The context section and the task planner both use this exact text so
+        the model sees the same structure in both prompts.
+        """
+        return "\n".join(self._structure_lines(session))
+
+    def _structure_lines(self, session: Session) -> list[str]:
+        domains = self._domains.list_domains()
+        projects = self._domains.list_projects()
+        active_id = session.active_domain_id
+        active_name: str | None = None
+        if active_id:
+            try:
+                active_name = self._domains.get_domain(active_id).name
+            except KeyError:
+                active_id = None
+        lines = [
+            f"Active domain: {active_name} ({active_id})" if active_id else "Active domain: none"
+        ]
+        counts: dict[str, int] = {}
+        for project in projects:
+            counts[project.domain_id] = counts.get(project.domain_id, 0) + 1
+        domain_names = {domain.id: domain.name for domain in domains}
+        lines.append("Domains:")
+        for domain in domains:
+            lines.append(f"- {domain.id} | {domain.name} | projects: {counts.get(domain.id, 0)}")
+        lines.append("Projects:")
+        if not projects:
+            lines.append("- none")
+        for project in projects:
+            lines.append(
+                f"- {project.id} | {project.name} | domain: "
+                f"{domain_names.get(project.domain_id, project.domain_id)}"
+            )
+        pending = [item for item in self._domains.list_suggestions() if item.status == "pending"]
+        lines.append("Pending suggestions:")
+        if not pending:
+            lines.append("- none")
+        for item in pending:
+            lines.append(f"- {item.id} | {item.draft.kind} | {item.draft.name}")
+        return lines
+
+    def _fit_structure(self, text: str, budget: int, chars_per_token: int) -> tuple[str, int, str]:
+        """Drop whole directory blocks (active, domains, projects, suggestions)."""
+        lines = text.splitlines()
+        if not lines:
+            return "", 0, ""
+        blocks: list[list[str]] = [[lines[0]]]
+        for line in lines[1:]:
+            if line.startswith("- "):
+                blocks[-1].append(line)
+            else:
+                blocks.append([line])
+        dropped: list[str] = []
+        while blocks and estimate_tokens(
+            "\n".join("\n".join(block) for block in blocks),
+            chars_per_token=chars_per_token,
+        ) > budget:
+            removed = blocks.pop()
+            dropped.append(removed[0].rstrip(":"))
+        fitted = "\n".join("\n".join(block) for block in blocks)
+        reason = (
+            "dropped whole structure entries: " + ", ".join(reversed(dropped))
+            if dropped
+            else ""
+        )
+        return fitted, estimate_tokens(fitted, chars_per_token=chars_per_token), reason
 
     def _memory_time(self, value: str) -> str:
         tz = timezone_name(self._settings)

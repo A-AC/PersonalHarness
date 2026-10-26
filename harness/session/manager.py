@@ -32,6 +32,8 @@ class FileSessionManager:
                 created_at=data["created_at"],
                 updated_at=now_ts(),
                 subject_hits=data.get("subject_hits") or {},
+                # Older session files predate the active-domain field.
+                active_domain_id=data.get("active_domain_id"),
             )
         else:
             ts = now_ts()
@@ -151,6 +153,15 @@ class FileSessionManager:
         self._session.updated_at = now_ts()
         self._write_session(self._session)
         return hits
+
+    def set_active_domain(self, domain_id: str | None) -> Session:
+        self._session.active_domain_id = domain_id
+        self._session.updated_at = now_ts()
+        self._write_session(self._session)
+        return self._session
+
+    def active_domain(self) -> str | None:
+        return self._session.active_domain_id
 
     def cooldown_until(self, key: str) -> str | None:
         data = read_json(self._meta_path) if self._meta_path.exists() else {"cooldowns": {}}

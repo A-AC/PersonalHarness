@@ -50,18 +50,55 @@ MEMORY_MANIFEST = Manifest(
 
 STRUCTURE_MANIFEST = Manifest(
     name="harness_structure",
-    purpose="Propose persistent structure for explicit user confirmation.",
+    purpose=(
+        "Work inside existing domains and propose persistent structure for explicit "
+        "user confirmation."
+    ),
     source="harness",
     operations=[
+        OperationSpec(
+            name="enter_domain",
+            description=(
+                "Make an existing domain the active workspace. Use this for 'work on', "
+                "'switch to', or 'open <domain>'. Resolves an existing non-archived "
+                "domain by exact or normalized name and never creates one. A missing or "
+                "ambiguous name fails with candidate names."
+            ),
+            permission=PermissionLevel.READ,
+            inputs={"name": "string"},
+            required=["name"],
+        ),
+        OperationSpec(
+            name="leave_domain",
+            description=(
+                "Clear the active domain and return to no workspace. The next task uses "
+                "the global/default scope until another domain is entered."
+            ),
+            permission=PermissionLevel.READ,
+            inputs={},
+        ),
         OperationSpec(
             name="suggest_domain",
             description=(
                 "Record a pending domain suggestion for user confirmation. Use this for "
                 "requests to suggest or propose a domain, including when the user says "
-                "not to create it. Never creates the domain."
+                "not to create it. Never creates the domain. An existing domain, a "
+                "pending duplicate, or an active decline cooldown is reported instead "
+                "of recording another suggestion."
             ),
             permission=PermissionLevel.READ,
             inputs={"name": "string", "reason": "string"},
+            required=["name"],
+        ),
+        OperationSpec(
+            name="suggest_project",
+            description=(
+                "Record a pending project suggestion for user confirmation. The optional "
+                "domain name selects an existing domain; the active domain is used when "
+                "it is omitted. Never creates the project."
+            ),
+            permission=PermissionLevel.READ,
+            inputs={"name": "string", "domain": "string", "reason": "string"},
             required=["name"],
         ),
     ],
