@@ -33,3 +33,10 @@ class InteractionLoop(Protocol):
         *,
         emit: TurnListener | None = None,
     ) -> TurnResult: ...
+
+    def run_ready(
+        self,
+        *,
+        limit: int,
+        emit: TurnListener | None = None,
+    ) -> TurnResult: ...

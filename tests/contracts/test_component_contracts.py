@@ -20,6 +20,8 @@ from harness.contracts import (
     TaskManager,
     TraceStore,
     ResetService,
+    TurnService,
+    WorkScheduler,
 )
 
 
@@ -81,6 +83,8 @@ def test_composition_root_satisfies_protocols(harness: Harness) -> None:
         (InteractionLoop, harness.loop),
         (ConsolidationService, harness.consolidation),
         (ResetService, harness.reset),
+        (TurnService, harness.chat),
+        (WorkScheduler, harness.scheduler),
     ]
     for protocol, instance in bindings:
         for name, member in inspect.getmembers(protocol):

@@ -110,6 +110,61 @@ class DefaultInteractionLoop:
         except Exception as exc:
             return self._turn_failed(interaction, timeline, messages, exc)
 
+    def run_ready(
+        self,
+        *,
+        limit: int,
+        emit: TurnListener | None = None,
+    ) -> TurnResult:
+        """Run eligible ready tasks without a user turn (scheduler path).
+
+        This is the same per-task execution path as a user turn — the model
+        proposes actions and every proposal still passes the action machine,
+        the confirmation gate, and the capability executor. The only
+        difference is provenance: no interaction is recorded, and each run
+        leaves a checkpoint plus a turn trace so background work stays
+        auditable and visible in the honest-status view.
+        """
+        timeline = TurnTimeline(on_stage=lambda item: _notify(emit, "stage", item))
+        messages: list[str] = []
+        ran_tasks: list[Task] = []
+        ran = 0
+        while ran < max(0, int(limit)):
+            task = self._tasks.next_ready()
+            if task is None:
+                break
+            delivered = self._run_task(task, "", timeline, emit)
+            messages.extend(delivered)
+            ran += 1
+            try:
+                final = self._tasks.get(task.id)
+            except KeyError:
+                continue
+            ran_tasks.append(final)
+            summary = " | ".join(delivered).strip() or "no message"
+            try:
+                self._tasks.record_checkpoint(
+                    task.id,
+                    f"Background run finished in state {final.state}: {summary}"[:400],
+                    {"trigger": "scheduler", "state": final.state},
+                )
+            except KeyError:
+                pass
+            self._events.append(
+                Event(
+                    id=new_id("evt"),
+                    ts=now_ts(),
+                    actor="harness",
+                    operation="scheduler.task_run",
+                    target=task.id,
+                    result=final.state,
+                    data={"messages": len(delivered)},
+                )
+            )
+        result = TurnResult(interaction_id="", messages=messages, tasks=ran_tasks)
+        self._write_turn_trace("", timeline, result)
+        return result
+
     def _run_turn(
         self,
         user_text: str,
@@ -543,6 +598,7 @@ class DefaultInteractionLoop:
                         domain_id=domain_id,
                         depends_on=depends,
                         interaction_id=interaction_id,
+                        priority=int(spec.get("priority") or 0),
                     )
                 )
             )

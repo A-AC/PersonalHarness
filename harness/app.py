@@ -28,6 +28,7 @@ from harness.model.openai_http import OpenAICompatAdapter
 from harness.model.scripted import ScriptedAdapter
 from harness.orchestrator.loop import DefaultInteractionLoop
 from harness.profile.provider import FileSelfProfile
+from harness.scheduler.service import WorkScheduler
 from harness.session.manager import FileSessionManager
 from harness.session.turns import DefaultTurnService
 from harness.settings.service import FileSettingsService
@@ -58,11 +59,15 @@ class Harness:
     consolidation: FileConsolidationService
     loop: DefaultInteractionLoop
     chat: DefaultTurnService
+    scheduler: WorkScheduler
     reset: FileResetService
 
     def on_start(self) -> None:
         self.tasks.on_process_start()
         self.control.on_start()
+        # Deterministic recovery runs even when the heartbeat is disabled:
+        # interrupted and unknown-outcome work must never look runnable.
+        self.scheduler.reconcile()
 
 
 def build_harness(
@@ -278,6 +283,15 @@ def build_harness(
         memory=memory,
         settings=settings,
     )
+    scheduler = WorkScheduler(
+        settings=settings,
+        tasks=tasks,
+        decisions=decisions,
+        capabilities=capabilities,
+        events=events,
+        consolidation=consolidation,
+        runner=lambda limit: chat.run_ready(limit=limit),
+    )
     reset = FileResetService(
         root,
         settings=settings,
@@ -286,7 +300,10 @@ def build_harness(
         domains=domains,
         memory=memory,
         events=events,
-        gates=[chat.exclusive, history.exclusive, consolidation.exclusive],
+        # The scheduler is quiesced first: a tick holds this gate for its
+        # whole duration (its runner also takes the turn lock), so a reset
+        # can never interleave with background work.
+        gates=[scheduler.exclusive, chat.exclusive, history.exclusive, consolidation.exclusive],
     )
     harness = Harness(
         data_dir=root,
@@ -308,6 +325,7 @@ def build_harness(
         consolidation=consolidation,
         loop=loop,
         chat=chat,
+        scheduler=scheduler,
         reset=reset,
     )
     harness.on_start()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, fields
 from pathlib import Path
+from typing import Any
 
 from harness.constants import BlockReason, TaskState
 from harness.contracts.events import Event, EventLog
@@ -12,19 +13,58 @@ from harness.storage.atomic import atomic_write_json, new_id, now_ts, read_json
 
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    TaskState.PENDING: {TaskState.READY, TaskState.BLOCKED, TaskState.CANCELLED},
-    TaskState.READY: {TaskState.RUNNING, TaskState.BLOCKED, TaskState.CANCELLED},
+    TaskState.PENDING: {
+        TaskState.READY,
+        TaskState.BLOCKED,
+        TaskState.DEFERRED,
+        TaskState.CANCELLED,
+    },
+    TaskState.READY: {
+        TaskState.RUNNING,
+        TaskState.BLOCKED,
+        TaskState.DEFERRED,
+        TaskState.CANCELLED,
+    },
     TaskState.RUNNING: {
         TaskState.COMPLETED,
         TaskState.FAILED,
         TaskState.BLOCKED,
         TaskState.CANCELLED,
     },
-    TaskState.BLOCKED: {TaskState.READY, TaskState.RUNNING, TaskState.FAILED, TaskState.CANCELLED},
+    TaskState.BLOCKED: {
+        TaskState.READY,
+        TaskState.RUNNING,
+        TaskState.DEFERRED,
+        TaskState.FAILED,
+        TaskState.COMPLETED,
+        # A reason-only change (for example awaiting_user -> unknown_outcome)
+        # is the same blocked state; the event records the new reason.
+        TaskState.BLOCKED,
+        TaskState.CANCELLED,
+    },
+    TaskState.DEFERRED: {
+        TaskState.READY,
+        TaskState.RUNNING,
+        TaskState.BLOCKED,
+        TaskState.FAILED,
+        # Re-deferring (extending the window) is the same state.
+        TaskState.DEFERRED,
+        TaskState.CANCELLED,
+    },
     TaskState.COMPLETED: set(),
-    TaskState.FAILED: set(),
+    # FAILED is terminal for the model's action machine, but the scheduler may
+    # requeue a *retryable* failure (evidence-checked) or the user may defer
+    # or cancel it. Nothing else can revive failed work.
+    TaskState.FAILED: {
+        TaskState.READY,
+        TaskState.DEFERRED,
+        TaskState.CANCELLED,
+    },
     TaskState.CANCELLED: set(),
 }
+
+# How many persisted progress checkpoints a task keeps (oldest dropped).
+PROGRESS_LIMIT = 20
 
 
 class FileTaskManager:
@@ -82,6 +122,9 @@ class FileTaskManager:
             block_reason=reason,
             interaction_id=spec.interaction_id,
             sequence=time.time_ns(),
+            priority=int(spec.priority or 0),
+            due_at=spec.due_at,
+            plan_decision_id=spec.plan_decision_id,
         )
         self._save(task)
         self._events.append(
@@ -105,8 +148,12 @@ class FileTaskManager:
             raise ValueError(f"unknown task state: {task.state}")
         if state not in allowed:
             raise ValueError(f"invalid task transition: {task.state} -> {state}")
-        task.state = state
+        reason_only = state == task.state == TaskState.BLOCKED
+        if not reason_only:
+            task.state = state
         task.block_reason = reason
+        if state != TaskState.DEFERRED:
+            task.defer_until = None
         task.updated_at = now_ts()
         self._save(task)
         self._events.append(
@@ -120,7 +167,7 @@ class FileTaskManager:
                 data={"reason": reason},
             )
         )
-        if state == TaskState.COMPLETED:
+        if state == TaskState.COMPLETED and not reason_only:
             self._release_dependents(task.id)
         return task
 
@@ -188,11 +235,107 @@ class FileTaskManager:
         )
         return task
 
+    def defer(self, task_id: str, until: str | None, *, reason: str | None = None) -> Task:
+        task = self._load(task_id)
+        blocked_reason = reason or BlockReason.DEFERRED.value
+        task = self.transition(task_id, TaskState.DEFERRED.value, reason=blocked_reason)
+        # transition() clears defer_until for non-deferred targets only; set
+        # the window explicitly (None means an indefinite deferral).
+        task.defer_until = until
+        task.updated_at = now_ts()
+        self._save(task)
+        self._events.append(
+            Event(
+                id=new_id("evt"),
+                ts=task.updated_at,
+                actor="harness",
+                operation="task.defer",
+                target=task.id,
+                result=TaskState.DEFERRED.value,
+                data={"until": until, "reason": blocked_reason},
+            )
+        )
+        return task
+
+    def resume(self, task_id: str, *, reason: str | None = None) -> Task:
+        """Requeue stopped work as READY, counting against the retry budget.
+
+        Only the scheduler (evidence-checked) and the control plane (explicit
+        user instruction) call this; the model's action machine never revives
+        stopped work on its own.
+        """
+        task = self._load(task_id)
+        task.resume_count += 1
+        task.updated_at = now_ts()
+        self._save(task)
+        resumed = self.transition(task_id, TaskState.READY.value, reason=None)
+        self._events.append(
+            Event(
+                id=new_id("evt"),
+                ts=resumed.updated_at,
+                actor="harness",
+                operation="task.resume",
+                target=task_id,
+                result=TaskState.READY.value,
+                data={"reason": reason, "resume_count": task.resume_count},
+            )
+        )
+        return resumed
+
+    def record_checkpoint(self, task_id: str, summary: str, data: dict[str, Any] | None = None) -> Task:
+        task = self._load(task_id)
+        entry: dict[str, Any] = {"ts": now_ts(), "summary": str(summary)}
+        if data:
+            entry["data"] = dict(data)
+        task.progress.append(entry)
+        if len(task.progress) > PROGRESS_LIMIT:
+            task.progress = task.progress[-PROGRESS_LIMIT:]
+        task.updated_at = now_ts()
+        self._save(task)
+        return task
+
+    def set_priority(self, task_id: str, priority: int) -> Task:
+        task = self._load(task_id)
+        task.priority = int(priority)
+        task.updated_at = now_ts()
+        self._save(task)
+        self._events.append(
+            Event(
+                id=new_id("evt"),
+                ts=task.updated_at,
+                actor="harness",
+                operation="task.update",
+                target=task.id,
+                result="priority",
+                data={"priority": task.priority},
+            )
+        )
+        return task
+
+    def set_due(self, task_id: str, due_at: str | None) -> Task:
+        task = self._load(task_id)
+        task.due_at = due_at
+        task.updated_at = now_ts()
+        self._save(task)
+        self._events.append(
+            Event(
+                id=new_id("evt"),
+                ts=task.updated_at,
+                actor="harness",
+                operation="task.update",
+                target=task.id,
+                result="due_at",
+                data={"due_at": due_at},
+            )
+        )
+        return task
+
     def next_ready(self) -> Task | None:
         ready = self.list(states=[TaskState.READY])
         if not ready:
             return None
-        return sorted(ready, key=lambda item: (item.sequence, item.created_at))[0]
+        # Priority first (higher wins), then creation order for stability.
+        return sorted(ready, key=lambda item: (-item.priority, item.sequence, item.created_at))[0]
 
     def on_process_start(self) -> list[Task]:
         interrupted = []

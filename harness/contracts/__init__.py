@@ -37,6 +37,14 @@ from harness.contracts.model import Message, ModelAdapter, ModelResult
 from harness.contracts.profile import Persona, PersonaDraft, PersonaProposal, PersonaVersion, SelfProfile
 from harness.contracts.session import Interaction, Session, SessionManager
 from harness.contracts.settings import SettingChange, SettingDef, SettingsService
+from harness.contracts.scheduler import (
+    DecisionItem,
+    TickItem,
+    TickReport,
+    WorkItem,
+    WorkReport,
+    WorkScheduler,
+)
 from harness.contracts.sources import SourceResolver
 from harness.contracts.tasks import Task, TaskManager, TaskOutcome, TaskSpec
 from harness.contracts.traces import Trace, TraceStore
@@ -67,6 +75,7 @@ __all__ = [
     "ControlPlane",
     "Decision",
     "DecisionInterpretation",
+    "DecisionItem",
     "DecisionResolver",
     "DecisionStore",
     "Domain",
@@ -120,6 +129,8 @@ __all__ = [
     "TaskManager",
     "TaskOutcome",
     "TaskSpec",
+    "TickItem",
+    "TickReport",
     "Trace",
     "TraceStore",
     "TurnDetail",
@@ -128,4 +139,7 @@ __all__ = [
     "TurnResult",
     "TurnService",
     "UsageEntry",
+    "WorkItem",
+    "WorkReport",
+    "WorkScheduler",
 ]

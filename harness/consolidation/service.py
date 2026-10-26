@@ -181,7 +181,14 @@ class FileConsolidationService:
         return ConsolidationRun(**read_json(self._dir / f"{run_id}.json"))
 
     def list(self, limit: int = 20) -> list[ConsolidationRun]:
-        items = [ConsolidationRun(**read_json(path)) for path in sorted(self._dir.glob("run_*.json"))]
+        # The evidence snapshots share the run_<id> prefix but are not run
+        # records; loading one as a ConsolidationRun would fail.
+        paths = [
+            path
+            for path in sorted(self._dir.glob("run_*.json"))
+            if not path.name.endswith(".input.json")
+        ]
+        items = [ConsolidationRun(**read_json(path)) for path in paths]
         return items[-limit:]
 
     def rollback(self, run_id: str, actor: str) -> ConsolidationRun:

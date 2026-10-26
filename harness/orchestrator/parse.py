@@ -133,6 +133,7 @@ TASK_PLAN_SCHEMA = {
                     "goal": {"type": "string"},
                     "domain_name": {"type": ["string", "null"]},
                     "depends_on": {"type": "array", "items": {"type": "integer"}},
+                    "priority": {"type": ["integer", "null"]},
                 },
                 "required": ["goal"],
             },

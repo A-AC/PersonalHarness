@@ -43,11 +43,14 @@ class TurnService(Protocol):
     """The one entry point used by the terminal and the web UI.
 
     ``submit`` runs a full user turn and reports progress to an optional
-    listener. Both clients use this method; neither re-implements turn
-    orchestration.
+    listener. ``run_ready`` is the scheduler's entry point: it runs
+    already-eligible tasks through the same serialized, gated path. Both
+    clients use these methods; neither re-implements turn orchestration.
     """
 
     def submit(self, user_text: str, listener: TurnListener | None = None) -> TurnResult: ...
+
+    def run_ready(self, *, limit: int, listener: TurnListener | None = None) -> TurnResult: ...
 
     def detail(self, interaction_id: str) -> TurnDetail: ...
 

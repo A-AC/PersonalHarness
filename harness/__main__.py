@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("serve")
     sub.add_parser("health")
     sub.add_parser("consolidate")
+    sub.add_parser("tick")
+    sub.add_parser("status")
     sub.add_parser("measure")
     reset = sub.add_parser("reset")
     reset.add_argument(
@@ -108,6 +110,34 @@ def main(argv: list[str] | None = None) -> int:
         run = harness.consolidation.run(trigger="cli")
         print(json.dumps({"id": run.id, "status": run.status, "results": run.results, "findings": run.findings}, default=str))
         return 0 if run.status == "completed" else 1
+    if args.command == "tick":
+        report = harness.scheduler.tick()
+        print(
+            json.dumps(
+                {
+                    "ts": report.ts,
+                    "enabled": report.enabled,
+                    "summary": report.summary,
+                    "ran": report.ran,
+                    "model_used": report.model_used,
+                    "items": [
+                        {
+                            "kind": item.kind,
+                            "action": item.action,
+                            "task_id": item.task_id,
+                            "reason": item.reason,
+                        }
+                        for item in report.items
+                    ],
+                },
+                default=str,
+            )
+        )
+        return 0
+    if args.command == "status":
+        work = harness.scheduler.report()
+        print(work.summary())
+        return 0
     if args.command == "measure":
         print(json.dumps(learning_report(harness), indent=2))
         return 0

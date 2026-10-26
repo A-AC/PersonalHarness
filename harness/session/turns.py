@@ -89,6 +89,24 @@ class DefaultTurnService:
             _emit(listener, "turn.failed" if result.error else "turn.completed", payload)
             return result
 
+    def run_ready(self, *, limit: int, listener: TurnListener | None = None) -> TurnResult:
+        """Run scheduler-eligible tasks under the same lock and epoch gate.
+
+        Background work is serialized with user turns and rejected while a
+        reset holds the epoch, so the scheduler can never race a wipe or a
+        live conversation.
+        """
+        epoch = self._epoch
+        with self._lock:
+            if self._blocked or epoch != self._epoch:
+                error = (
+                    f"background run rejected: harness is {self._blocked}"
+                    if self._blocked
+                    else "background run cancelled by a reset"
+                )
+                return TurnResult(interaction_id="", messages=[], error=error)
+            return self._loop.run_ready(limit=limit, emit=listener)
+
     def detail(self, interaction_id: str) -> TurnDetail:
         return self.detail_many([interaction_id]).get(interaction_id, TurnDetail(interaction_id=interaction_id))
 

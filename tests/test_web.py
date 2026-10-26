@@ -456,3 +456,14 @@ def test_tasks_page_has_no_project_column(make_harness) -> None:
     assert task.id in page.text
     assert "check nas" in page.text
     assert "<th>project</th>" not in page.text
+
+
+def test_tasks_page_shows_work_status(make_harness) -> None:
+    h = make_harness([])
+    task = h.tasks.create(TaskSpec(goal="check nas"))
+
+    page = _request(h, "GET", "/tasks")
+    assert page.status_code == 200
+    assert "Work status" in page.text
+    assert "Ready next" in page.text
+    assert task.id in page.text

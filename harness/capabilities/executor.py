@@ -82,6 +82,25 @@ class FileCapabilityExecutor:
         ))
         return items
 
+    def attempts_by_task(self) -> dict[str, list[ExecutionResult]]:
+        """One scan over all attempt files, grouped by task id.
+
+        Deterministic ordering identical to ``last_attempts``.
+        """
+        grouped: dict[str, list[ExecutionResult]] = {}
+        for path in self._attempts_dir.glob("op_*.json"):
+            data = read_json(path)
+            task_id = data.get("task_id")
+            if not task_id:
+                continue
+            grouped.setdefault(str(task_id), []).append(ExecutionResult(**data))
+        for items in grouped.values():
+            items.sort(key=lambda item: (
+                (item.evidence or {}).get("started_at", ""),
+                (item.evidence or {}).get("sequence", 0),
+            ))
+        return grouped
+
     def get_attempt(self, operation_id: str) -> ExecutionResult | None:
         path = self._attempts_dir / f"{operation_id}.json"
         if not path.exists():

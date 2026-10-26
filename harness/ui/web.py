@@ -784,13 +784,21 @@ def create_app(harness: Harness) -> Starlette:
     async def tasks(_request: Request) -> HTMLResponse:
         rows = "".join(
             f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.state)}</td><td>{_esc(item.block_reason)}</td>"
+            f"<td>{_esc(item.priority)}</td><td>{_esc(item.due_at or '')}</td>"
+            f"<td>{_esc(item.defer_until or '')}</td>"
             f"<td>{_esc(item.domain_id)}</td><td>{_esc(item.goal)}</td>"
             f"<td>{_esc(item.depends_on)}</td><td>{_esc(item.outcome)}</td>"
             f"<td>{_esc(item.last_message)}</td></tr>"
             for item in harness.tasks.list()
         )
+        work = harness.scheduler.report()
         return _page(
-            "<h1>Tasks</h1><table><tr><th>id</th><th>state</th><th>reason</th><th>domain</th>"
+            "<h1>Tasks</h1>"
+            "<h2>Work status</h2><pre>"
+            + _esc(work.summary())
+            + "</pre>"
+            "<h2>All tasks</h2><table><tr><th>id</th><th>state</th><th>reason</th><th>prio</th>"
+            "<th>due</th><th>deferred until</th><th>domain</th>"
             "<th>goal</th><th>deps</th><th>outcome</th><th>last message</th></tr>"
             + rows
             + "</table>"
@@ -1067,29 +1075,14 @@ def create_app(harness: Harness) -> Starlette:
             "<p class='err'>This cannot be undone without the backup archive.</p>"
         )
 
-    scheduler_task: asyncio.Task | None = None
-
-    async def scheduler_loop() -> None:
-        while True:
-            interval = max(60, int(harness.settings.get("consolidation.schedule_interval_s")))
-            await asyncio.sleep(interval)
-            try:
-                await asyncio.to_thread(harness.consolidation.run, trigger="schedule")
-            except Exception:
-                # A scheduled pass is best-effort; the UI can run one on demand
-                # and the failure stays in the events/trace record.
-                continue
-
     async def on_startup() -> None:
-        nonlocal scheduler_task
-        if bool(harness.settings.get("consolidation.schedule_enabled")):
-            scheduler_task = asyncio.create_task(scheduler_loop())
+        # The persistent heartbeat owns all scheduled activity while the app is
+        # serving: task recovery, due reminders, deferred releases, and the
+        # periodic consolidation pass (consolidation.schedule_enabled).
+        harness.scheduler.start()
 
     async def on_shutdown() -> None:
-        nonlocal scheduler_task
-        if scheduler_task is not None:
-            scheduler_task.cancel()
-            scheduler_task = None
+        harness.scheduler.stop()
 
     routes = [
         Route("/health", health),

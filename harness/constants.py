@@ -28,6 +28,9 @@ class TaskState(StrEnum):
     READY = "ready"
     RUNNING = "running"
     BLOCKED = "blocked"
+    # Deferred work is explicitly postponed: it stays out of the eligible set
+    # until its defer window passes (and no open decision still holds it).
+    DEFERRED = "deferred"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -41,6 +44,13 @@ class BlockReason(StrEnum):
     MODEL_UNAVAILABLE = "model_unavailable"
     INTERRUPTED = "interrupted"
     CAPABILITY_UNAVAILABLE = "capability_unavailable"
+    # An attempt was left in flight (process died mid-dispatch); the outcome
+    # must be reconciled or confirmed by the user before any retry.
+    UNKNOWN_OUTCOME = "unknown_outcome"
+    # The scheduler will not requeue the task again; retry budget exhausted.
+    RETRY_LIMIT = "retry_limit"
+    # The task is deferred by the user or by scheduler backoff.
+    DEFERRED = "deferred"
 
 
 class DecisionStatus(StrEnum):

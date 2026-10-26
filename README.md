@@ -36,7 +36,20 @@ The v1 scope is deliberately small:
 
 - **Conversation with durable tasks.** A turn becomes one or more persisted
   tasks; a blocked task asks the user and resumes with the reply as a
-  constraint, without stopping unrelated tasks.
+  constraint, without stopping unrelated tasks. Tasks carry priority,
+  deadlines, dependencies, progress checkpoints, and a retry budget, and a
+  plan (proposed, accepted, or executed) is always distinct from its
+  execution evidence.
+- **Persistent work, recovery, and a heartbeat.** A lightweight scheduler
+  reconciles state on startup and on a configurable tick: interrupted tasks
+  are recovered, attempts left in flight block the task with an
+  `unknown_outcome` question instead of a blind retry, deferred work becomes
+  eligible when its window passes, overdue work is surfaced once, recoverable
+  failures are requeued after a cooldown up to a bounded retry limit, and
+  scheduled consolidation runs when due. Eligible work can run autonomously
+  through the exact same turn path (model, confirmation gates, permission
+  policy) as a user turn, and `harness status` answers what is working,
+  waiting, blocked, deferred, due, failed, or waiting on approval.
 - **Control plane and durable decisions.** Before planning or dispatching, a
   deterministic control plane resolves open proposals. Approvals, rejections,
   modifications, deferrals, cancellations, clarification questions, and
@@ -133,6 +146,7 @@ user text
 | Composition root | `harness/app.py` |
 | Contracts and protocols | `harness/contracts/` |
 | Control plane and decisions | `harness/control/` |
+| Scheduler heartbeat and work status | `harness/scheduler/` |
 | Orchestration | `harness/orchestrator/` |
 | File-backed managers | `harness/{settings,events,traces,session,domains,tasks,profile,memory,capabilities,consolidation}/` |
 | Model adapters | `harness/model/` |
@@ -646,9 +660,11 @@ python -m harness [--data-dir DIR] COMMAND
 
 | Command | Purpose |
 | --- | --- |
-| `serve` | Run the Starlette UI/API |
+| `serve` | Run the Starlette UI/API (also starts the scheduler heartbeat) |
 | `health` | Print the resolved data directory |
 | `turn TEXT` | Run one interaction and print messages |
+| `tick` | Run one scheduler heartbeat: recovery, reminders, maintenance, and eligible work |
+| `status` | Print the honest work status (working/waiting/blocked/deferred/due/failed) |
 | `consolidate` | Run one background consolidation pass |
 | `measure` | Print the learning report as JSON |
 | `eval` | Run the live deterministic-check eval suite |
@@ -747,6 +763,12 @@ Important groups:
 - `loop.*`: iteration/time/retry limits, honesty and internal-schema guards
 - `control.confirmation.*`: whether confirmation gating is enabled and which
   permission classes (or `all`) require a one-time decision
+- `scheduler.*`: `enabled` (heartbeat master switch), `interval_s` (tick
+  cadence while serving), `max_tasks_per_tick` (0 disables autonomous
+  execution while keeping recovery and reminders), `retry_cooldown_s`,
+  `max_task_retries` (bounded retry budget per task), and
+  `default_defer_hours` (window applied when the user defers a proposal
+  without naming a time)
 - `session.history_window`, `ui.*`, `events/traces.retention_days`
 
 V1.1 defaults are `response_format: json_schema`, `action_schema: strict`,
@@ -824,13 +846,89 @@ Important invariants:
 - All timestamps are UTC ISO-8601 (`Z`). Files are UTF-8 with LF endings and
   writes use a temporary file plus `os.replace`.
 
+## Persistent work, recovery, and autonomy
+
+Work is durable and evidence-based. A task row records its goal, state,
+priority, optional deadline, dependencies, progress checkpoints (bounded,
+most recent kept), deferral window, and how many times the scheduler has
+requeued it. Execution evidence stays in the attempt store: a task with no
+attempts is planned work, a task with attempts has been tried, and completion
+requires a succeeded attempt and/or a delivered response — a plan alone is
+never proof of progress.
+
+States distinguish the situations that matter: `ready` (eligible now),
+`running`, `blocked` (with an explicit reason: waiting on the user, waiting
+on approval, a dependency, an iteration/time limit, a temporarily missing
+model or capability, an interrupted run, or an unknown outcome),
+`deferred` (postponed until its window passes, or held by an open decision),
+`completed`, `failed`, and `cancelled`.
+
+### The heartbeat
+
+`WorkScheduler` (see `harness/scheduler/service.py`) is a deterministic scan
+over persisted tasks, decisions, and attempt evidence. On startup
+(`harness.on_start`) and on every tick it:
+
+1. marks a task whose last attempt was left `in_flight` by a crash as
+   `blocked: unknown_outcome`, creates a durable `reconciliation` decision
+   asking the user whether it completed, and never re-executes on its own;
+2. re-checks dependencies (releases stale dependency blocks; fails dependents
+   whose dependency failed or was cancelled);
+3. releases deferred work whose window has passed, unless an open decision
+   still holds it (a deferred "later" answer stays paused until the user
+   replies, not until the clock);
+4. requeues recoverable work (interrupted, `model_unavailable`,
+   `capability_unavailable`, or a failed task whose last attempt has a
+   retryable error category) after `scheduler.retry_cooldown_s`, counting
+   each resume against `scheduler.max_task_retries`; when the budget is
+   exhausted the task is marked failed with a `retry_limit` checkpoint and
+   surfaced, never retried again;
+5. surfaces an overdue task once (`task.due` event plus checkpoint);
+6. runs scheduled consolidation when `consolidation.schedule_enabled` and the
+   interval has elapsed (the web app's old private loop is gone; the
+   heartbeat owns it now);
+7. optionally runs up to `scheduler.max_tasks_per_tick` ready tasks through
+   `TurnService.run_ready` — the same serialized, gated turn path as a user
+   message.
+
+The scan never calls the model. The model is invoked only when real work runs
+(step 7) or consolidation extraction is enabled, so a quiet heartbeat costs
+file reads, not tokens. While `serve` is running, a daemon thread ticks
+every `scheduler.interval_s`; on the CLI, `harness tick` runs one heartbeat
+and `harness status` prints the report.
+
+### Autonomy boundaries
+
+The scheduler grants itself nothing. Autonomous execution reuses the normal
+loop, so capability permission policy, domain enablement, argument
+validation, the confirmation gate (a destructive operation still creates a
+pending decision and blocks), the honesty guard, and identical-retry
+rejection all apply unchanged. Work waiting on the user, an approval, a
+reconciliation answer, or an open decision is never auto-requeued or
+auto-run. Setting `scheduler.max_tasks_per_tick` to `0` keeps recovery,
+reminders, and maintenance while disabling autonomous execution entirely;
+`scheduler.enabled: false` disables the heartbeat itself (startup recovery
+still runs so interrupted work is never mistaken for runnable).
+
+### What requires the process to remain running
+
+- Ticks, autonomous execution, due reminders, and scheduled consolidation
+  happen only while `serve` (or a CLI `tick`) is running; nothing is lost
+  when it stops — the same deterministic recovery runs on the next start.
+- Deadlines and deferral windows are evaluated against persisted
+  timestamps, so they survive restarts; there is no wall-clock wake-up
+  (the process must be alive at a tick to notice).
+- Only one harness process may write a data directory; a reset quiesces the
+  heartbeat first via the same gate mechanism as turns.
+
 ## Decisions and confirmations
 
 A decision is a durable proposal, not an authorization. Each one has a stable
-`dec_*` id, kind (`action`, `plan`, or `domain_creation`), status (`pending`,
-`deferred`, `approved`, `rejected`, `cancelled`, `completed`, `failed`,
-`superseded`, `expired`), prompt, summary, scope, risk, linked task, and the
-proposal it describes. Files live under `<data>/decisions/dec_*.json`.
+`dec_*` id, kind (`action`, `plan`, `domain_creation`, or `reconciliation`),
+status (`pending`, `deferred`, `approved`, `rejected`, `cancelled`,
+`completed`, `failed`, `superseded`, `expired`), prompt, summary, scope, risk,
+linked task, and the proposal it describes. Files live under
+`<data>/decisions/dec_*.json`.
 
 The control plane runs before planning or execution on every turn. It syncs
 domain suggestions, resolves an explicit structure command, then asks the
@@ -858,9 +956,18 @@ an `act` proposal; neither grants permission.
 "yes, but don't restart" modifies a plan by removing matching steps before
 approval. If the exclusion removes every step or leaves arguments invalid, the
 decision stays pending and nothing executes. Deferred decisions remain open and
-can be approved later. Rejected or cancelled proposals are terminal and never
+can be approved later; the linked task is moved to `deferred` with a window
+from `scheduler.default_defer_hours`, and the open decision (not the clock)
+holds it until answered. Rejected or cancelled proposals are terminal and never
 dispatch. Conversation and full resets remove the decision log with the tasks
 and interactions it references.
+
+A `reconciliation` decision is created by the harness, not the model: when an
+attempt was left `in_flight` by an interruption, the linked task blocks with
+`unknown_outcome` and the user is asked whether the call completed. "Yes"
+records the completion as the outcome without re-executing; "no" requeues the
+work (counted against the retry budget) so the next attempt still passes the
+normal confirmation checks; cancelling it cancels the task.
 
 ## Domains
 
@@ -1021,7 +1128,9 @@ See [CODEMAP.md](CODEMAP.md) for module responsibilities and the data-flow map.
 | Startup fails on an unknown setting | A typo in `settings.yaml`. Fix it or restore a backup; retired keys are dropped automatically, but other unknown keys are not. |
 | `permission denied` writing `/data` | Bind-mounted data is not writable by UID 10001. `chown -R 10001:10001` the host directory or use the named volume. |
 | Container is unhealthy | Check `docker compose logs harness`; `/health` only proves the app opened its data directory, not that the model is reachable. |
-| Execution is `unknown` | The call may have happened. Reconcile before retrying; identical unknown write/destructive retries are rejected. |
+| Execution is `unknown` | The call may have happened. Reconcile before retrying; identical unknown write/destructive retries are rejected. A task blocked with `unknown_outcome` is waiting for your answer to its reconciliation question. |
+| Task stuck in `deferred` | Either its window has not passed, or an open decision still holds it; answer the pending decision (or approve it) to resume. |
+| Nothing runs automatically | Check `scheduler.enabled` and `scheduler.max_tasks_per_tick`; recovery and reminders work even when autonomous execution is 0/off. |
 | Two processes write the same data | Unsupported. Run exactly one harness process per data directory. |
 | Port already in use | Change `HARNESS_PORT` (host side). The container port stays `8080`. |
 

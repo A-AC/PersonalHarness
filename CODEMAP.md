@@ -11,7 +11,7 @@ composition/edge layer.
 
 | Path | Responsibility |
 | --- | --- |
-| `harness/__main__.py` | CLI: `serve`, `health`, `turn`, `consolidate`, `measure`, `eval`, `reset` |
+| `harness/__main__.py` | CLI: `serve`, `health`, `turn`, `tick`, `status`, `consolidate`, `measure`, `eval`, `reset` |
 | `harness/app.py` | `Harness` container and `build_harness()` wiring, including the structure hook (enter/leave/suggest with duplicate and cooldown checks) |
 | `harness/constants.py` | Schema version, ID prefixes, enums, reserved `self` id |
 | `harness/storage/atomic.py` | UTC timestamps, safe IDs/filenames, atomic JSON/text, JSONL append |
@@ -48,6 +48,7 @@ It has no concrete imports.
 | `memory.py` | Memory record/candidate/submit/usage (with lifecycle metadata), `RankedMemory` with `score_parts`, the optional `SemanticScorer` contract, and the manager protocol |
 | `model.py` | Message/result, model adapter protocol, `ModelError`/`ModelUnavailable` |
 | `profile.py` | Persona, draft, proposal, version, profile protocol |
+| `scheduler.py` | Tick item/report, work item/report, decision item, and the scheduler protocol |
 | `session.py` | Session/interaction and session-manager protocol |
 | `settings.py` | Setting definition/change, settings protocol, `SettingsError` |
 | `sources.py` | Source resolver protocol |
@@ -63,13 +64,13 @@ It has no concrete imports.
 | `harness/events/log.py` | Append-only event log with retention query |
 | `harness/traces/store.py` | Per-call trace files with prompt/inclusion/validation data |
 | `harness/session/manager.py` | Session resume (including old files without an active domain), append-only interactions with user/assistant timestamps, subject hits, persisted active domain |
-| `harness/session/turns.py` | `DefaultTurnService`: one serialized turn entry point for CLI and web, progress listener, trace/memory detail read model |
+| `harness/session/turns.py` | `DefaultTurnService`: one serialized turn entry point for CLI and web, progress listener, trace/memory detail read model, plus `run_ready` so the scheduler executes eligible work under the same lock and epoch gate |
 | `harness/domains/registry.py` | Self domain, explicit structure creation, suggestions, normalized suggestion cooldown, enablement, and a best-effort suggestion listener that mirrors lifecycle changes into the decision log |
 | `harness/domains/inference.py` | Read-only project inference: additive name/memory/task/history evidence plus a small active-domain bonus, confidence threshold and ambiguity margin, short project summaries; never creates, moves, or renames anything |
-| `harness/tasks/manager.py` | Task files, valid transitions, dependency release, sequencing, running-task domain reassignment; legacy rows with removed structure keys load by filtering to current fields |
+| `harness/tasks/manager.py` | Task files, valid transitions (including `deferred` and reason-only blocked changes), dependency release, priority-aware sequencing, checkpoints (bounded), deferral windows, counted resumes, running-task domain reassignment; legacy rows with removed structure keys load by filtering to current fields |
 | `harness/control/decisions.py` | File-backed decision log (`decisions/dec_*.json`), open/terminal queries, task/suggestion lookup, suggestion mirroring |
 | `harness/control/resolver.py` | Deterministic reading of a reply in decision context: explicit/contextual selection, ambiguity, approval/rejection/modification/defer/cancel, question vs unrelated request |
-| `harness/control/plane.py` | Turn coordination: structure commands, decision resolutions, plan/approved-action directives, confirmation gating, execution recording, task cancellation |
+| `harness/control/plane.py` | Turn coordination: structure commands, decision resolutions (including reconciliation decisions for interrupted/unknown-outcome attempts), plan/approved-action directives, confirmation gating, task deferral on a deferred decision, execution recording, task cancellation |
 | `harness/profile/provider.py` | Persona versions and proposed edits |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
@@ -83,15 +84,16 @@ It has no concrete imports.
 | `harness/context/builder.py` | Query-driven budgeted context: cross-project memory retrieval with priority scopes (self stays on demand), per-item memory trimming that drops whole blocks, project summary and stats, pending decisions for the task or its project protected from trimming, bounded active-domain directory that drops whole entries, persona-trim fallback when the total budget cannot fit the safety instructions, prompt variant, local current-time block, age markers, memory tags with kind/lifecycle, bounded history, capability disclosure with enum values/defaults, and inclusion/exclusion/budget stats |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
 | `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`); memory enums/defaults generated from `constants` |
-| `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records |
+| `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records, one-scan attempts-by-task index |
 | `harness/capabilities/skills.py` | `SKILL.md` discovery |
 | `harness/capabilities/mcp.py` | Optional stdio MCP discovery/call via the official SDK |
 | `harness/orchestrator/parse.py` | Pydantic parsing, loose/strict proposal JSON schemas, actionable parse errors |
 | `harness/orchestrator/machine.py` | Allowed-state and action-transition rules |
-| `harness/orchestrator/loop.py` | Turn handling through the control plane, approved-action dispatch, heuristic/LLM planning with the domain directory, active-domain hint plus project inference for tasks with no planner domain (logged as `plan.domain_inference`, session selection preserved), multi-word suggestion gate, task loop, retry cap, confirmation gate, honesty/internal-schema guards, turn timeline and metrics |
+| `harness/orchestrator/loop.py` | Turn handling through the control plane, approved-action dispatch, heuristic/LLM planning with the domain directory, active-domain hint plus project inference for tasks with no planner domain (logged as `plan.domain_inference`, session selection preserved), multi-word suggestion gate, task loop, retry cap, confirmation gate, honesty/internal-schema guards, `run_ready` background execution path (same per-task loop, checkpoint per run, turn trace), turn timeline and metrics |
 | `harness/orchestrator/timeline.py` | Per-turn stage recorder (start offset, duration, detail) serialized into traces |
-| `harness/consolidation/service.py` | Evidence snapshot, optional model extraction, deterministic retype/merge/supersede pass, run report, rollback |
+| `harness/consolidation/service.py` | Evidence snapshot, optional model extraction, deterministic retype/merge/supersede pass, run report, rollback (run listing excludes `.input.json` snapshots) |
 | `harness/maintenance/reset.py` | Full/selective state wipe, timestamped backup archive, seed re-application, stale-reference scrub, reset audit event |
+| `harness/scheduler/service.py` | `WorkScheduler`: deterministic heartbeat (startup reconcile + ticks) over persisted tasks/decisions/attempts — unknown-outcome reconciliation decisions, dependency re-checks, deferred-window release, bounded/cooled requeues, one-time due reminders, scheduled consolidation, and bounded autonomous execution through the turn service; honest-status read model (`report()`), daemon-thread start/stop, and an `exclusive` reset gate |
 | `harness/model/scripted.py` | Deterministic test adapter |
 | `harness/model/openai_http.py` | OpenAI-compatible HTTP adapter and health probe |
 | `harness/measure.py` | Learning report from stored events/tasks/memories/usage |
@@ -239,7 +241,11 @@ Memory policy is settings-driven: `memory.duplicate_overlap`,
 `memory.conflict_containment`/`conflict_overlap`, classifier rules,
 `memory.consolidation.retype`, `memory.capture.execution_outcomes`,
 `consolidation.extract_enabled`, `consolidation.schedule_enabled`/
-`schedule_interval_s`, and the source policy.
+`schedule_interval_s` (the scheduler heartbeat runs the periodic pass), and
+the source policy. The `scheduler.*` group configures the heartbeat:
+`enabled`, `interval_s`, `max_tasks_per_tick` (0 keeps recovery/reminders but
+disables autonomous execution), `retry_cooldown_s`, `max_task_retries`, and
+`default_defer_hours`.
 The type-to-kind mapping is structural and needs no setting.
 `ui.chat_stream_tokens` controls raw token display in the chat panel,
 `ui.sse_heartbeat_s` controls SSE keepalive comments,
@@ -255,6 +261,50 @@ The trace id is generated before context construction so memory usage rows,
 traces, and model-call events share an id. Each execution attempt is stored
 before dispatch as `in_flight` and completed with `started_at`, `ended_at`,
 `confirmation`, and a monotonic `sequence` used for deterministic ordering.
+
+## Persistent work and the heartbeat
+
+`WorkScheduler` (`harness/scheduler/service.py`) is the single background
+mechanism; it owns no execution path of its own. `reconcile()` runs at
+startup (and as the first phase of every tick) and is purely deterministic:
+it blocks interrupted tasks whose last attempt is still `in_flight` with
+`unknown_outcome` plus a durable `reconciliation` decision, re-checks
+dependencies (release stale blocks, fail dependents of failed/cancelled
+dependencies), and releases deferred windows. `tick()` adds the recovery and
+progress steps: requeue of recoverable work after `scheduler.retry_cooldown_s`
+bounded by `scheduler.max_task_retries` (exhaustion marks the task failed
+with a `retry_limit` checkpoint and a `task.retry_exhausted` event, once),
+one-time `task.due` reminders, scheduled consolidation (the web app's old
+private loop is gone; the heartbeat owns it), and finally up to
+`scheduler.max_tasks_per_tick` ready tasks executed through
+`DefaultTurnService.run_ready` — the same lock, model, action machine,
+confirmation gate, and executor as a user turn. Open decisions always hold
+their task: nothing waiting on the user, an approval, or a reconciliation
+answer is auto-requeued or auto-run, and a deferred decision (not the clock)
+resumes deferred work.
+
+```text
+startup / scheduler.interval_s (serve thread) / harness tick (CLI)
+  -> reconcile: unknown-outcome attempts -> reconciliation decision
+  -> dependency re-check, deferred-window release
+  -> recoverable requeue (cooldown + retry budget) or retry-limit failure
+  -> due reminder (once per deadline)
+  -> scheduled consolidation when due
+  -> run ready tasks via TurnService.run_ready (checkpoint + turn trace)
+  -> scheduler.tick event (only when something happened)
+```
+
+`scheduler.enabled` gates the tick (startup recovery still runs, so
+interrupted work is never mistaken for runnable); `max_tasks_per_tick: 0`
+disables autonomous execution while keeping recovery and reminders. The
+honest-status read model (`report()`, printed by `harness status` and shown
+on the UI tasks page) answers what is working, waiting on the user, blocked
+and why, deferred, due, failed, completed recently, and what needs approval,
+with per-task attempt evidence summarized from one attempt-directory scan.
+The reset service quiesces the scheduler first (`gates=[scheduler.exclusive,
+chat.exclusive, ...]`) so a wipe never interleaves with a tick; the tick
+thread holds the same lock for its whole duration and its runner takes the
+turn lock, so background work is fully serialized with user turns.
 
 ## Memory lifecycle
 
@@ -385,9 +435,10 @@ removed top-level path with file/byte counts, the backup path, seeded items,
 cleared stale references, and duration; the CLI prints it, the UI renders it,
 and a `reset.run` event records the same data.
 
-Safety: reset enters the turn service's exclusive epoch gate first, so an
-in-flight turn finishes before the wipe and turns queued behind it are rejected;
-it also waits for history-summary and consolidation workers. A conversation
+Safety: reset enters the scheduler's exclusive gate first (quiescing the
+heartbeat before it can queue work), then the turn service's exclusive epoch
+gate, so an in-flight turn finishes before the wipe and turns queued behind
+it are rejected; it also waits for history-summary and consolidation workers. A conversation
 reset drops conversation-derived tasks instead of leaving them pointing at
 missing interactions. A memory reset scrubs memory ids from retained traces,
 events, and attempts and drops memory-operation attempts. A conversation reset
@@ -411,7 +462,7 @@ The CLI is `harness reset [--scope full|memories|conversations] [--yes]
 | `history/segments/seg_*.json` | Stored history segment, covered interaction ids, rolling summary, status/error, and summary token counts |
 | `registry/domains/*.json` | Domain records, including reserved `self` |
 | `registry/suggestions/*.json` | Suggested domains and status/cooldown |
-| `tasks/tsk_*.json` | Task state, constraints, outcome, flags, sequence |
+| `tasks/tsk_*.json` | Task state, constraints, outcome, flags, sequence, priority, due/defer windows, progress checkpoints, resume count |
 | `decisions/dec_*.json` | Durable decision/proposal, status, scope, risk, resolution, execution history |
 | `persona/persona.json` | Current persona version |
 | `persona/history.json` | Persona version history |

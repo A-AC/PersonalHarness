@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from harness.constants import (
@@ -38,6 +39,14 @@ _STRUCTURE_CREATE = re.compile(
     r"(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?domain(?:\s+(?:where|about|for|to talk about))?\s*[:\-]?\s*(.*)",
     re.IGNORECASE,
 )
+
+
+def _later_ts(seconds: float) -> str:
+    return (
+        (datetime.now(timezone.utc) + timedelta(seconds=seconds))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 class DefaultControlPlane:
@@ -237,6 +246,9 @@ class DefaultControlPlane:
                     decision_ids=[decision.id],
                 )
 
+        if decision.kind == "reconciliation":
+            return self._confirm_reconciliation(decision, interaction_id)
+
         if decision.kind == "plan":
             steps = [
                 step
@@ -329,6 +341,8 @@ class DefaultControlPlane:
                 except (KeyError, ValueError):
                     pass
             message = "Okay, I won't create that domain."
+        elif decision.kind == "reconciliation":
+            return self._reject_reconciliation(decision, interaction_id)
         else:
             if decision.task_id and not self._has_other_open(decision):
                 self._cancel_task(
@@ -355,11 +369,40 @@ class DefaultControlPlane:
         decision.resolution_interaction_id = interaction_id
         decision = self._decisions.update(decision)
         self._record_resolution(decision, "deferred", interaction_id)
+        defer_note = ""
+        if decision.task_id and decision.kind != "domain_creation":
+            task = self._get_task(decision.task_id)
+            if task is not None and task.state not in {
+                TaskState.CANCELLED,
+                TaskState.COMPLETED,
+                TaskState.FAILED,
+            }:
+                # The deferred decision still holds the task: the scheduler
+                # will not release it while the decision stays open, so a
+                # later "yes" (not the clock) resumes the work.
+                try:
+                    hours = float(self._settings.get("scheduler.default_defer_hours"))
+                    until = None
+                    if hours > 0:
+                        until = _later_ts(hours * 3600.0)
+                    self._tasks.defer(
+                        task.id,
+                        until,
+                        reason="user deferred the pending proposal",
+                    )
+                    defer_note = (
+                        f" The work stays paused until you answer (window: {until or 'indefinite'})."
+                        if until
+                        else " The work stays paused until you answer."
+                    )
+                except ValueError:
+                    pass
         return ControlDirective(
             mode="handled",
             intent="defer",
             messages=[
                 f"Deferred: {decision.summary}. I haven't run it; tell me when you want to proceed."
+                + defer_note
             ],
             decision_ids=[decision.id],
         )
@@ -582,6 +625,89 @@ class DefaultControlPlane:
                 + "; ".join(errors)
                 + f". {decision.summary} is still pending."
             ],
+            decision_ids=[decision.id],
+        )
+
+    # ---------------------------------------------------- reconciliation
+    def _confirm_reconciliation(self, decision: Decision, interaction_id: str) -> ControlDirective:
+        """The user confirmed an unknown-outcome attempt actually completed.
+
+        No execution happens here. The user's answer is the evidence; the
+        task is closed honestly with that provenance recorded.
+        """
+        proposal = decision.proposal or {}
+        operation_id = str(proposal.get("operation_id") or "")
+        label = str(proposal.get("capability") or "?") + "." + str(proposal.get("operation") or "?")
+        message = f"Understood: you confirmed {label} completed. I've recorded that as the outcome."
+        task = self._get_task(decision.task_id) if decision.task_id else None
+        if task is not None and task.state not in {
+            TaskState.CANCELLED,
+            TaskState.COMPLETED,
+        }:
+            self._tasks.record_checkpoint(
+                task.id,
+                "User confirmed the interrupted action completed; outcome recorded without re-execution.",
+                {"operation_id": operation_id},
+            )
+            self._tasks.mark_succeeded_execution(task.id)
+            try:
+                self._tasks.transition(task.id, TaskState.COMPLETED, reason=None)
+                self._tasks.record_outcome(
+                    task.id,
+                    TaskOutcome(
+                        summary=f"User confirmed {label} completed after an unknown-outcome interruption.",
+                        status=TaskState.COMPLETED.value,
+                        data={"confirmed_by": "user", "operation_id": operation_id},
+                    ),
+                )
+            except ValueError:
+                pass
+        else:
+            message = f"Thanks — I recorded that {label} completed. The linked task is no longer active."
+        decision.status = DecisionStatus.COMPLETED.value
+        decision.resolution = "confirmed"
+        decision.resolution_text = "User confirmed the interrupted action completed; it was not re-executed."
+        decision.consumed_at = now_ts()
+        self._decisions.update(decision)
+        return ControlDirective(
+            mode="handled",
+            intent="approve",
+            messages=[message],
+            decision_ids=[decision.id],
+        )
+
+    def _reject_reconciliation(self, decision: Decision, interaction_id: str) -> ControlDirective:
+        """The user says the unknown-outcome attempt did not complete.
+
+        The work is requeued (bounded by the scheduler's retry budget), never
+        blindly repeated: the next attempt goes through the normal loop and
+        its own confirmation gates.
+        """
+        proposal = decision.proposal or {}
+        label = str(proposal.get("capability") or "?") + "." + str(proposal.get("operation") or "?")
+        message = (
+            f"Understood — {label} did not complete. I'll treat it as unfinished; "
+            "it stays queued and any retry still goes through the normal confirmation checks."
+        )
+        task = self._get_task(decision.task_id) if decision.task_id else None
+        if task is not None and task.state in {
+            TaskState.BLOCKED,
+            TaskState.DEFERRED,
+            TaskState.FAILED,
+        }:
+            try:
+                self._tasks.resume(task.id, reason="user said the unknown-outcome attempt did not complete")
+                self._tasks.record_checkpoint(
+                    task.id,
+                    "User said the interrupted action did not complete; requeued.",
+                    {"operation_id": str(proposal.get("operation_id") or "")},
+                )
+            except ValueError:
+                message = f"Understood — {label} did not complete. The linked task is no longer resumable."
+        return ControlDirective(
+            mode="handled",
+            intent="reject",
+            messages=[message],
             decision_ids=[decision.id],
         )
 
