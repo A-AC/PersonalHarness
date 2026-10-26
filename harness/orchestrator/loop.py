@@ -245,7 +245,7 @@ class DefaultInteractionLoop:
             suggestion = pending[0]
             if affirmative:
                 created = self._domains.confirm_suggestion(suggestion.id)
-                return [f"Created {suggestion.draft.kind} '{created.name}' ({created.id})."]
+                return [f"Created domain '{created.name}' ({created.id})."]
             self._domains.decline_suggestion(suggestion.id)
             return ["Okay, I won't create that. I'll wait before suggesting it again."]
 
@@ -270,29 +270,23 @@ class DefaultInteractionLoop:
             # structure directory and can report an unknown name itself.
             return None
 
-        for kind, pattern in (
-            ("domain", r"(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?domain(?:\s+(?:where|about|for|to talk about))?\s*[:\-]?\s*(.*)"),
-            ("project", r"(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?project(?:\s+(?:where|about|for|called|named))?\s*[:\-]?\s*(.*)"),
-        ):
-            match = re.search(pattern, lowered)
-            if not match:
-                continue
+        match = re.search(
+            r"(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?domain(?:\s+(?:where|about|for|to talk about))?\s*[:\-]?\s*(.*)",
+            lowered,
+        )
+        if match:
             name = text[match.start(1) :].strip().strip(".?!\"'")
             name = re.sub(r"^(?:where\s+)?(?:we(?:'ll| will)?\s+(?:talk|work)\s+(?:about|on)\s+)", "", name).strip()
             name = re.sub(r"^(?:about|for|on)\s+", "", name).strip()
             if not name:
-                return [f"What should the {kind} be about?"]
+                return ["What should the domain be about?"]
             draft = StructureDraft(
-                kind=kind,
                 name=name,
                 reason="explicit user command",
                 evidence=f"user said: {text}",
             )
-            if kind == "domain":
-                created = self._domains.create_domain(draft, confirmed=True)
-            else:
-                created = self._domains.create_project(draft, confirmed=True)
-            return [f"Created {kind} '{created.name}' ({created.id}). You can rename or archive it in the UI."]
+            created = self._domains.create_domain(draft, confirmed=True)
+            return [f"Created domain '{created.name}' ({created.id}). You can rename or archive it in the UI."]
         return None
 
     def _plan_tasks(
@@ -339,7 +333,7 @@ class DefaultInteractionLoop:
             self._finish_trace(trace, interaction_id, timeline)
             create_started = time.monotonic()
             created = self._create_plan_tasks(
-                [{"goal": user_text, "domain_name": None, "project_name": None, "depends_on": []}],
+                [{"goal": user_text, "domain_name": None, "depends_on": []}],
                 user_text,
                 interaction_id,
                 trace_id=trace_id,
@@ -418,7 +412,7 @@ class DefaultInteractionLoop:
             )
             self._finish_trace(trace, interaction_id, timeline)
         if not plan:
-            plan = [{"goal": user_text, "domain_name": None, "project_name": None, "depends_on": []}]
+            plan = [{"goal": user_text, "domain_name": None, "depends_on": []}]
         create_started = time.monotonic()
         created = self._create_plan_tasks(
             plan, user_text, interaction_id, trace_id=trace_id, timeline=timeline
@@ -443,7 +437,7 @@ class DefaultInteractionLoop:
                 if isinstance(idx, int) and 0 <= idx < len(created):
                     depends.append(created[idx].id)
             # Tasks without a named domain inherit the session's active domain,
-            # so domain-scoped memory accumulates for the workspace the user is
+            # so domain-scoped memory accumulates for the topic the user is
             # working in (including the code-only heuristic plan).
             domain_id: str | None = active_domain
             name = spec.get("domain_name")
@@ -459,29 +453,11 @@ class DefaultInteractionLoop:
                         misses.append(
                             {"kind": "domain", "requested": text, "candidates": candidates}
                         )
-            project_id: str | None = None
-            project_name = spec.get("project_name")
-            if project_name:
-                project, candidates = match_by_name(
-                    self._domains.list_projects(), str(project_name)
-                )
-                if project is not None:
-                    project_id = project.id
-                    domain_id = project.domain_id
-                else:
-                    misses.append(
-                        {
-                            "kind": "project",
-                            "requested": str(project_name),
-                            "candidates": candidates,
-                        }
-                    )
             created.append(
                 self._tasks.create(
                     TaskSpec(
                         goal=str(spec.get("goal") or user_text),
                         domain_id=domain_id,
-                        project_id=project_id,
                         depends_on=depends,
                         interaction_id=interaction_id,
                     )
@@ -548,7 +524,6 @@ class DefaultInteractionLoop:
         threshold = float(self._settings.get("domain.match_overlap"))
         if any(
             item.status == "pending"
-            and item.draft.kind == "domain"
             and (
                 normalize_name(item.draft.name) == normalize_name(key)
                 or name_overlap(item.draft.name, key) >= threshold
@@ -557,7 +532,7 @@ class DefaultInteractionLoop:
         ):
             return None
         self._domains.record_suggestion(
-            StructureDraft(kind="domain", name=key, reason="repeated subject hits", evidence=f"hits={hits}")
+            StructureDraft(name=key, reason="repeated subject hits", evidence=f"hits={hits}")
         )
         return f"We've talked about this a few times, want me to create a domain for '{' '.join(words)}'?"
 
@@ -769,7 +744,6 @@ class DefaultInteractionLoop:
                         operation=proposal.operation,
                         arguments=proposal.arguments,
                         interaction_id=interaction_id,
-                        project_id=task.project_id,
                         self_request=self_request,
                     )
                 )
@@ -1159,7 +1133,6 @@ class DefaultInteractionLoop:
             prior_execution, prior_memory_id = prior
             self._outcomes.record(
                 execution,
-                project_id=task.project_id,
                 domain_id=task.domain_id,
                 self_request=self_request,
                 prior_failure=prior_execution,
@@ -1169,7 +1142,6 @@ class DefaultInteractionLoop:
             return
         capture = self._outcomes.record(
             execution,
-            project_id=task.project_id,
             domain_id=task.domain_id,
             self_request=self_request,
         )

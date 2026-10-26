@@ -10,6 +10,7 @@ pytest.importorskip("jinja2")
 
 from harness.contracts.domains import StructureDraft  # noqa: E402
 from harness.contracts.memory import MemoryCandidate  # noqa: E402
+from harness.contracts.tasks import TaskSpec  # noqa: E402
 from harness.ui.web import create_app  # noqa: E402
 from tests.conftest import act, plan, respond  # noqa: E402
 
@@ -176,7 +177,7 @@ def test_chat_page_is_a_scrollable_panel_with_the_composer_inside(make_harness) 
 def test_chat_shows_active_domain_and_selector_outside_the_stream(make_harness) -> None:
     h = make_harness([])
     domain = h.domains.create_domain(
-        StructureDraft("domain", "Home Lab", "test", "test"), confirmed=True
+        StructureDraft(name="Home Lab", reason="test", evidence="test"), confirmed=True
     )
     h.sessions.set_active_domain(domain.id)
 
@@ -417,3 +418,41 @@ def test_chat_shows_retrieved_memories(make_harness) -> None:
     assert page.status_code == 200
     assert "memories retrieved" in page.text
     assert "the bluefin code word is bluefin" in page.text
+
+
+def test_domains_page_lists_only_domains_and_keeps_actions(make_harness) -> None:
+    h = make_harness([])
+    domain = h.domains.create_domain(
+        StructureDraft(name="Home Lab", reason="test", evidence="test"), confirmed=True
+    )
+    suggestion = h.domains.record_suggestion(
+        StructureDraft(name="Future Lab", reason="test", evidence="test")
+    )
+
+    page = _request(h, "GET", "/domains")
+    assert page.status_code == 200
+    assert "Home Lab" in page.text
+    assert suggestion.id in page.text
+    assert "Projects" not in page.text
+    assert "memory scope" not in page.text
+    assert ">rename<" in page.text and ">archive<" in page.text
+    assert ">confirm<" in page.text and ">decline<" in page.text
+
+    renamed = _request(h, "POST", "/domains", f"id={domain.id}&action=rename&name=Home+Lab")
+    assert renamed.status_code == 303
+    assert h.domains.get_domain(domain.id).name == "Home Lab"
+
+    archived = _request(h, "POST", "/domains", f"id={domain.id}&action=archive")
+    assert archived.status_code == 303
+    assert h.domains.get_domain(domain.id).archived is True
+
+
+def test_tasks_page_has_no_project_column(make_harness) -> None:
+    h = make_harness([])
+    task = h.tasks.create(TaskSpec(goal="check nas"))
+
+    page = _request(h, "GET", "/tasks")
+    assert page.status_code == 200
+    assert task.id in page.text
+    assert "check nas" in page.text
+    assert "<th>project</th>" not in page.text

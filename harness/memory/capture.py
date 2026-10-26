@@ -37,12 +37,8 @@ EXCLUDED_CAPABILITIES = {"harness_memory", "harness_structure"}
 FINGERPRINT_KEYS = ("capability", "operation", "status", "error_category")
 
 
-def derived_scope(
-    *, project_id: str | None, domain_id: str | None, self_request: bool
-) -> str:
-    """Project wins, then a non-self domain, then self, then global."""
-    if project_id:
-        return f"project:{project_id}"
+def derived_scope(*, domain_id: str | None, self_request: bool) -> str:
+    """A non-self domain wins, then self, then global."""
     if domain_id == SELF_DOMAIN_ID or self_request:
         return MemoryScopeKind.SELF.value
     if domain_id:
@@ -74,7 +70,6 @@ class ExecutionOutcomeCapture(ExecutionOutcomeRecorder):
         self,
         execution: ExecutionResult,
         *,
-        project_id: str | None,
         domain_id: str | None,
         self_request: bool,
         prior_failure: ExecutionResult | None = None,
@@ -91,9 +86,7 @@ class ExecutionOutcomeCapture(ExecutionOutcomeRecorder):
         elif execution.status not in CAPTURED_STATUSES:
             return None
 
-        scope = derived_scope(
-            project_id=project_id, domain_id=domain_id, self_request=self_request
-        )
+        scope = derived_scope(domain_id=domain_id, self_request=self_request)
         fingerprint = {
             "capability": str(execution.capability),
             "operation": str(execution.operation),

@@ -83,7 +83,7 @@ def test_permission_override_and_writable_policy_allow_write(make_harness) -> No
 
 def test_domain_enablement_denies_unlisted_capabilities(make_harness) -> None:
     h = make_harness([])
-    domain = h.domains.create_domain(StructureDraft("domain", "homelab", "test", "test"), confirmed=True)
+    domain = h.domains.create_domain(StructureDraft(name="homelab", reason="test", evidence="test"), confirmed=True)
     h.domains.set_enablement(domain.id, [])
     denied = h.capabilities.execute(req("mock", "ping", domain_id=domain.id))
     assert denied.status == ExecutionStatus.DENIED
@@ -261,7 +261,7 @@ def test_memory_defaults_type_and_derives_scope_from_task(make_harness) -> None:
     from harness.contracts.domains import StructureDraft
 
     h = make_harness([])
-    domain = h.domains.create_domain(StructureDraft("domain", "homelab", "test", "test"), confirmed=True)
+    domain = h.domains.create_domain(StructureDraft(name="homelab", reason="test", evidence="test"), confirmed=True)
     interaction = h.sessions.record_interaction("Remember the NAS address")
     result = h.capabilities.execute(
         req(

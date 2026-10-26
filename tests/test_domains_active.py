@@ -7,8 +7,8 @@ from harness.contracts.tasks import TaskSpec
 from tests.conftest import ask, plan, respond
 
 
-def draft(name: str, kind: str = "domain", **kwargs) -> StructureDraft:
-    return StructureDraft(kind=kind, name=name, reason="test", evidence="test", **kwargs)
+def draft(name: str, **kwargs) -> StructureDraft:
+    return StructureDraft(name=name, reason="test", evidence="test", **kwargs)
 
 
 def test_explicit_switch_command_sets_active_domain_without_creating(make_harness) -> None:
@@ -134,29 +134,6 @@ def test_suggestion_hook_suppresses_existing_pending_and_cooldown(make_harness) 
     assert cooldown.status == ExecutionStatus.FAILED
     assert cooldown.data["cooldown"] is True
     assert len(h.domains.list_suggestions()) == 1
-
-
-def test_suggest_project_defaults_to_the_active_domain(make_harness) -> None:
-    h = make_harness([])
-    domain = h.domains.create_domain(draft("homelab"), confirmed=True)
-    h.sessions.set_active_domain(domain.id)
-    task = h.tasks.create(TaskSpec(goal="structure"))
-
-    result = h.capabilities.execute(
-        ExecuteRequest(
-            task_id=task.id,
-            domain_id=domain.id,
-            capability="harness_structure",
-            operation="suggest_project",
-            arguments={"name": "nas upgrade"},
-        )
-    )
-    assert result.status == ExecutionStatus.SUCCEEDED
-    suggestion = h.domains.list_suggestions()[0]
-    assert suggestion.draft.kind == "project"
-    assert suggestion.draft.domain_id == domain.id
-    created = h.domains.confirm_suggestion(suggestion.id)
-    assert created.domain_id == domain.id
 
 
 def test_bare_yes_does_not_confirm_when_a_task_awaits_the_user(make_harness) -> None:

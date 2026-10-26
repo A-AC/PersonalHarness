@@ -40,7 +40,6 @@ CONSOLIDATION_SCHEMA = {
                     "operating_principles": {"type": "array", "items": {"type": "string"}},
                     "reason": {"type": "string"},
                     "finding": {"type": "string"},
-                    "structure_kind": {"type": "string"},
                 },
             },
         },
@@ -272,7 +271,6 @@ class FileConsolidationService:
             return {"kind": kind, "status": "finding", "message": "structural defect; not stored as memory"}
         if kind == "domain_suggestion":
             draft = StructureDraft(
-                kind="project" if proposal.get("structure_kind") == "project" else "domain",
                 name=str(proposal.get("name") or content or "untitled"),
                 reason=str(proposal.get("reason") or "consolidation suggestion"),
                 evidence=f"consolidation run {run_id}",

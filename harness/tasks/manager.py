@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from harness.constants import BlockReason, TaskState
@@ -53,6 +53,10 @@ class FileTaskManager:
         outcome = data.get("outcome")
         if outcome:
             data["outcome"] = TaskOutcome(**outcome)
+        # Legacy task rows may carry structure keys that this release removed.
+        # Keep the row loadable by passing only fields the contract still has.
+        known = {item.name for item in fields(Task)}
+        data = {key: value for key, value in data.items() if key in known}
         return Task(**data)
 
     def create(self, spec: TaskSpec) -> Task:
@@ -73,8 +77,6 @@ class FileTaskManager:
             created_at=ts,
             updated_at=ts,
             domain_id=spec.domain_id,
-            project_id=spec.project_id,
-            workspace_id=spec.workspace_id,
             depends_on=list(spec.depends_on),
             constraints=list(spec.constraints),
             block_reason=reason,
@@ -168,18 +170,9 @@ class FileTaskManager:
         self._save(task)
         return task
 
-    def assign_structure(
-        self,
-        task_id: str,
-        *,
-        domain_id: str | None,
-        project_id: str | None,
-        workspace_id: str | None,
-    ) -> Task:
+    def assign_domain(self, task_id: str, domain_id: str | None) -> Task:
         task = self._load(task_id)
         task.domain_id = domain_id
-        task.project_id = project_id
-        task.workspace_id = workspace_id
         task.updated_at = now_ts()
         self._save(task)
         self._events.append(
@@ -187,14 +180,10 @@ class FileTaskManager:
                 id=new_id("evt"),
                 ts=task.updated_at,
                 actor="harness",
-                operation="task.structure",
+                operation="task.domain",
                 target=task.id,
                 result="ok",
-                data={
-                    "domain_id": domain_id,
-                    "project_id": project_id,
-                    "workspace_id": workspace_id,
-                },
+                data={"domain_id": domain_id},
             )
         )
         return task

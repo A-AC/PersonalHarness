@@ -4,7 +4,7 @@ from harness.contracts.capabilities import CapabilityExecutor, ExecuteRequest, M
 from harness.contracts.chat import MemoryUse, MemoryWrite, TurnDetail, TurnService
 from harness.contracts.context import ContextPackage, ContextBuilder, ContextSection, InclusionRecord
 from harness.contracts.consolidation import ConsolidationRun, ConsolidationService
-from harness.contracts.domains import Domain, DomainRegistry, Project, StructureDraft, Suggestion, Workspace
+from harness.contracts.domains import Domain, DomainRegistry, StructureDraft, Suggestion
 from harness.contracts.events import Event, EventLog
 from harness.contracts.history import HistoryNote, HistorySegment, HistoryService, HistoryView
 from harness.contracts.loop import InteractionLoop, TurnEvent, TurnListener, TurnResult
@@ -76,7 +76,6 @@ __all__ = [
     "PersonaDraft",
     "PersonaProposal",
     "PersonaVersion",
-    "Project",
     "Proposal",
     "RankedMemory",
     "RemovedState",
@@ -105,5 +104,4 @@ __all__ = [
     "TurnResult",
     "TurnService",
     "UsageEntry",
-    "Workspace",
 ]

@@ -401,8 +401,6 @@ class FileCapabilityExecutor:
     @staticmethod
     def _derived_scope(req: ExecuteRequest) -> str:
         """The authoritative default scope, independent of the model hint."""
-        if req.project_id:
-            return f"project:{req.project_id}"
         if req.domain_id == SELF_DOMAIN_ID or req.self_request:
             return MemoryScopeKind.SELF.value
         if req.domain_id:

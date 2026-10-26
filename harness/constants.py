@@ -13,8 +13,6 @@ ID_PREFIXES = (
     "ses",
     "tsk",
     "dom",
-    "prj",
-    "wks",
     "mem",
     "run",
     "op",
@@ -85,7 +83,7 @@ class MemoryScopeKind(StrEnum):
 
 # Scoped memory ids are dynamic, so they are disclosed as patterns rather than
 # a closed enum. The capability description and the validator both use these.
-MEMORY_SCOPE_PREFIXES = ("domain", "project")
+MEMORY_SCOPE_PREFIXES = ("domain",)
 
 
 class MemoryOrigin(StrEnum):

@@ -86,12 +86,11 @@ merge it with the new conversation instead of starting over.
 
 TASK_PLAN_INSTRUCTIONS = """
 Split the user request into independently tracked tasks.
-Return JSON: {"tasks":[{"goal":"...","domain_name":null,"project_name":null,"depends_on":[]}]}
+Return JSON: {"tasks":[{"goal":"...","domain_name":null,"depends_on":[]}]}
 A structure directory follows this instruction block. Reuse an exact existing
-domain or project name from that directory only when the request clearly
-belongs to it.
-Do not invent new domains or projects: persistent structure requires explicit
-user confirmation.
+domain name from that directory only when the request clearly belongs to it.
+Do not invent new domains: persistent structure requires explicit user
+confirmation.
 If the request names something that is not an exact entry in the directory,
 leave domain_name null. The harness falls back to the active domain; never
 invent a name.

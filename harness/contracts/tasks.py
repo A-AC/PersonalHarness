@@ -8,8 +8,6 @@ from typing import Any, Protocol
 class TaskSpec:
     goal: str
     domain_id: str | None = None
-    project_id: str | None = None
-    workspace_id: str | None = None
     depends_on: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
     interaction_id: str | None = None
@@ -30,8 +28,6 @@ class Task:
     created_at: str
     updated_at: str
     domain_id: str | None = None
-    project_id: str | None = None
-    workspace_id: str | None = None
     depends_on: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
     block_reason: str | None = None
@@ -52,13 +48,6 @@ class TaskManager(Protocol):
     def append_constraint(self, task_id: str, text: str) -> Task: ...
     def mark_delivered(self, task_id: str, message: str) -> Task: ...
     def mark_succeeded_execution(self, task_id: str) -> Task: ...
-    def assign_structure(
-        self,
-        task_id: str,
-        *,
-        domain_id: str | None,
-        project_id: str | None,
-        workspace_id: str | None,
-    ) -> Task: ...
+    def assign_domain(self, task_id: str, domain_id: str | None) -> Task: ...
     def next_ready(self) -> Task | None: ...
     def on_process_start(self) -> list[Task]: ...
