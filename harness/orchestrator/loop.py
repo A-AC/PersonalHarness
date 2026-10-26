@@ -258,8 +258,10 @@ class DefaultInteractionLoop:
                     f"I found more than one domain for '{name}': "
                     f"{', '.join(candidates)}. Please use the exact name."
                 ]
-            names = ", ".join(item.name for item in self._domains.list_domains()) or "none"
-            return [f"I don't know a domain named '{name}'. Available domains: {names}."]
+            # No match: this is probably ordinary prose ("work on the parser
+            # bug"), so fall through to normal planning. The model sees the
+            # structure directory and can report an unknown name itself.
+            return None
 
         for kind, pattern in (
             ("domain", r"(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?domain(?:\s+(?:where|about|for|to talk about))?\s*[:\-]?\s*(.*)"),

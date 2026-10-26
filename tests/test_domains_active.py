@@ -12,7 +12,7 @@ def draft(name: str, kind: str = "domain", **kwargs) -> StructureDraft:
 
 
 def test_explicit_switch_command_sets_active_domain_without_creating(make_harness) -> None:
-    h = make_harness([])
+    h = make_harness([plan("switch to nowhere"), respond("I don't have a domain named nowhere.")])
     domain = h.domains.create_domain(draft("Home Lab"), confirmed=True)
 
     switched = h.loop.handle_turn("work on home-lab")
@@ -20,9 +20,10 @@ def test_explicit_switch_command_sets_active_domain_without_creating(make_harnes
     assert h.sessions.active_domain() == domain.id
     assert len(h.domains.list_domains()) == 2  # self + Home Lab
 
+    # An unresolved phrase is ordinary prose, not a command: it falls through
+    # to planning instead of hijacking the turn.
     unknown = h.loop.handle_turn("switch to nowhere")
-    assert "Available domains" in unknown.messages[0]
-    assert "Home Lab" in unknown.messages[0]
+    assert "nowhere" in unknown.messages[0]
     assert h.sessions.active_domain() == domain.id
     assert len(h.domains.list_domains()) == 2
 
