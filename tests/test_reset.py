@@ -12,6 +12,7 @@ import pytest
 pytest.importorskip("jinja2")
 
 from harness.app import build_harness
+from harness.contracts.domains import StructureDraft
 from harness.contracts.memory import MemoryCandidate
 from harness.model.scripted import ScriptedAdapter
 from harness.ui.web import create_app
@@ -47,6 +48,11 @@ def test_full_reset_wipes_reseeds_and_next_conversation_works(make_harness) -> N
     assert h.memory.list()
     assert h.tasks.list()
     assert h.sessions.list_interactions(limit=None)
+    domain = h.domains.create_domain(
+        StructureDraft("domain", "homelab", "test", "test"), confirmed=True
+    )
+    h.sessions.set_active_domain(domain.id)
+    assert h.sessions.active_domain() == domain.id
 
     h.model.push(respond("Fresh hello."))
     report = h.reset.run("full")
@@ -61,6 +67,7 @@ def test_full_reset_wipes_reseeds_and_next_conversation_works(make_harness) -> N
     assert h.memory.list() == []
     assert h.tasks.list() == []
     assert h.sessions.list_interactions(limit=None) == []
+    assert h.sessions.active_domain() is None
     assert [item.id for item in h.domains.list_domains()] == ["self"]
     assert h.profile.current().name == "Assistant"
     assert h.settings.get("tasks.planning_mode") == "heuristic"
@@ -132,10 +139,16 @@ def test_conversations_only_reset_keeps_memories_and_drops_dangling_refs(make_ha
     assert record is not None
     old_session = h.sessions.current().id
     h.chat.submit("hello")
+    domain = h.domains.create_domain(
+        StructureDraft("domain", "homelab", "test", "test"), confirmed=True
+    )
+    h.sessions.set_active_domain(domain.id)
 
     report = h.reset.run("conversations")
 
     assert report.backup_path is not None
+    assert h.sessions.active_domain() is None
+    assert h.domains.get_domain(domain.id).id == domain.id
     assert h.memory.get(record.id).status == "active"
     assert h.memory.get(record.id).provenance["source_refs"] == []
     assert h.memory.get(record.id).provenance["reset_cleared_refs"] == [interaction.id]
@@ -200,6 +213,25 @@ def test_ui_refuses_reset_when_confirmation_word_is_empty(make_harness) -> None:
     blocked = _request(h, "POST", "/reset", "scope=full&confirm=&backup=on")
     assert blocked.status_code == 400
     assert h.memory.get(record.id).status == "active"
+
+
+def test_session_active_domain_persists_and_old_files_resume(tmp_path: Path) -> None:
+    write_settings(tmp_path, TEST_BASELINE)
+    h = build_harness(tmp_path, model=ScriptedAdapter([]))
+    domain = h.domains.create_domain(
+        StructureDraft("domain", "homelab", "test", "test"), confirmed=True
+    )
+    h.sessions.set_active_domain(domain.id)
+
+    resumed = build_harness(tmp_path, model=ScriptedAdapter([]))
+    assert resumed.sessions.active_domain() == domain.id
+
+    path = tmp_path / "sessions" / "session.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("active_domain_id", None)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    old = build_harness(tmp_path, model=ScriptedAdapter([]))
+    assert old.sessions.active_domain() is None
 
 
 class _BlockingAdapter:

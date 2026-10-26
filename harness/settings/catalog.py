@@ -54,6 +54,7 @@ def catalog() -> list[SettingDef]:
         d("context.budgets.base_instructions", "int", 1200, "Token budget for base instructions.", minimum=100, maximum=8000, group="context"),
         d("context.budgets.persona", "int", 400, "Token budget for persona core.", minimum=50, maximum=4000, group="context"),
         d("context.budgets.preferences", "int", 400, "Token budget for global preferences.", minimum=0, maximum=4000, group="context"),
+        d("context.budgets.structure", "int", 300, "Token budget for the active domain and domain/project directory.", minimum=0, maximum=4000, group="context"),
         d("context.budgets.domain", "int", 800, "Token budget for domain memories.", minimum=0, maximum=8000, group="context"),
         d("context.budgets.task", "int", 400, "Token budget for task block.", minimum=50, maximum=4000, group="context"),
         d("context.budgets.history", "int", 800, "Token budget for recent history.", minimum=0, maximum=8000, group="context"),

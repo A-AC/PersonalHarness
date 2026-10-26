@@ -79,6 +79,54 @@ def word_tokens(text: str) -> set[str]:
     return set(TOKEN_RE.findall(text.lower()))
 
 
+def normalize_name(value: str) -> str:
+    """Normalize a domain/project name for matching.
+
+    Lowercases and keeps alphanumeric tokens only, so punctuation and repeated
+    whitespace do not make two names look different.
+    """
+    return " ".join(TOKEN_RE.findall((value or "").lower()))
+
+
+def name_overlap(a: str, b: str) -> float:
+    """Containment-style overlap for short names.
+
+    Jaccard overlap is too harsh for names ("home lab" vs "home lab notes").
+    Divide the shared tokens by the smaller token set so a name contained in a
+    longer one scores high; identical normalized names score 1.0.
+    """
+    if normalize_name(a) == normalize_name(b):
+        return 1.0 if normalize_name(a) else 0.0
+    left, right = word_tokens(a), word_tokens(b)
+    if not left or not right:
+        return 0.0
+    return len(left & right) / min(len(left), len(right))
+
+
+def match_by_name(items, name: str):
+    """Resolve an exact name, then a normalized match.
+
+    Returns ``(match, candidates)``. A match is returned only when it is
+    unambiguous. Otherwise ``candidates`` lists the names that collided so the
+    caller can report them without creating or guessing structure.
+    """
+    wanted = (name or "").strip()
+    if not wanted:
+        return None, []
+    exact = [item for item in items if item.name.strip().lower() == wanted.lower()]
+    if len(exact) == 1:
+        return exact[0], []
+    if len(exact) > 1:
+        return None, [item.name for item in exact]
+    normalized = normalize_name(wanted)
+    if not normalized:
+        return None, []
+    matches = [item for item in items if normalize_name(item.name) == normalized]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, [item.name for item in matches]
+
+
 def overlap(a: str, b: str) -> float:
     left, right = word_tokens(a), word_tokens(b)
     if not left or not right:
