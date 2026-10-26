@@ -14,6 +14,7 @@ from harness.contracts.domains import DomainRegistry, StructureDraft
 from harness.contracts.events import Event, EventLog
 from harness.contracts.history import HistoryService
 from harness.contracts.loop import TurnEvent, TurnListener, TurnResult
+from harness.contracts.memory import ExecutionOutcomeRecorder
 from harness.contracts.model import Message, ModelAdapter, ModelResult, ModelUnavailable
 from harness.contracts.session import SessionManager
 from harness.contracts.settings import SettingsService
@@ -65,6 +66,7 @@ class DefaultInteractionLoop:
         traces: TraceStore,
         events: EventLog,
         history: HistoryService,
+        outcomes: ExecutionOutcomeRecorder | None = None,
     ):
         self._settings = settings
         self._model = model
@@ -76,6 +78,11 @@ class DefaultInteractionLoop:
         self._traces = traces
         self._events = events
         self._history = history
+        self._outcomes = outcomes
+        # Per-task non-succeeded attempts, keyed by capability.operation. Kept
+        # across a blocked/resumed run so a later success can still resolve the
+        # lesson left by an earlier attempt of the same task.
+        self._task_failures: dict[str, dict[str, tuple[ExecutionResult, str | None]]] = {}
 
     def handle_turn(
         self,
@@ -578,6 +585,7 @@ class DefaultInteractionLoop:
         stop_rejections = 0
         last_execution: ExecutionResult | None = None
         honesty_rejections = 0
+        non_succeeded = self._task_failures.setdefault(task.id, {})
         while iterations < limit_iter:
             if time.monotonic() - started > limit_s:
                 self._tasks.transition(task.id, TaskState.BLOCKED, reason=BlockReason.LIMIT)
@@ -749,6 +757,10 @@ class DefaultInteractionLoop:
                     "execution",
                     {"task_id": task.id, "capability": proposal.capability, "operation": proposal.operation},
                 )
+                self_request = matches_keywords(
+                    task.goal,
+                    str(self._settings.get("context.self_scope_keywords") or ""),
+                )
                 execution = self._capabilities.execute(
                     ExecuteRequest(
                         task_id=task.id,
@@ -758,15 +770,13 @@ class DefaultInteractionLoop:
                         arguments=proposal.arguments,
                         interaction_id=interaction_id,
                         project_id=task.project_id,
-                        self_request=matches_keywords(
-                            task.goal,
-                            str(self._settings.get("context.self_scope_keywords") or ""),
-                        ),
+                        self_request=self_request,
                     )
                 )
                 envelope = self._envelope_dict(execution)
                 timeline.record("execution", execution_started, envelope)
                 last_execution = execution
+                self._capture_outcome(task, execution, self_request, non_succeeded)
                 self._record_fingerprint(proposal, execution, fingerprints)
                 machine = apply_action(task, proposal, execution)
                 if execution.status == ExecutionStatus.SUCCEEDED:
@@ -867,6 +877,9 @@ class DefaultInteractionLoop:
         else:
             self._tasks.transition(task.id, TaskState.BLOCKED, reason=BlockReason.LIMIT)
             delivered.append("Stopped: iteration limit reached.")
+        final = self._tasks.get(task.id)
+        if final.state in {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED}:
+            self._task_failures.pop(task.id, None)
         return delivered
 
     def _proposal_schema(self) -> dict[str, Any]:
@@ -1122,6 +1135,45 @@ class DefaultInteractionLoop:
             f"I couldn't complete {execution.capability}.{execution.operation}: "
             f"{execution.message} ({category}). I have not reported it as done."
         )
+
+    def _capture_outcome(
+        self,
+        task: Task,
+        execution: ExecutionResult,
+        self_request: bool,
+        non_succeeded: dict[str, tuple[ExecutionResult, str | None]],
+    ) -> None:
+        """Turn a real outcome into a low-noise procedural memory.
+
+        Routine successes are silent. A success is captured only when it
+        follows a non-succeeded attempt of the same capability.operation within
+        this task, and then it supersedes the failure lesson by memory id.
+        """
+        if self._outcomes is None:
+            return
+        key = f"{execution.capability}.{execution.operation}"
+        prior = non_succeeded.get(key)
+        if execution.status == ExecutionStatus.SUCCEEDED:
+            if prior is None:
+                return
+            prior_execution, prior_memory_id = prior
+            self._outcomes.record(
+                execution,
+                project_id=task.project_id,
+                domain_id=task.domain_id,
+                self_request=self_request,
+                prior_failure=prior_execution,
+                prior_failure_memory_id=prior_memory_id,
+            )
+            non_succeeded.pop(key, None)
+            return
+        capture = self._outcomes.record(
+            execution,
+            project_id=task.project_id,
+            domain_id=task.domain_id,
+            self_request=self_request,
+        )
+        non_succeeded[key] = (execution, capture.memory_id if capture else None)
 
     def _record_fingerprint(self, proposal: ActAction, execution: ExecutionResult, store: dict[str, dict[str, Any]]) -> None:
         key = self._fingerprint(proposal)

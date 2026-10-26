@@ -92,6 +92,7 @@ def catalog() -> list[SettingDef]:
         d("memory.source_policy.execution_outcome", "enum", "enabled_structured_only", "Execution outcome source policy.", allowed=("enabled_structured_only", "disabled"), group="memory"),
         d("memory.source_policy.document", "enum", "disabled", "Document source policy.", allowed=("enabled", "disabled"), group="memory"),
         d("memory.source_policy.imported", "enum", "disabled", "Imported source policy.", allowed=("enabled", "disabled"), group="memory"),
+        d("memory.capture.execution_outcomes", "bool", True, "Write a low-noise procedural memory for failed, denied, unavailable, and unknown executions, plus the success that resolves a prior failure.", group="memory"),
         d("memory.source_lookup_events", "int", 5000, "Recent events searched when resolving a source reference.", minimum=1, maximum=200000, group="memory"),
         d("memory.recent_limit", "int", 20, "Recently learned rows shown or returned.", minimum=1, maximum=500, group="memory"),
         d("domain.suggestion.signal", "enum", "repeated_retrieval_hits", "Domain suggestion signal.", allowed=("repeated_retrieval_hits",), group="domain"),

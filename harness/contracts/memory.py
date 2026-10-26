@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from harness.contracts.actions import ExecutionResult
+
 
 @dataclass
 class MemoryRecord:
@@ -79,8 +81,37 @@ class UsageEntry:
     later_correction: bool = False
 
 
+@dataclass
+class OutcomeCapture:
+    """Result of one execution-outcome capture attempt.
+
+    ``created`` is false when an existing active lesson already covers the same
+    fingerprint; ``memory_id`` still points at it so a later resolving success
+    can supersede the right record.
+    """
+
+    memory_id: str
+    created: bool
+    fingerprint: dict[str, Any]
+
+
 class MemoryClassifier(Protocol):
     def classify(self, content: str) -> str: ...
+
+
+class ExecutionOutcomeRecorder(Protocol):
+    """Turns real execution outcomes into low-noise procedural memories."""
+
+    def record(
+        self,
+        execution: ExecutionResult,
+        *,
+        project_id: str | None,
+        domain_id: str | None,
+        self_request: bool,
+        prior_failure: ExecutionResult | None = None,
+        prior_failure_memory_id: str | None = None,
+    ) -> OutcomeCapture | None: ...
 
 
 class MemoryManager(Protocol):

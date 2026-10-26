@@ -14,6 +14,7 @@ from harness.domains.registry import FileDomainRegistry
 from harness.events.log import FileEventLog
 from harness.history.service import FileHistoryService
 from harness.maintenance.reset import FileResetService
+from harness.memory.capture import ExecutionOutcomeCapture
 from harness.memory.classifier import KeywordMemoryClassifier
 from harness.memory.file_manager import FileMemoryManager
 from harness.memory.inmemory import InMemoryMemoryManager
@@ -261,6 +262,7 @@ def build_harness(
             model = OpenAICompatAdapter(settings)
     history = FileHistoryService(root / "history", settings, sessions, model, events)
     context = DefaultContextBuilder(settings, memory, profile, domains, capabilities, sessions, history)
+    outcomes = ExecutionOutcomeCapture(settings=settings, events=events, memory=memory)
     loop = DefaultInteractionLoop(
         settings=settings,
         model=model,
@@ -272,6 +274,7 @@ def build_harness(
         traces=traces,
         events=events,
         history=history,
+        outcomes=outcomes,
     )
     consolidation = FileConsolidationService(
         root / "consolidation",

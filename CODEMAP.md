@@ -67,7 +67,8 @@ It has no concrete imports.
 | `harness/profile/provider.py` | Persona versions and proposed edits |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
-| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback, kind-aware duplicate/conflict policy, lifecycle, keyword retrieval with recency tie-break, usage, consolidation maintenance (semantic-only retype), rollback |
+| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback (procedural hints normalize non-procedure subtypes to `lesson`), kind-aware duplicate/conflict policy, lifecycle, keyword retrieval with recency tie-break, usage, consolidation maintenance (semantic-only retype), rollback |
+| `harness/memory/capture.py` | Deterministic execution-outcome capture: failure fingerprint dedupe, task-derived scope, resolving-success supersede, `memory.capture` events, no model call |
 | `harness/memory/classifier.py` | Replaceable deterministic (keyword-rule) memory type classifier plus the deterministic type-to-kind mapping |
 | `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
 | `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
@@ -190,8 +191,9 @@ rejects required values that still contain `<...>`. The selected defaults are
 `include_time=true`, all three capability switches on, and both loop guards on.
 Memory policy is settings-driven: `memory.duplicate_overlap`,
 `memory.conflict_containment`/`conflict_overlap`, classifier rules,
-`memory.consolidation.retype`, `consolidation.extract_enabled`,
-`consolidation.schedule_enabled`/`schedule_interval_s`, and the source policy.
+`memory.consolidation.retype`, `memory.capture.execution_outcomes`,
+`consolidation.extract_enabled`, `consolidation.schedule_enabled`/
+`schedule_interval_s`, and the source policy.
 The type-to-kind mapping is structural and needs no setting.
 `ui.chat_stream_tokens` controls raw token display in the chat panel,
 `ui.sse_heartbeat_s` controls SSE keepalive comments,
@@ -225,7 +227,33 @@ derived from the assigned type (`procedure`/`lesson` -> `procedural`;
 hint falls back to the derived kind with a `hint_notes` entry. Legacy records
 without `kind` derive it at load in both stores, so no migration write is
 needed. Dedupe, conflict supersession, explicit `supersedes`, and consolidation
-merge all require the same kind as well as the same scope/type.
+merge all require the same kind as well as the same scope/type. A procedural
+hint that arrives with a non-`procedure`/`lesson` classifier subtype is
+normalized to `lesson` in the core, so the kind/type axes stay consistent;
+semantic writes and explicit `remember` calls (which pass no kind hint) are
+unaffected.
+
+Procedural capture (`harness/memory/capture.py`) is deterministic and needs no
+model call. It records only `failed`, `denied`, `unavailable`, and `unknown`
+executions, plus a `succeeded` execution that follows a non-succeeded attempt
+of the same `capability.operation` within the same task; routine successes stay
+silent. `memory.capture.execution_outcomes` (default true) and
+`memory.source_policy.execution_outcome` (`enabled_structured_only` or
+`disabled`) can both turn it off, and disabled means no write and no events.
+`harness_memory` and `harness_structure` executions are excluded. The candidate
+is `kind=procedural`, `origin=inferred`, with
+`source_kind=execution_outcome`, `source_refs=[operation_id]`,
+`evidence_status=observed`, and only the structured
+`{status, error_category, message, capability, operation}` fields. Its content
+is one deterministic sentence naming the operation and outcome (no user text),
+and the default scope follows the task: project, then a non-self domain, then
+self, then global. Before writing a failure, active procedural records in that
+scope are scanned and an existing record with the same
+`(capability, operation, status, error_category)` fingerprint suppresses the
+duplicate. A resolving success writes a resolution lesson and supersedes the
+failure by `memory_id`; nothing is auto-retracted. Each created record emits
+one `memory.capture` event with `target=memory_id`, `result=status`, and the
+fingerprint data; memory text is never inlined into the execution envelope.
 
 An explicit write activates immediately. Provenance is harness-filled
 (`source_kind=user_statement`, `source_refs=[interaction_id]`) and still passes
