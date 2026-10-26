@@ -11,7 +11,7 @@ from harness.contracts.actions import ActAction, AskAction, EndAction, Execution
 from harness.contracts.capabilities import CapabilityExecutor, ExecuteRequest
 from harness.contracts.context import ContextBuilder
 from harness.contracts.control import ApprovedAction, ControlDirective, ControlPlane
-from harness.contracts.domains import DomainRegistry, StructureDraft
+from harness.contracts.domains import DomainInference, DomainRegistry, StructureDraft
 from harness.contracts.events import Event, EventLog
 from harness.contracts.history import HistoryService
 from harness.contracts.loop import TurnEvent, TurnListener, TurnResult
@@ -69,6 +69,7 @@ class DefaultInteractionLoop:
         history: HistoryService,
         outcomes: ExecutionOutcomeRecorder | None = None,
         control: ControlPlane | None = None,
+        inference: DomainInference | None = None,
     ):
         self._settings = settings
         self._model = model
@@ -82,6 +83,7 @@ class DefaultInteractionLoop:
         self._history = history
         self._outcomes = outcomes
         self._control = control
+        self._inference = inference
         # Per-task non-succeeded attempts, keyed by capability.operation. Kept
         # across a blocked/resumed run so a later success can still resolve the
         # lesson left by an earlier attempt of the same task.
@@ -487,14 +489,16 @@ class DefaultInteractionLoop:
         created: list[Task] = []
         active_domain = self._sessions.active_domain()
         misses: list[dict[str, Any]] = []
+        inferred: list[dict[str, Any]] = []
         for spec in plan:
             depends: list[str] = []
             for idx in spec.get("depends_on") or []:
                 if isinstance(idx, int) and 0 <= idx < len(created):
                     depends.append(created[idx].id)
-            # Tasks without a named domain inherit the session's active domain,
-            # so domain-scoped memory accumulates for the topic the user is
-            # working in (including the code-only heuristic plan).
+            # A task without a named domain keeps the session's active domain as
+            # a hint, but relevant evidence may associate the *new* work with a
+            # different existing project. The session selection itself is never
+            # changed and existing tasks are never reassigned.
             domain_id: str | None = active_domain
             name = spec.get("domain_name")
             if name:
@@ -509,6 +513,29 @@ class DefaultInteractionLoop:
                         misses.append(
                             {"kind": "domain", "requested": text, "candidates": candidates}
                         )
+            elif self._inference is not None:
+                goal = str(spec.get("goal") or user_text)
+                try:
+                    match = self._inference.infer(goal, active_domain_id=active_domain)
+                except Exception:
+                    match = None
+                if match is not None and match.domain_id and (
+                    match.confident or match.domain_id == active_domain
+                ):
+                    if match.domain_id != active_domain or match.confident:
+                        inferred.append(
+                            {
+                                "task_goal": goal,
+                                "domain_id": match.domain_id,
+                                "domain_name": match.name,
+                                "score": round(match.score, 4),
+                                "confident": match.confident,
+                                "ambiguous": match.ambiguous,
+                                "reason": match.reason,
+                                "evidence": match.evidence,
+                            }
+                        )
+                    domain_id = match.domain_id
             created.append(
                 self._tasks.create(
                     TaskSpec(
@@ -519,6 +546,28 @@ class DefaultInteractionLoop:
                     )
                 )
             )
+        if inferred:
+            self._events.append(
+                Event(
+                    id=new_id("evt"),
+                    ts=now_ts(),
+                    actor="harness",
+                    operation="plan.domain_inference",
+                    target=trace_id or interaction_id,
+                    result="ok",
+                    trigger_ref=interaction_id,
+                    data={
+                        "matches": inferred,
+                        "active_domain_id": active_domain,
+                    },
+                )
+            )
+            if timeline is not None:
+                timeline.record(
+                    "plan.domain_inference",
+                    time.monotonic(),
+                    {"matches": inferred, "active_domain_id": active_domain},
+                )
         if misses:
             # Never silently write None: the planner miss is observable even
             # though the task falls back to the active domain.
@@ -566,6 +615,12 @@ class DefaultInteractionLoop:
         count = int(self._settings.get("domain.suggestion.subject_words"))
         words = [part for part in user_text.lower().split() if part.isalpha()][:count]
         if not words:
+            return None
+        # A single passing word ("weather", "thanks") is not evidence of a
+        # persistent project. Require a meaningful multi-word subject.
+        minimum_words = int(self._settings.get("domain.suggestion.min_words"))
+        meaningful = [part for part in words if len(part) > 2]
+        if len(meaningful) < max(1, minimum_words):
             return None
         key = "-".join(words)
         hits = self._sessions.bump_subject(key)

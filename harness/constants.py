@@ -131,6 +131,26 @@ class MemoryStatus(StrEnum):
     RETRACTED = "retracted"
 
 
+class MemoryLifecycle(StrEnum):
+    """A derived, explainable view over the stored lifecycle metadata.
+
+    This is not a replacement for ``status``, ``type``, or ``kind``. It makes
+    it explicit whether a record is a verified statement, a user preference, a
+    decision, a lesson, a temporary event, an unresolved hypothesis, or a
+    proposed future commitment. The stored fields remain the source of truth.
+    """
+
+    VERIFIED_FACT = "verified_fact"
+    PREFERENCE = "preference"
+    DECISION = "decision"
+    LESSON = "lesson"
+    TEMPORARY_EVENT = "temporary_event"
+    HYPOTHESIS = "hypothesis"
+    COMMITMENT = "commitment"
+    SUPERSEDED = "superseded"
+    RETRACTED = "retracted"
+
+
 class SourceKind(StrEnum):
     USER_STATEMENT = "user_statement"
     EXECUTION_OUTCOME = "execution_outcome"

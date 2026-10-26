@@ -60,12 +60,27 @@ The v1 scope is deliberately small:
   kinds over facts, preferences, decisions, procedures, and lessons in global,
   self, or domain scope, with explicit/inferred source rules, conflict
   handling, supersession, retraction, usage logging, and consolidation rollback.
+  Retrieval is hybrid and explainable: exact identifiers, lexical overlap, an
+  optional dependency-free semantic scorer, scope relevance, recency decay,
+  provenance/confidence, and memory-kind usefulness combine into one ranked
+  score with per-component parts. Superseded, retracted, expired, and
+  conflicting older rows never re-enter the candidate set, so an old statement
+  cannot outscore the newer verified fact that replaced it. Records also carry
+  lifecycle metadata (`evidence_status`, `confidence`, `valid_from`/`valid_until`,
+  `tags`) and a derived lifecycle view (verified fact, preference, decision,
+  lesson, temporary event, hypothesis, commitment, superseded, retracted).
 - **Domains.** Structure has one level: a domain. It is created only by an
-  explicit user command or confirmation; the model may only suggest. An active
-  domain makes tasks inherit it and lets domain-scoped memory accumulate, and
-  the model or the chat selector can enter/leave an existing domain without
-  creating one.
-- **Budgeted context and full traces.** Each model call records the context
+  explicit user command or confirmation; the model may only suggest. The active
+  domain is a routing hint, not a constraint: new work is associated with the
+  existing project that the request, relevant memories, open tasks, and recent
+  conversation point to, and knowledge from any project stays retrievable
+  without a manual switch. Explicit selections are preserved and existing tasks
+  and memories are never silently moved.
+- **Budgeted context and full traces.** Context is query-driven and bounded:
+  relevant memories are retrieved across projects, trimmed per item to their
+  section budget, and every inclusion, exclusion, and truncation is recorded.
+  Safety instructions and pending decisions for the current task or project
+  survive budget pressure. Each model call records the context
   sections included or excluded, the prompt, the raw response, validation
   result, duration, time to first token, prompt/completion/visible/reasoning
   tokens, and whether thinking occurred. Each turn also stores a stage timeline
@@ -96,11 +111,16 @@ user text
                                 enter/leave/switch an existing domain
                          no  -> model task plan (with the structure directory),
                                 or one code task for a short single request in
-                                heuristic mode; both inherit the active domain
+                                heuristic mode; both keep the active domain as
+                                a hint and infer the likely existing project
+                                from the request, memories, open tasks, and
+                                recent conversation
   -> persisted tasks
   -> next ready task
-  -> budgeted context (persona, memory, structure directory, active domain,
-     pending decisions, history, capabilities)
+  -> budgeted, query-driven context (persona, preferences, cross-project
+     memory retrieval, structure directory, current project summary, task,
+     pending decisions, history, capabilities), ranked and trimmed to the
+     configured budgets with recorded inclusions and exclusions
   -> model proposal (respond / ask / act / continue / end), strict or loose schema
   -> validation + permission check + confirmation gate + internal-schema/honesty guards
   -> capability dispatch -> attempt record + evidence + event
@@ -705,15 +725,25 @@ Important groups:
   loose action schema
 - `context.budgets.*`: per-section and total token budgets, including
   `context.budgets.structure` for the active-domain directory
+- `context.project.*`, `context.retrieval.*`, `context.pending_decisions.*`:
+  project summary size, retrieval candidate counts, and how many pending
+  decisions the context carries
 - `context.prompt_variant`, `context.include_time`: full/trimmed rules and the
   current UTC time in the task section
 - `context.self_scope_keywords`: phrases that load the reserved `self` domain
-- `memory.*`: retrieval weights, duplicate/conflict overlap, classifier rules, source policy
+- `memory.*`: retrieval weights (`lexical`, `semantic`, `exact`, `scope`,
+  `recency`, `provenance`, `kind`), the optional concept vocabulary, duplicate
+  and conflict overlap, classifier rules, source policy
+- `implementations.retriever`: `hybrid` (default) adds the dependency-free
+  semantic scorer; `keyword` restores pure keyword retrieval
 - `consolidation.*`: extraction, schedule, evidence window, proposal limit
 - `capabilities.*`: permission policy, default enablement, skill/MCP paths,
   enum disclosure, optional-argument coercion, placeholder rejection
-- `domain.suggestion.*`: repeated-subject threshold and cooldown;
-  `domain.match_overlap` is the name overlap at which a suggestion is a duplicate
+- `domain.inference.*`: project-inference weights, confidence threshold, and
+  ambiguity margin for associating new tasks with an existing project
+- `domain.suggestion.*`: repeated-subject threshold, minimum subject words,
+  and cooldown; `domain.match_overlap` is the name overlap at which a
+  suggestion is a duplicate
 - `loop.*`: iteration/time/retry limits, honesty and internal-schema guards
 - `control.confirmation.*`: whether confirmation gating is enabled and which
   permission classes (or `all`) require a one-time decision
@@ -838,11 +868,18 @@ Structure is a single level: domains. A domain holds capability enablement and
 its own memory scope. The reserved `self` domain holds memories about the
 assistant and loads on demand.
 
-The session stores an optional active domain. Every task planned from a turn
-inherits it, including the code-only heuristic plan and tasks whose planner
-names no domain or names one that does not exist. That is what makes
-`domain:<id>` memory accumulate while the user is working in a domain. The
-structure directory in the prompt lists the active domain, non-archived domains,
+The session stores an optional active domain. It is a hint, not a routing
+constraint. A task planned with an explicit domain name keeps it. A task whose
+planner names no domain (or names one that does not exist) keeps the active
+domain as the fallback, but first the harness infers the likely existing
+project from the request text, project-scoped memories, already-open tasks, and
+recent conversation; a confident match associates the *new* task with that
+project without switching the session. Inference never creates a domain,
+renames one, or moves an existing task or memory, and every routing decision
+is logged as a `plan.domain_inference` event with its evidence. When no signal
+is confident the task simply keeps the active domain, and an ambiguous match
+is reported with its candidates instead of guessed. The structure directory in
+the prompt lists the active domain, non-archived domains,
 and pending suggestions; the planner receives the same directory. The section
 has its own `context.budgets.structure` budget and drops whole entries rather
 than cutting a line, and the total-budget drop order is history, structure,
@@ -860,7 +897,10 @@ domain.
 Suggestions are deduplicated before they are recorded: an existing domain, a
 pending suggestion with the same normalized or overlapping name, or a declined
 suggestion still in cooldown returns duplicate/cooldown data instead of creating
-a second pending row. A bare confirmation is only interpreted as a suggestion
+a second pending row. A suggestion also requires a meaningful multi-word
+subject (`domain.suggestion.min_words`, default 2), so a brief one-word topic
+such as "weather" never produces a permanent project. A bare confirmation is
+only interpreted as a suggestion
 answer when exactly one suggestion is pending and no task is awaiting the user.
 Conversations-only and full resets clear the active domain; a memory reset keeps
 it.
@@ -890,6 +930,34 @@ memory. Corrections supersede rather than delete. Duplicate detection, conflict
 supersession, explicit supersedes, and consolidation merges all require the same
 kind, so a procedural lesson cannot silently replace a semantic fact. Usage is
 logged with task and trace ids.
+
+Retrieval is hybrid and explainable. One additive score combines exact
+identifier matches (hostnames, IPs, paths, ids), lexical overlap, optional
+semantic similarity, scope relevance, recency decay, provenance and confidence,
+and memory-kind usefulness for the query; each component is kept on the ranked
+result as `score_parts` and the human-readable reason is logged with usage.
+Superseded and retracted rows, temporally invalid records, and an older row
+whose newer replacement is active are excluded before ranking, so a superseded
+fact cannot beat its replacement on wording alone. The default semantic
+component (`implementations.retriever: hybrid`) is a dependency-free
+lexical-semantic scorer built from configurable concept groups, light stemming,
+and character n-grams; no vector database or model call is involved, and
+`implementations.retriever: keyword` restores pure keyword matching. A
+deployment with an embedding service can supply any other
+`SemanticScorer` implementation at the composition root without touching the
+memory manager. Retrieval also accepts a scope-priority list: records from
+other projects remain retrievable, with a small relevance bonus for the
+active or inferred project instead of a hard filter.
+
+Records carry lifecycle metadata alongside the status: `evidence_status`
+(`stated`, `observed`, `inferred`, `corroborated`), a `confidence` between 0
+and 1, optional `valid_from`/`valid_until` validity windows, and `tags`. The
+harness derives a lifecycle view from these fields (verified fact, preference,
+decision, lesson, temporary event, unresolved hypothesis, proposed commitment,
+superseded, retracted), which the context builder surfaces on each memory tag.
+Low-confidence or inferred statements rank below explicit, corroborated ones
+but are never silently promoted to verified facts, and an explicit user
+correction supersedes the outdated record through the normal conflict path.
 
 Consolidation runs off the hot path (UI button or optional schedule). It first
 extracts inferred memories from recent conversation with verified source refs,
@@ -967,7 +1035,20 @@ See [CODEMAP.md](CODEMAP.md) for module responsibilities and the data-flow map.
   trusted network.
 - No automatic model download or backend management.
 - MCP stdio servers are launched per discovery/call; latency includes startup.
-- Retrieval is keyword overlap, not embeddings.
+- The default semantic retrieval is lexical-semantic (concept groups, stemming,
+  character n-grams), not embeddings. It catches common paraphrases but not
+  deep paraphrase or cross-language matches. An embedding-backed
+  `SemanticScorer` can be injected without changing the memory manager; without
+  one, purely conceptual matches can be missed.
+- Project inference is deterministic scoring, not understanding: it associates
+  new work with an existing project only when name, memory, task, or history
+  evidence clears the confidence threshold, and reports ambiguity instead of
+  guessing. Requests that name a brand-new persistent topic still need the
+  user to create the domain explicitly.
+- Context trimming is whole-item for memories and structure entries (never a
+  half-rendered block), but the persona can be character-truncated as a last
+  resort when the total budget cannot fit the safety instructions otherwise;
+  per-section budgets for base instructions still raise rather than truncate.
 - The UI is intentionally server-rendered and small; it is not a public
   multi-user service.
 - The live eval needs a live model and network access to that endpoint. It is

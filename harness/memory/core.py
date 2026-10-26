@@ -1,24 +1,47 @@
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import replace
 from typing import Callable
 
-from harness.constants import MemoryKind, MemoryOrigin, MemoryStatus, MemoryType, SourceKind
+from harness.constants import (
+    EvidenceStatus,
+    MemoryKind,
+    MemoryLifecycle,
+    MemoryOrigin,
+    MemoryStatus,
+    MemoryType,
+    SourceKind,
+)
 from harness.contracts.events import Event, EventLog
 from harness.contracts.memory import (
     MemoryCandidate,
     MemoryClassifier,
     MemoryRecord,
     RankedMemory,
+    SemanticScorer,
     SubmitResult,
     UsageEntry,
 )
 from harness.contracts.settings import SettingsService
 from harness.contracts.sources import SourceResolver
 from harness.memory.classifier import KeywordMemoryClassifier, kind_for_type
+from harness.memory.semantic import STOPWORDS
 from harness.memory.tokens import overlap, tokens
 from harness.storage.atomic import new_id, now_ts
 from harness.text import word_tokens
+from harness.timefmt import gap_between, parse_ts
+
+IDENTIFIER_RE = re.compile(
+    r"(?:\b\d{1,3}(?:\.\d{1,3}){3}\b"
+    r"|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+\b"
+    r"|\b(?:[a-z]:\\|/)[^\s]+"
+    r"|\b[a-z]+_[a-z0-9_]+\b"
+    r"|\b[a-z]+-\d{2,}\b)",
+    re.IGNORECASE,
+)
+
 
 
 StoreGet = Callable[[str], MemoryRecord | None]
@@ -58,6 +81,7 @@ class MemoryCore:
         usage_all: UsageAll,
         scopes: Callable[[str], bool],
         classifier: MemoryClassifier | None = None,
+        semantic: SemanticScorer | None = None,
     ):
         self._settings = settings
         self._events = events
@@ -69,6 +93,7 @@ class MemoryCore:
         self._usage_all = usage_all
         self._scope_exists = scopes
         self._classifier = classifier or KeywordMemoryClassifier(settings)
+        self._semantic = semantic
 
     def get(self, memory_id: str) -> MemoryRecord:
         record = self._get(memory_id)
@@ -183,6 +208,19 @@ class MemoryCore:
             hint_notes=notes,
             supersedes=supersedes or (conflict.id if conflict else None),
             run_id=candidate.run_id,
+            evidence_status=str(
+                candidate.evidence_status
+                or candidate.provenance.get("evidence_status")
+                or EvidenceStatus.STATED.value
+            ),
+            confidence=(
+                1.0
+                if candidate.confidence is None
+                else max(0.0, min(1.0, float(candidate.confidence)))
+            ),
+            valid_from=candidate.valid_from,
+            valid_until=candidate.valid_until,
+            tags=list(candidate.tags),
         )
         replaced: list[MemoryRecord] = []
         if conflict is not None:
@@ -267,37 +305,293 @@ class MemoryCore:
             return fallback
         return hint
 
-    def retrieve(self, query: str, scopes: list[str], budget: int) -> list[RankedMemory]:
-        query_tokens = tokens(query)
+    def retrieve(
+        self,
+        query: str,
+        scopes: list[str],
+        budget: int,
+        *,
+        scope_priority: list[str] | None = None,
+        kinds: list[str] | None = None,
+        now: str | None = None,
+    ) -> list[RankedMemory]:
+        """Rank active memories for one query.
+
+        The score is additive and explainable. Exact identifiers are a strong
+        signal; lexical overlap and optional semantic similarity supply the
+        conceptual match; scope, recency, provenance, confidence, and kind
+        usefulness break ties. Superseded/retracted records and expired
+        temporary facts never enter the candidate set, so an older statement
+        cannot win merely by sharing more words.
+        """
+        query_text = query or ""
+        query_tokens = {item for item in tokens(query_text) if item not in STOPWORDS}
+        query_identifiers = {item.lower() for item in IDENTIFIER_RE.findall(query_text)}
+        priority = set(scope_priority or [])
+        allowed_kinds = set(kinds or [])
+        reference = now or now_ts()
+        reference_dt = parse_ts(reference)
+
+        weights = {
+            "lexical": float(self._settings.get("memory.retrieval.lexical_weight")),
+            "semantic": float(self._settings.get("memory.retrieval.semantic_weight")),
+            "exact": float(self._settings.get("memory.retrieval.exact_identifier_bonus")),
+            "scope": float(self._settings.get("memory.retrieval.scope_priority_bonus")),
+            "other_scope": float(self._settings.get("memory.retrieval.other_scope_penalty")),
+            "recency": float(self._settings.get("memory.retrieval.recency_weight")),
+            "provenance": float(self._settings.get("memory.retrieval.provenance_weight")),
+            "kind": float(self._settings.get("memory.retrieval.kind_weight")),
+        }
         explicit_bonus = float(self._settings.get("memory.retrieval.explicit_bonus"))
         preference_bonus = float(self._settings.get("memory.retrieval.preference_bonus"))
         empty_query_score = float(self._settings.get("memory.retrieval.empty_query_score"))
+        half_life = max(0.1, float(self._settings.get("memory.retrieval.recency_half_life_days")))
+        min_score = float(self._settings.get("memory.retrieval.min_score"))
+        temporal_query = any(
+            item in query_text.lower()
+            for item in ("recent", "latest", "yesterday", "today", "last", "this week")
+        )
+        commitment_query = any(
+            item in query_text.lower()
+            for item in ("will", "tomorrow", "plan", "remind", "commit", "promise")
+        )
+        procedural_query = any(
+            item in query_text.lower()
+            for item in ("how", "fix", "restart", "procedure", "error", "fail", "lesson", "step")
+        )
+
         ranked: list[RankedMemory] = []
         for record in self._all():
             if record.status != MemoryStatus.ACTIVE:
                 continue
             if scopes and record.scope not in scopes:
                 continue
-            content_tokens = tokens(record.content)
+            if allowed_kinds and record.kind not in allowed_kinds:
+                continue
+            if not self._temporally_valid(record, reference):
+                continue
+            if record.superseded_by and self._active_exists(record.superseded_by):
+                # Defensive: an inconsistent active row whose replacement is
+                # live must not override that replacement.
+                continue
+
+            content_tokens = {item for item in tokens(record.content) if item not in STOPWORDS}
+            hits = query_tokens & content_tokens
+            content_identifiers = {item.lower() for item in IDENTIFIER_RE.findall(record.content)}
+            exact_hits = query_identifiers & content_identifiers
+            normalized_query = " ".join(word_tokens(query_text))
+            normalized_content = " ".join(word_tokens(record.content))
+            phrase_exact = bool(
+                normalized_query
+                and len(normalized_query.split()) >= 3
+                and normalized_query in normalized_content
+            )
+
             if not query_tokens:
-                score = empty_query_score
-                reason = "empty query fallback"
+                lexical = empty_query_score
             else:
-                hits = query_tokens & content_tokens
-                if not hits and record.type != MemoryType.PREFERENCE:
+                lexical = len(hits) / max(1, len(query_tokens))
+            semantic = (
+                self._semantic.score(query_text, record.content)
+                if self._semantic is not None
+                else 0.0
+            )
+            if not hits and not exact_hits and not phrase_exact and record.type != MemoryType.PREFERENCE:
+                # Optional semantic similarity is the only reason an unrelated
+                # lexical candidate may still be useful.
+                if semantic <= 0.0:
                     continue
-                score = (len(hits) / max(1, len(query_tokens))) + (
-                    explicit_bonus if record.origin == MemoryOrigin.EXPLICIT else 0.0
+            exact = weights["exact"] if (exact_hits or phrase_exact) else 0.0
+            scope_score = 0.0
+            if priority:
+                if record.scope in priority:
+                    scope_score = weights["scope"]
+                elif record.scope.startswith("domain:"):
+                    scope_score = -weights["other_scope"]
+            recency = self._recency_score(record.updated_at, reference_dt, half_life) * weights["recency"]
+            provenance = self._provenance_score(record) * weights["provenance"]
+            kind_score = self._kind_score(
+                record,
+                procedural_query=procedural_query,
+                temporal_query=temporal_query,
+                commitment_query=commitment_query,
+            ) * weights["kind"]
+            score = (
+                lexical * weights["lexical"]
+                + semantic * weights["semantic"]
+                + exact
+                + scope_score
+                + recency
+                + provenance
+                + kind_score
+                + (explicit_bonus if record.origin == MemoryOrigin.EXPLICIT else 0.0)
+                + (preference_bonus if record.type == MemoryType.PREFERENCE else 0.0)
+            )
+            if query_tokens and lexical <= 0 and not exact_hits and semantic <= 0 and record.type != MemoryType.PREFERENCE:
+                continue
+            if score < min_score and record.type != MemoryType.PREFERENCE:
+                continue
+
+            reason_parts: list[str] = []
+            if exact_hits:
+                reason_parts.append("exact identifier " + ", ".join(sorted(exact_hits)))
+            elif phrase_exact:
+                reason_parts.append("exact phrase")
+            if hits:
+                reason_parts.append("keyword " + ",".join(sorted(hits)[:6]))
+            if semantic > 0:
+                reason_parts.append(f"semantic {semantic:.2f}")
+            if record.scope in priority:
+                reason_parts.append("scope relevant")
+            reason_parts.append(f"score {score:.2f}")
+            ranked.append(
+                RankedMemory(
+                    record=record,
+                    score=score,
+                    reason="; ".join(reason_parts),
+                    score_parts={
+                        "lexical": lexical,
+                        "semantic": semantic,
+                        "exact": exact,
+                        "scope": scope_score,
+                        "recency": recency,
+                        "provenance": provenance,
+                        "kind": kind_score,
+                    },
                 )
-                reason = f"keyword overlap {sorted(hits)[:8]}"
-            if record.type == MemoryType.PREFERENCE:
-                score += preference_bonus
-            ranked.append(RankedMemory(record=record, score=score, reason=reason))
+            )
+
+        ranked = self._suppress_conflicts(ranked)
         if bool(self._settings.get("memory.retrieval.recency_tiebreak")):
-            ranked.sort(key=lambda item: (item.score, item.record.updated_at, item.record.id), reverse=True)
+            ranked.sort(
+                key=lambda item: (item.score, item.record.updated_at, item.record.id),
+                reverse=True,
+            )
         else:
             ranked.sort(key=lambda item: item.score, reverse=True)
-        return ranked[:budget]
+        return ranked[: max(0, int(budget))]
+
+    def _active_exists(self, memory_id: str) -> bool:
+        record = self._get(memory_id)
+        return record is not None and record.status == MemoryStatus.ACTIVE
+
+    @staticmethod
+    def _temporally_valid(record: MemoryRecord, now: str) -> bool:
+        now_dt = parse_ts(now)
+        if now_dt is None:
+            return True
+        start = parse_ts(record.valid_from)
+        end = parse_ts(record.valid_until)
+        if start is not None and start > now_dt:
+            return False
+        if end is not None and end < now_dt:
+            return False
+        return True
+
+    @staticmethod
+    def _recency_score(updated_at: str, now, half_life_days: float) -> float:
+        if now is None:
+            return 0.0
+        age = gap_between(updated_at, now.isoformat().replace("+00:00", "Z"))
+        if age <= 0:
+            return 1.0
+        return math.pow(0.5, age / (half_life_days * 86400))
+
+    @staticmethod
+    def _provenance_score(record: MemoryRecord) -> float:
+        evidence = str(
+            record.evidence_status
+            or (record.provenance or {}).get("evidence_status")
+            or EvidenceStatus.STATED.value
+        )
+        evidence_weight = {
+            EvidenceStatus.STATED.value: 1.0,
+            EvidenceStatus.CORROBORATED.value: 1.0,
+            EvidenceStatus.OBSERVED.value: 0.85,
+            EvidenceStatus.INFERRED.value: 0.35,
+        }.get(evidence, 0.5)
+        origin_weight = {
+            MemoryOrigin.EXPLICIT.value: 1.0,
+            MemoryOrigin.CONSOLIDATED.value: 0.65,
+            MemoryOrigin.INFERRED.value: 0.45,
+        }.get(record.origin, 0.5)
+        return evidence_weight * origin_weight * max(0.0, min(1.0, record.confidence))
+
+    @staticmethod
+    def _kind_score(
+        record: MemoryRecord,
+        *,
+        procedural_query: bool,
+        temporal_query: bool,
+        commitment_query: bool,
+    ) -> float:
+        if record.kind == MemoryKind.PROCEDURAL and procedural_query:
+            return 1.0
+        if record.kind == MemoryKind.EPISODIC and (temporal_query or record.valid_until):
+            return 1.0
+        if record.kind == MemoryKind.PROSPECTIVE and commitment_query:
+            return 1.0
+        if record.type == MemoryType.DECISION and commitment_query:
+            return 0.5
+        return 0.0
+
+    def _suppress_conflicts(self, ranked: list[RankedMemory]) -> list[RankedMemory]:
+        """Drop an active row that a newer active row on the same subject wins.
+
+        Normal writes mark the loser ``superseded``, but restored or imported
+        data can leave two active rows. The newer statement wins here as well;
+        lexical/semantic score is not allowed to resurrect the older fact.
+        """
+        kept: list[RankedMemory] = []
+        for item in ranked:
+            loser = False
+            for other in ranked:
+                if other.record.id == item.record.id:
+                    continue
+                if other.record.supersedes == item.record.id:
+                    loser = True
+                    break
+                if (
+                    other.record.scope == item.record.scope
+                    and other.record.kind == item.record.kind
+                    and other.record.type == item.record.type
+                    and other.record.updated_at >= item.record.updated_at
+                    and other.record.content != item.record.content
+                    and self._is_conflict(other.record.content, item.record.content)
+                ):
+                    loser = True
+                    break
+            if not loser:
+                kept.append(item)
+        return kept
+
+    def lifecycle(self, record: MemoryRecord) -> str:
+        """Return the derived lifecycle category for a record."""
+        if record.status == MemoryStatus.SUPERSEDED:
+            return MemoryLifecycle.SUPERSEDED.value
+        if record.status == MemoryStatus.RETRACTED:
+            return MemoryLifecycle.RETRACTED.value
+        if record.kind == MemoryKind.PROSPECTIVE:
+            return MemoryLifecycle.COMMITMENT.value
+        if record.kind == MemoryKind.EPISODIC:
+            return MemoryLifecycle.TEMPORARY_EVENT.value
+        if record.type == MemoryType.PREFERENCE:
+            return MemoryLifecycle.PREFERENCE.value
+        if record.type == MemoryType.DECISION:
+            return MemoryLifecycle.DECISION.value
+        if record.type in {MemoryType.PROCEDURE, MemoryType.LESSON}:
+            return MemoryLifecycle.LESSON.value
+        evidence = str(
+            record.evidence_status
+            or (record.provenance or {}).get("evidence_status")
+            or EvidenceStatus.STATED.value
+        )
+        if (
+            record.origin != MemoryOrigin.EXPLICIT
+            and evidence in {EvidenceStatus.INFERRED.value, EvidenceStatus.OBSERVED.value}
+        ) or record.confidence < 0.6:
+            return MemoryLifecycle.HYPOTHESIS.value
+        return MemoryLifecycle.VERIFIED_FACT.value
 
     def retract(self, memory_id: str, actor: str) -> MemoryRecord:
         record = self.get(memory_id)

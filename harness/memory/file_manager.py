@@ -6,7 +6,7 @@ import shutil
 
 from harness.constants import CONVERSATION_REF_PREFIXES
 from harness.contracts.events import EventLog
-from harness.contracts.memory import MemoryCandidate, MemoryClassifier, MemoryRecord, RankedMemory, SubmitResult, UsageEntry
+from harness.contracts.memory import MemoryCandidate, MemoryClassifier, MemoryRecord, RankedMemory, SemanticScorer, SubmitResult, UsageEntry
 from harness.contracts.settings import SettingsService
 from harness.contracts.sources import SourceResolver
 from harness.memory.core import MemoryCore
@@ -22,6 +22,7 @@ class FileMemoryManager:
         sources: SourceResolver,
         scope_check,
         classifier: MemoryClassifier | None = None,
+        semantic: SemanticScorer | None = None,
     ):
         self._dir = directory
         self._records = directory / "records"
@@ -39,6 +40,7 @@ class FileMemoryManager:
             usage_all=self._usage_all,
             scopes=scope_check,
             classifier=classifier,
+            semantic=semantic,
         )
 
     def _rw(self) -> tuple[int, float]:
@@ -73,8 +75,27 @@ class FileMemoryManager:
     def submit(self, candidate: MemoryCandidate) -> SubmitResult:
         return self._core.submit(candidate)
 
-    def retrieve(self, query: str, scopes: list[str], budget: int) -> list[RankedMemory]:
-        return self._core.retrieve(query, scopes, budget)
+    def retrieve(
+        self,
+        query: str,
+        scopes: list[str],
+        budget: int,
+        *,
+        scope_priority: list[str] | None = None,
+        kinds: list[str] | None = None,
+        now: str | None = None,
+    ) -> list[RankedMemory]:
+        return self._core.retrieve(
+            query,
+            scopes,
+            budget,
+            scope_priority=scope_priority,
+            kinds=kinds,
+            now=now,
+        )
+
+    def lifecycle(self, record: MemoryRecord) -> str:
+        return self._core.lifecycle(record)
 
     def retract(self, memory_id: str, actor: str) -> MemoryRecord:
         return self._core.retract(memory_id, actor)

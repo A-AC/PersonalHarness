@@ -7,6 +7,20 @@ TOKEN_RE = re.compile(r"[a-z0-9]+")
 THINK_BLOCK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 UNRESOLVED_PLACEHOLDER_RE = re.compile(r"<[^<>\n]{1,80}>")
 
+# Generic words that carry no retrieval signal on their own. Shared by the
+# memory scorer and domain inference so every component ranks with the same
+# token view.
+STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "to", "of", "in", "on", "at", "for", "with", "by",
+    "from", "and", "or", "but", "if", "then", "that", "this", "these",
+    "those", "it", "its", "i", "me", "my", "we", "our", "you", "your",
+    "he", "she", "they", "them", "what", "which", "who", "whom", "how",
+    "when", "where", "why", "can", "could", "should", "would", "will",
+    "please", "tell", "about", "there", "here", "use", "uses", "used",
+    "have", "has", "had", "get", "got", "any", "some", "all", "than",
+}
+
 # A compact, deliberately conservative test for a first-person success claim.
 # It is shared by the loop's honesty guard and the eval checks so the harness
 # and the evidence agree on what "claiming success" means.

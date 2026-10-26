@@ -40,12 +40,12 @@ It has no concrete imports.
 | `context.py` | Context package/section/inclusion and builder protocol |
 | `control.py` | Control-plane directive, action gate, approved action, and coordinator protocol |
 | `decisions.py` | Decision record, store/resolver protocols, and deterministic interpretation |
-| `domains.py` | Domain/draft/suggestion and registry protocol |
+| `domains.py` | Domain/draft/suggestion, `DomainMatch`, the read-only `DomainInference` protocol, and the registry protocol |
 | `events.py` | Event and event-log protocol |
 | `history.py` | History note/segment/view and the replaceable history-service protocol |
 | `loop.py` | Turn result and interaction-loop protocol |
 | `maintenance.py` | Removed-state/report and the reset-service protocol |
-| `memory.py` | Memory record/candidate/submit/usage and manager protocol |
+| `memory.py` | Memory record/candidate/submit/usage (with lifecycle metadata), `RankedMemory` with `score_parts`, the optional `SemanticScorer` contract, and the manager protocol |
 | `model.py` | Message/result, model adapter protocol, `ModelError`/`ModelUnavailable` |
 | `profile.py` | Persona, draft, proposal, version, profile protocol |
 | `session.py` | Session/interaction and session-manager protocol |
@@ -65,6 +65,7 @@ It has no concrete imports.
 | `harness/session/manager.py` | Session resume (including old files without an active domain), append-only interactions with user/assistant timestamps, subject hits, persisted active domain |
 | `harness/session/turns.py` | `DefaultTurnService`: one serialized turn entry point for CLI and web, progress listener, trace/memory detail read model |
 | `harness/domains/registry.py` | Self domain, explicit structure creation, suggestions, normalized suggestion cooldown, enablement, and a best-effort suggestion listener that mirrors lifecycle changes into the decision log |
+| `harness/domains/inference.py` | Read-only project inference: additive name/memory/task/history evidence plus a small active-domain bonus, confidence threshold and ambiguity margin, short project summaries; never creates, moves, or renames anything |
 | `harness/tasks/manager.py` | Task files, valid transitions, dependency release, sequencing, running-task domain reassignment; legacy rows with removed structure keys load by filtering to current fields |
 | `harness/control/decisions.py` | File-backed decision log (`decisions/dec_*.json`), open/terminal queries, task/suggestion lookup, suggestion mirroring |
 | `harness/control/resolver.py` | Deterministic reading of a reply in decision context: explicit/contextual selection, ambiguity, approval/rejection/modification/defer/cancel, question vs unrelated request |
@@ -72,13 +73,14 @@ It has no concrete imports.
 | `harness/profile/provider.py` | Persona versions and proposed edits |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
-| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback (procedural hints normalize non-procedure subtypes to `lesson`), kind-aware duplicate/conflict policy, lifecycle, keyword retrieval with recency tie-break, usage, consolidation maintenance (semantic-only retype), rollback |
+| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback (procedural hints normalize non-procedure subtypes to `lesson`), kind-aware duplicate/conflict policy, lifecycle metadata persistence and derived lifecycle view, hybrid explainable retrieval (exact identifiers, lexical, optional semantic, scope priority, recency/provenance/kind weights, conflict and validity suppression), usage, consolidation maintenance (semantic-only retype), rollback |
+| `harness/memory/semantic.py` | Pluggable `SemanticScorer` implementations: dependency-free lexical-semantic scorer (configurable concept groups, stemming, character n-grams) and the off switch; a deployment can substitute an embedding-backed scorer at the composition root |
 | `harness/memory/capture.py` | Deterministic execution-outcome capture: failure fingerprint dedupe, task-derived scope, resolving-success supersede, `memory.capture` events, no model call |
 | `harness/memory/classifier.py` | Replaceable deterministic (keyword-rule) memory type classifier plus the deterministic type-to-kind mapping |
 | `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
 | `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
 | `harness/memory/tokens.py` | Token/overlap aliases for retrieval |
-| `harness/context/builder.py` | Budgeted context sections (including a bounded active-domain directory that drops whole entries), pending decisions for the task, scopes, prompt variant, local current-time block, task created/memory updated age markers, memory tags with kind, bounded history, capability disclosure with enum values/defaults |
+| `harness/context/builder.py` | Query-driven budgeted context: cross-project memory retrieval with priority scopes (self stays on demand), per-item memory trimming that drops whole blocks, project summary and stats, pending decisions for the task or its project protected from trimming, bounded active-domain directory that drops whole entries, persona-trim fallback when the total budget cannot fit the safety instructions, prompt variant, local current-time block, age markers, memory tags with kind/lifecycle, bounded history, capability disclosure with enum values/defaults, and inclusion/exclusion/budget stats |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
 | `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`); memory enums/defaults generated from `constants` |
 | `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records |
@@ -86,7 +88,7 @@ It has no concrete imports.
 | `harness/capabilities/mcp.py` | Optional stdio MCP discovery/call via the official SDK |
 | `harness/orchestrator/parse.py` | Pydantic parsing, loose/strict proposal JSON schemas, actionable parse errors |
 | `harness/orchestrator/machine.py` | Allowed-state and action-transition rules |
-| `harness/orchestrator/loop.py` | Turn handling through the control plane, approved-action dispatch, heuristic/LLM planning with the domain directory and active-domain inheritance, task loop, retry cap, confirmation gate, honesty/internal-schema guards, turn timeline and metrics |
+| `harness/orchestrator/loop.py` | Turn handling through the control plane, approved-action dispatch, heuristic/LLM planning with the domain directory, active-domain hint plus project inference for tasks with no planner domain (logged as `plan.domain_inference`, session selection preserved), multi-word suggestion gate, task loop, retry cap, confirmation gate, honesty/internal-schema guards, turn timeline and metrics |
 | `harness/orchestrator/timeline.py` | Per-turn stage recorder (start offset, duration, detail) serialized into traces |
 | `harness/consolidation/service.py` | Evidence snapshot, optional model extraction, deterministic retype/merge/supersede pass, run report, rollback |
 | `harness/maintenance/reset.py` | Full/selective state wipe, timestamped backup archive, seed re-application, stale-reference scrub, reset audit event |
@@ -114,14 +116,25 @@ user text (CLI `turn` or web chat)
                                   yes -> TaskManager.create(one code task)
                                   no  -> ModelAdapter.complete(task plan with directory)
                                         -> TaskManager.create(sequence, deps)
+                                 a task with no planner domain: infer the
+                                 likely existing project (name/memory/task/
+                                 history evidence, active domain as a small
+                                 bonus), fall back to the active domain when
+                                 nothing is confident, log plan.domain_inference
   -> TaskManager.next_ready
   -> ContextBuilder.build(task, session, trace_id)
        persona + preferences + bounded structure directory
-       + domain + task + pending decisions for this task
+       + cross-project memory retrieval (priority scopes, per-item budget
+       trimming, lifecycle-tagged memory blocks, usage rows)
+       + current project summary + task + pending decisions for the task
+       or its project (protected from trimming)
        + local current time + bounded history (full/summary/segment, compact ts
        and gap markers, memory updated/age markers)
        + enabled capability manifests with enum values/defaults;
-       budget overflow records exclusions; prompt variant selects full/trimmed rules
+       budget overflow records exclusions; the total-budget drop order is
+       history, structure, domain, preferences, capabilities, then a persona
+       trim before ever touching the safety instructions;
+       prompt variant selects full/trimmed rules
   -> ModelAdapter.complete(proposal, schema=strict|loose, on_delta=...)
   -> parse_proposal -> orchestrator.machine.apply_action
        internal-schema ask? -> reject and retry
@@ -164,7 +177,13 @@ traces.
 Planning is selectable through `tasks.planning_mode`: `llm` always asks the
 model to split, while `heuristic` (the default) creates one task in code for
 short single-request messages and reserves the model split for marker-bearing
-input. Both paths inherit `session.active_domain_id`; the planner prompt carries
+input. Both paths treat `session.active_domain_id` as the fallback scope: a
+task with no planner domain first goes through project inference
+(`domain.inference.*`), which scores name, project-scoped memory, open-task,
+and recent-history evidence plus a small active-domain bonus, associates the
+new task only on a confident unambiguous match, and logs the decision as a
+`plan.domain_inference` event. The session selection is never changed and
+existing tasks are never reassigned. The planner prompt carries
 the same domain directory as the context and records unresolved names as
 `plan.structure_miss` events before falling back to the active domain. `loop.stop_after_nonretryable_failure` (default true) rejects further
 capability calls after a non-retryable execution failure and forces an honest
@@ -187,7 +206,20 @@ controls when history lines get a relative "N hours later" marker.
 `context.budgets.history` caps the history section. `context.budgets.structure`
 (default 300) caps the active-domain directory; overflow drops whole
 directory entries, and the total-budget drop order is history, structure,
-domain, preferences, capabilities. `domain.match_overlap` (default 0.8) is the
+domain, preferences, capabilities, followed by a persona trim so safety
+instructions survive an otherwise impossible total budget.
+`context.retrieval.candidate_multiplier`/`min_candidates` set how many memory
+candidates are considered before per-item trimming, `context.project.*` bounds
+the project summary, and `context.pending_decisions.*` bounds and scopes the
+pending-decision block (task-linked, plus same-project decisions when
+`include_project` is true). Retrieval weights live under
+`memory.retrieval.*` (`lexical`, `semantic`, `exact`, `scope`, `recency`,
+`provenance`, `kind`, plus thresholds and the optional concept vocabulary);
+`implementations.retriever` selects `hybrid` (default, with the
+dependency-free lexical-semantic scorer) or `keyword` (scorer off).
+`domain.inference.*` tunes project inference, and
+`domain.suggestion.min_words` (default 2) stops one-word topics from ever
+producing a domain suggestion. `domain.match_overlap` (default 0.8) is the
 name overlap at which a suggestion is treated as a duplicate. `context.history.strategy`
 selects `full`, rolling `summary` (default), or gap-based `segment`;
 `verbatim_turns`, `segment_gap_hours`, `summary_tokens`,
@@ -246,6 +278,34 @@ hint that arrives with a non-`procedure`/`lesson` classifier subtype is
 normalized to `lesson` in the core, so the kind/type axes stay consistent;
 semantic writes and explicit `remember` calls (which pass no kind hint) are
 unaffected.
+
+Retrieval (`MemoryCore.retrieve`) is a single additive, explainable score:
+exact identifier matches (hostname/IP/path/id via a shared regex), lexical
+overlap, optional semantic similarity from the injected `SemanticScorer`
+(off entirely when `implementations.retriever` is `keyword`), a scope-priority
+bonus (other scopes stay eligible with a tiny penalty), recency decay,
+provenance/evidence/confidence, and kind usefulness for the query. Every
+component lands in `RankedMemory.score_parts` and the reason string, so usage
+rows and traces explain why a memory was served. Superseded/retracted rows,
+records outside their `valid_from`/`valid_until` window, and an older row whose
+newer replacement is active are removed before ranking; `_suppress_conflicts`
+drops an active row that a newer active row on the same subject beats, so an
+old statement can never win on wording alone. The baseline semantic scorer
+(`harness/memory/semantic.py`) is dependency-free: configurable concept groups,
+light stemming, and character trigrams, with the generic vocabulary overridable
+through `memory.retrieval.semantic_concepts`. An embedding-backed scorer can be
+injected through the same `SemanticScorer` protocol without touching the core.
+
+Records persist lifecycle metadata next to the status:
+`evidence_status` (`stated`/`observed`/`inferred`/`corroborated`),
+`confidence` (0..1), optional `valid_from`/`valid_until`, and `tags`.
+`MemoryCore.lifecycle()` derives the explainable category — verified fact,
+preference, decision, lesson, temporary event, unresolved hypothesis,
+proposed commitment, superseded, retracted — from the stored fields, and the
+context builder renders it on each memory tag. Inferred or low-confidence
+rows rank below explicit corroborated ones and are never promoted to verified
+facts; an explicit user correction supersedes the outdated record through the
+normal conflict path.
 
 Procedural capture (`harness/memory/capture.py`) is deterministic and needs no
 model call. It records only `failed`, `denied`, `unavailable`, and `unknown`

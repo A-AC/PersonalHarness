@@ -55,7 +55,18 @@ def test_retrieval_hit_rate_on_a_fixed_set(make_harness) -> None:
 
 
 def test_recency_breaks_equal_scores(make_harness) -> None:
-    h = make_harness([])
+    # Hybrid retrieval adds semantic and recency-decay components by default,
+    # which would make these two records score differently. Pin both off so the
+    # test still checks the original guarantee: with equal additive scores, the
+    # most recently updated memory wins.
+    h = make_harness(
+        [],
+        settings={
+            "memory": {
+                "retrieval": {"semantic_weight": 0.0, "recency_weight": 0.0}
+            }
+        },
+    )
     source = h.sessions.record_interaction("seed")
     older = h.memory.submit(
         MemoryCandidate(

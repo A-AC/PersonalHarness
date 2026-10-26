@@ -14,6 +14,7 @@ from harness.contracts.domains import StructureDraft
 from harness.control.decisions import FileDecisionStore
 from harness.control.plane import DefaultControlPlane
 from harness.control.resolver import DefaultDecisionResolver
+from harness.domains.inference import DefaultDomainInference
 from harness.domains.registry import FileDomainRegistry
 from harness.events.log import FileEventLog
 from harness.history.service import FileHistoryService
@@ -22,6 +23,7 @@ from harness.memory.capture import ExecutionOutcomeCapture
 from harness.memory.classifier import KeywordMemoryClassifier
 from harness.memory.file_manager import FileMemoryManager
 from harness.memory.inmemory import InMemoryMemoryManager
+from harness.memory.semantic import LexicalSemanticScorer
 from harness.model.openai_http import OpenAICompatAdapter
 from harness.model.scripted import ScriptedAdapter
 from harness.orchestrator.loop import DefaultInteractionLoop
@@ -214,12 +216,16 @@ def build_harness(
     classifier = KeywordMemoryClassifier(settings)
     if classifier_name != "keyword":
         classifier = KeywordMemoryClassifier(settings)
+    retriever = str(settings.get("implementations.retriever"))
+    semantic = LexicalSemanticScorer(settings) if retriever == "hybrid" else None
     if impl == "inmemory":
         memory: FileMemoryManager | InMemoryMemoryManager = InMemoryMemoryManager(
-            settings, events, sources, scope_exists, classifier
+            settings, events, sources, scope_exists, classifier, semantic
         )
     else:
-        memory = FileMemoryManager(root / "memory", settings, events, sources, scope_exists, classifier)
+        memory = FileMemoryManager(
+            root / "memory", settings, events, sources, scope_exists, classifier, semantic
+        )
     capabilities.attach_memory(memory)
     if model is None:
         adapter_name = str(settings.get("implementations.model"))
@@ -227,8 +233,19 @@ def build_harness(
             model = ScriptedAdapter()
         else:
             model = OpenAICompatAdapter(settings)
+    inference = DefaultDomainInference(settings, domains, tasks, memory, sessions)
     history = FileHistoryService(root / "history", settings, sessions, model, events)
-    context = DefaultContextBuilder(settings, memory, profile, domains, capabilities, sessions, history, decisions=decisions)
+    context = DefaultContextBuilder(
+        settings,
+        memory,
+        profile,
+        domains,
+        capabilities,
+        sessions,
+        history,
+        decisions=decisions,
+        inference=inference,
+    )
     outcomes = ExecutionOutcomeCapture(settings=settings, events=events, memory=memory)
     loop = DefaultInteractionLoop(
         settings=settings,
@@ -243,6 +260,7 @@ def build_harness(
         history=history,
         outcomes=outcomes,
         control=control,
+        inference=inference,
     )
     consolidation = FileConsolidationService(
         root / "consolidation",

@@ -34,6 +34,46 @@ class Suggestion:
     cooldown_until: str | None = None
 
 
+@dataclass
+class DomainMatch:
+    """A temporary relevance judgement, never a persisted association."""
+
+    domain_id: str | None
+    name: str
+    score: float
+    reason: str
+    confident: bool = False
+    ambiguous: bool = False
+    candidates: list[str] = field(default_factory=list)
+    evidence: dict[str, float] = field(default_factory=dict)
+
+
+class DomainInference(Protocol):
+    """Infers likely existing projects from a request.
+
+    The active domain is only one input and never an absolute routing
+    constraint. Implementations must not create, rename, or move domains,
+    tasks, or memories.
+    """
+
+    def infer(
+        self,
+        query: str,
+        *,
+        active_domain_id: str | None = None,
+    ) -> DomainMatch: ...
+
+    def infer_many(
+        self,
+        query: str,
+        *,
+        active_domain_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[DomainMatch]: ...
+
+    def summary(self, domain_id: str, *, limit: int = 4) -> str: ...
+
+
 class DomainRegistry(Protocol):
     def ensure_self(self) -> Domain: ...
     def get_domain(self, domain_id: str) -> Domain: ...
