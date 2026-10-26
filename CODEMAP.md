@@ -38,7 +38,7 @@ It has no concrete imports.
 | `capabilities.py` | Manifest, operation spec, execute request, executor protocol |
 | `consolidation.py` | Consolidation run and service protocol |
 | `context.py` | Context package/section/inclusion and builder protocol |
-| `domains.py` | Domain/project/workspace/draft/suggestion and registry protocol |
+| `domains.py` | Domain/draft/suggestion and registry protocol |
 | `events.py` | Event and event-log protocol |
 | `history.py` | History note/segment/view and the replaceable history-service protocol |
 | `loop.py` | Turn result and interaction-loop protocol |
@@ -63,7 +63,7 @@ It has no concrete imports.
 | `harness/session/manager.py` | Session resume (including old files without an active domain), append-only interactions with user/assistant timestamps, subject hits, persisted active domain |
 | `harness/session/turns.py` | `DefaultTurnService`: one serialized turn entry point for CLI and web, progress listener, trace/memory detail read model |
 | `harness/domains/registry.py` | Self domain, explicit structure creation, suggestions, normalized suggestion cooldown, enablement |
-| `harness/tasks/manager.py` | Task files, valid transitions, dependency release, sequencing, running-task structure reassignment |
+| `harness/tasks/manager.py` | Task files, valid transitions, dependency release, sequencing, running-task domain reassignment; legacy rows with removed structure keys load by filtering to current fields |
 | `harness/profile/provider.py` | Persona versions and proposed edits |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
@@ -73,15 +73,15 @@ It has no concrete imports.
 | `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
 | `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
 | `harness/memory/tokens.py` | Token/overlap aliases for retrieval |
-| `harness/context/builder.py` | Budgeted context sections (including a bounded active-domain/project directory that drops whole entries), scopes, prompt variant, local current-time block, task created/memory updated age markers, memory tags with kind, bounded history, capability disclosure with enum values/defaults |
+| `harness/context/builder.py` | Budgeted context sections (including a bounded active-domain directory that drops whole entries), scopes, prompt variant, local current-time block, task created/memory updated age markers, memory tags with kind, bounded history, capability disclosure with enum values/defaults |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
-| `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`, `suggest_project`); memory enums/defaults generated from `constants` |
+| `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`); memory enums/defaults generated from `constants` |
 | `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records |
 | `harness/capabilities/skills.py` | `SKILL.md` discovery |
 | `harness/capabilities/mcp.py` | Optional stdio MCP discovery/call via the official SDK |
 | `harness/orchestrator/parse.py` | Pydantic parsing, loose/strict proposal JSON schemas, actionable parse errors |
 | `harness/orchestrator/machine.py` | Allowed-state and action-transition rules |
-| `harness/orchestrator/loop.py` | Turn handling, explicit structure commands (including switch/open/leave and suggestion confirmation hygiene), heuristic/LLM planning with the structure directory and active-domain inheritance, task loop, retry cap, honesty/internal-schema guards, turn timeline and metrics |
+| `harness/orchestrator/loop.py` | Turn handling, explicit structure commands (including switch/open/leave and suggestion confirmation hygiene), heuristic/LLM planning with the domain directory and active-domain inheritance, task loop, retry cap, honesty/internal-schema guards, turn timeline and metrics |
 | `harness/orchestrator/timeline.py` | Per-turn stage recorder (start offset, duration, detail) serialized into traces |
 | `harness/consolidation/service.py` | Evidence snapshot, optional model extraction, deterministic retype/merge/supersede pass, run report, rollback |
 | `harness/maintenance/reset.py` | Full/selective state wipe, timestamped backup archive, seed re-application, stale-reference scrub, reset audit event |
@@ -106,7 +106,7 @@ user text (CLI `turn` or web chat)
   -> TaskManager.next_ready
   -> ContextBuilder.build(task, session, trace_id)
        persona + preferences + bounded structure directory
-       + domain/project/workspace + task
+       + domain + task
        + local current time + bounded history (full/summary/segment, compact ts
        and gap markers, memory updated/age markers)
        + enabled capability manifests with enum values/defaults;
@@ -151,7 +151,7 @@ Planning is selectable through `tasks.planning_mode`: `llm` always asks the
 model to split, while `heuristic` (the default) creates one task in code for
 short single-request messages and reserves the model split for marker-bearing
 input. Both paths inherit `session.active_domain_id`; the planner prompt carries
-the same structure directory as the context and records unresolved names as
+the same domain directory as the context and records unresolved names as
 `plan.structure_miss` events before falling back to the active domain. `loop.stop_after_nonretryable_failure` (default true) rejects further
 capability calls after a non-retryable execution failure and forces an honest
 failure response. `loop.honesty_guard` (default true) rejects a final response
@@ -171,7 +171,7 @@ task section using `context.timezone` (default `America/Mexico_City`, falling
 back to UTC if the zone database is missing or invalid); `context.time.gap_hours`
 controls when history lines get a relative "N hours later" marker.
 `context.budgets.history` caps the history section. `context.budgets.structure`
-(default 300) caps the active-domain/project directory; overflow drops whole
+(default 300) caps the active-domain directory; overflow drops whole
 directory entries, and the total-budget drop order is history, structure,
 domain, preferences, capabilities. `domain.match_overlap` (default 0.8) is the
 name overlap at which a suggestion is treated as a duplicate. `context.history.strategy`
@@ -216,7 +216,7 @@ before dispatch as `in_flight` and completed with `started_at`, `ended_at`,
 are optional hint inputs: enum validation never fails the call for them. The
 memory core assigns `type` with the configured classifier
 (`memory.classifier.rules`, `memory.classifier.default_type`) and computes the
-default scope from project/domain/self context before honoring a valid hint.
+default scope from domain/self context before honoring a valid hint.
 Rejected hints are written to `hint_notes` on the record and returned as
 `argument_notes`; explicit `self` is ignored outside an assistant-focused task.
 
@@ -246,8 +246,8 @@ is `kind=procedural`, `origin=inferred`, with
 `evidence_status=observed`, and only the structured
 `{status, error_category, message, capability, operation}` fields. Its content
 is one deterministic sentence naming the operation and outcome (no user text),
-and the default scope follows the task: project, then a non-self domain, then
-self, then global. Before writing a failure, active procedural records in that
+and the default scope follows the task: a non-self domain, then self, then
+global. Before writing a failure, active procedural records in that
 scope are scanned and an existing record with the same
 `(capability, operation, status, error_category)` fingerprint suppresses the
 duplicate. A resolving success writes a resolution lesson and supersedes the
@@ -336,9 +336,7 @@ The CLI is `harness reset [--scope full|memories|conversations] [--yes]
 | `sessions/interactions.jsonl` | User rows plus assistant-update rows, each with UTC timestamps |
 | `history/segments/seg_*.json` | Stored history segment, covered interaction ids, rolling summary, status/error, and summary token counts |
 | `registry/domains/*.json` | Domain records, including reserved `self` |
-| `registry/projects/*.json` | Project records and workspace pointer |
-| `registry/workspaces/*.json` | Workspace notes metadata |
-| `registry/suggestions/*.json` | Suggested domains/projects and status/cooldown |
+| `registry/suggestions/*.json` | Suggested domains and status/cooldown |
 | `tasks/tsk_*.json` | Task state, constraints, outcome, flags, sequence |
 | `persona/persona.json` | Current persona version |
 | `persona/history.json` | Persona version history |

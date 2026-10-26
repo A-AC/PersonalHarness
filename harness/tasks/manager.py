@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from harness.constants import BlockReason, TaskState
@@ -53,6 +53,10 @@ class FileTaskManager:
         outcome = data.get("outcome")
         if outcome:
             data["outcome"] = TaskOutcome(**outcome)
+        # Legacy task rows may carry structure keys that this release removed.
+        # Keep the row loadable by passing only fields the contract still has.
+        known = {item.name for item in fields(Task)}
+        data = {key: value for key, value in data.items() if key in known}
         return Task(**data)
 
     def create(self, spec: TaskSpec) -> Task:

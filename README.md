@@ -11,8 +11,8 @@ unrestricted network access. Anything with external effects must be an
 explicitly registered capability, a configured MCP tool, or an instruction-only
 skill.
 
-State is file-backed and inspectable: settings, memory, domains and projects,
-tasks, sessions, traces, events, persona versions, consolidation runs, and
+State is file-backed and inspectable: settings, memory, domains, tasks,
+sessions, traces, events, persona versions, consolidation runs, and
 execution attempts all live under one data directory as UTF-8 JSON/JSONL with
 UTC ISO-8601 timestamps.
 
@@ -52,13 +52,13 @@ The v1 scope is deliberately small:
   schema such as a memory type or scope.
 - **Memory with provenance.** Semantic, episodic, procedural, and prospective
   kinds over facts, preferences, decisions, procedures, and lessons in global,
-  self, domain, or project scope, with explicit/inferred source rules, conflict
+  self, or domain scope, with explicit/inferred source rules, conflict
   handling, supersession, retraction, usage logging, and consolidation rollback.
-- **Domains, projects, and workspaces.** Structure is created only by an
+- **Domains.** Structure has one level: a domain. It is created only by an
   explicit user command or confirmation; the model may only suggest. An active
-  domain turns a domain into the current project workspace: tasks inherit it,
-  domain-scoped memory accumulates, and the model or the chat selector can
-  enter/leave an existing domain without creating one.
+  domain makes tasks inherit it and lets domain-scoped memory accumulate, and
+  the model or the chat selector can enter/leave an existing domain without
+  creating one.
 - **Budgeted context and full traces.** Each model call records the context
   sections included or excluded, the prompt, the raw response, validation
   result, duration, time to first token, prompt/completion/visible/reasoning
@@ -91,7 +91,7 @@ user text
                                 heuristic mode; both inherit the active domain
   -> persisted tasks
   -> next ready task
-  -> budgeted context (persona, memory, structure directory, domain/project,
+  -> budgeted context (persona, memory, structure directory, active domain,
      history, capabilities)
   -> model proposal (respond / ask / act / continue / end), strict or loose schema
   -> validation + permission check + internal-schema/honesty guards
@@ -695,7 +695,7 @@ Important groups:
   sampling, seed, thinking budget, timeout, retries, response format, strict or
   loose action schema
 - `context.budgets.*`: per-section and total token budgets, including
-  `context.budgets.structure` for the active-domain/project directory
+  `context.budgets.structure` for the active-domain directory
 - `context.prompt_variant`, `context.include_time`: full/trimmed rules and the
   current UTC time in the task section
 - `context.self_scope_keywords`: phrases that load the reserved `self` domain
@@ -751,9 +751,9 @@ tasks.
 
 Important invariants:
 
-- The model may only **suggest** a domain or project (`harness_structure`).
-  Creation happens only after an explicit user command or confirmation. It may
-  enter or leave an existing domain, but never create one for a switch request.
+- The model may only **suggest** a domain (`harness_structure`). Creation
+  happens only after an explicit user command or confirmation. It may enter or
+  leave an existing domain, but never create one for a switch request.
 - A bare "yes" or "no" confirms or declines a suggestion only when exactly one
   suggestion is pending and no task is awaiting the user; otherwise it is a
   normal turn.
@@ -776,31 +776,30 @@ Important invariants:
 - All timestamps are UTC ISO-8601 (`Z`). Files are UTF-8 with LF endings and
   writes use a temporary file plus `os.replace`.
 
-## Domains and projects
+## Domains
 
-Domains are project workspaces. A domain holds projects, workspaces, capability
-enablement, and its own memory scope. The reserved `self` domain holds memories
-about the assistant and loads on demand.
+Structure is a single level: domains. A domain holds capability enablement and
+its own memory scope. The reserved `self` domain holds memories about the
+assistant and loads on demand.
 
 The session stores an optional active domain. Every task planned from a turn
 inherits it, including the code-only heuristic plan and tasks whose planner
 names no domain or names one that does not exist. That is what makes
 `domain:<id>` memory accumulate while the user is working in a domain. The
-structure directory in the prompt lists the active domain, non-archived domains
-with project counts, projects with their domain, and pending suggestions; the
-planner receives the same directory. The section has its own
-`context.budgets.structure` budget and drops whole entries rather than cutting a
-line, and the total-budget drop order is history, structure, domain,
-preferences, capabilities.
+structure directory in the prompt lists the active domain, non-archived domains,
+and pending suggestions; the planner receives the same directory. The section
+has its own `context.budgets.structure` budget and drops whole entries rather
+than cutting a line, and the total-budget drop order is history, structure,
+domain, preferences, capabilities.
 
 The user can switch with an explicit "work on", "switch to", or "open <domain>"
 command, or with the selector on the chat page. Both resolve an existing
 non-archived domain by exact then normalized name. A missing or ambiguous name
 returns the available/candidate names and never creates a domain. The model can
 use `harness_structure.enter_domain` and `leave_domain` for the same purpose; a
-succeeded call also reassigns the running task's structure so the next loop
-iteration rebuilds context in the new scope. `leave_domain` clears the domain,
-project, and workspace.
+succeeded call also reassigns the running task's domain so the next loop
+iteration rebuilds context in the new scope. `leave_domain` clears the active
+domain.
 
 Suggestions are deduplicated before they are recorded: an existing domain, a
 pending suggestion with the same normalized or overlapping name, or a declined
@@ -820,9 +819,9 @@ harness derives the kind from the assigned type (`procedure`/`lesson` ->
 `kind_hint` is supplied. `procedure` and `lesson` remain valid types for legacy
 rows, and records written before `kind` existed derive it on load, so old data
 needs no migration.
-Scopes are `global`, `self`, `domain:<id>`, and `project:<id>`. `remember` only
+Scopes are `global`, `self`, and `domain:<id>`. `remember` only
 requires `content`. The harness derives `type` with a configurable keyword
-classifier and `scope` from the task's project/domain (or `global`). The model's
+classifier and `scope` from the task's domain (or `global`). The model's
 `type`/`scope` values are hints: invalid values fall back to the derived value
 and the rejected hint is recorded on the record, so a bad hint never fails the
 call. An explicit `self` hint is kept only for a task about the assistant, so a
@@ -851,8 +850,7 @@ Built-in manifests:
 - `mock`: pure-Python read operations (`ping`, `echo`, `status`, `add`), a
   structured `fail`, and write/destructive demos that are denied by default
 - `harness_memory`: `remember`, `correct`, `retract`
-- `harness_structure`: `enter_domain`, `leave_domain`, `suggest_domain`, and
-  `suggest_project` (the project's domain defaults to the active domain)
+- `harness_structure`: `enter_domain`, `leave_domain`, and `suggest_domain`
 
 Enablement is per domain; tasks without a domain use
 `capabilities.default_enabled`. Permission policy is separate:
@@ -878,7 +876,7 @@ data/
   events/events.jsonl
   traces/trc_*.json
   sessions/session.json, session_meta.json, interactions.jsonl
-  registry/domains/*.json, projects/*.json, workspaces/*.json, suggestions/*.json
+  registry/domains/*.json, suggestions/*.json
   tasks/tsk_*.json
   persona/persona.json, history.json, proposals/per_*.json
   capabilities/attempts/op_*.json
