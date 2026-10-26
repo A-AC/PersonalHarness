@@ -98,10 +98,51 @@ class MemoryCore:
         notes: list[str] = []
         assigned_type = self._assign_type(candidate.type_hint, content, notes)
         assigned_kind = self._assign_kind(candidate.kind_hint, assigned_type, notes)
+        if assigned_kind == MemoryKind.PROCEDURAL and assigned_type not in {
+            MemoryType.PROCEDURE.value,
+            MemoryType.LESSON.value,
+        }:
+            # A procedural hint can arrive with a semantic-looking classifier
+            # result (for example an execution-outcome sentence). Keep the
+            # kind/type axes consistent without touching semantic writes or
+            # explicit remember calls, which never pass a kind hint.
+            notes.append(f'procedural memory type "{assigned_type}" normalized to "lesson"')
+            assigned_type = MemoryType.LESSON.value
         scope = self._resolve_scope(candidate, notes)
 
         existing = self._find_exact(content, scope, assigned_kind)
         if existing is not None:
+            replaced: list[MemoryRecord] = []
+            supersedes = candidate.supersedes
+            if supersedes and supersedes != existing.id:
+                # A repeated resolution sentence is still allowed to retire the
+                # new failure it resolves, even though the content duplicates an
+                # earlier resolution lesson.
+                target = self._get(supersedes)
+                if (
+                    target is not None
+                    and target.status == MemoryStatus.ACTIVE
+                    and target.kind == assigned_kind
+                ):
+                    ts = now_ts()
+                    old = replace(
+                        target,
+                        status=MemoryStatus.SUPERSEDED,
+                        superseded_by=existing.id,
+                        updated_at=ts,
+                    )
+                    self._put(old)
+                    replaced.append(old)
+                    self._events.append(
+                        Event(
+                            id=new_id("evt"),
+                            ts=ts,
+                            actor="harness",
+                            operation="memory.supersede",
+                            target=old.id,
+                            result=existing.id,
+                        )
+                    )
             self._events.append(
                 Event(id=new_id("evt"), ts=now_ts(), actor="harness", operation="memory.duplicate", target=existing.id, result="active")
             )
@@ -110,6 +151,7 @@ class MemoryCore:
                 record=existing,
                 reason="already remembered",
                 duplicate=True,
+                replaced=replaced,
                 hint_notes=notes,
             )
 
