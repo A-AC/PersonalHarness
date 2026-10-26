@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,6 +9,12 @@ from harness.contracts.domains import Domain, StructureDraft, Suggestion
 from harness.contracts.events import Event, EventLog
 from harness.contracts.settings import SettingsService
 from harness.storage.atomic import atomic_write_json, new_id, now_ts, read_json
+
+
+def _row(cls: type, data: dict) -> dict:
+    """Drop keys a previous release wrote but the current contract removed."""
+    known = {item.name for item in fields(cls)}
+    return {key: value for key, value in data.items() if key in known}
 from harness.text import name_overlap, normalize_name
 
 
@@ -39,7 +45,7 @@ class FileDomainRegistry:
     def ensure_self(self) -> Domain:
         path = self._dir / "domains" / f"{SELF_DOMAIN_ID}.json"
         if path.exists():
-            return Domain(**read_json(path))
+            return Domain(**_row(Domain, read_json(path)))
         ts = now_ts()
         domain = Domain(
             id=SELF_DOMAIN_ID,
@@ -58,7 +64,7 @@ class FileDomainRegistry:
         path = self._dir / "domains" / f"{domain_id}.json"
         if not path.exists():
             raise KeyError(domain_id)
-        return Domain(**read_json(path))
+        return Domain(**_row(Domain, read_json(path)))
 
     def find_domain_by_name(self, name: str) -> Domain | None:
         wanted = name.strip().lower()
@@ -68,7 +74,10 @@ class FileDomainRegistry:
         return None
 
     def list_domains(self, *, include_archived: bool = False) -> list[Domain]:
-        items = [Domain(**read_json(path)) for path in sorted((self._dir / "domains").glob("*.json"))]
+        items = [
+            Domain(**_row(Domain, read_json(path)))
+            for path in sorted((self._dir / "domains").glob("*.json"))
+        ]
         if not include_archived:
             items = [item for item in items if not item.archived]
         return items
@@ -151,7 +160,7 @@ class FileDomainRegistry:
 
     def decline_suggestion(self, suggestion_id: str) -> Suggestion:
         data = read_json(self._dir / "suggestions" / f"{suggestion_id}.json")
-        draft = StructureDraft(**data["draft"])
+        draft = StructureDraft(**_row(StructureDraft, data["draft"]))
         cooldown_s = int(self._settings.get("domain.suggestion.cooldown_s"))
         until = datetime.now(timezone.utc) + timedelta(seconds=cooldown_s)
         suggestion = Suggestion(
@@ -169,7 +178,7 @@ class FileDomainRegistry:
 
     def confirm_suggestion(self, suggestion_id: str) -> Domain:
         data = read_json(self._dir / "suggestions" / f"{suggestion_id}.json")
-        draft = StructureDraft(**data["draft"])
+        draft = StructureDraft(**_row(StructureDraft, data["draft"]))
         created = self.create_domain(draft, confirmed=True)
         data["status"] = "confirmed"
         self._save("suggestions", data["id"], data)
@@ -179,8 +188,8 @@ class FileDomainRegistry:
         items = []
         for path in sorted((self._dir / "suggestions").glob("*.json")):
             data = read_json(path)
-            data["draft"] = StructureDraft(**data["draft"])
-            items.append(Suggestion(**data))
+            data["draft"] = StructureDraft(**_row(StructureDraft, data["draft"]))
+            items.append(Suggestion(**_row(Suggestion, data)))
         return items
 
     def enablement(self, domain_id: str) -> list[str]:

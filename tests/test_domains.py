@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from harness.constants import SELF_DOMAIN_ID
@@ -136,6 +138,29 @@ def test_planner_prompt_includes_the_structure_directory(make_harness) -> None:
     assert "Structure directory:" in system
     assert f"Active domain: homelab ({domain.id})" in system
     assert f"- {domain.id} | homelab" in system
+
+
+def test_legacy_domain_and_suggestion_rows_still_load(make_harness) -> None:
+    h = make_harness([])
+    domain = h.domains.create_domain(draft("homelab"), confirmed=True)
+
+    # V1.2 wrote memory_scope_id on every domain row.
+    domain_path = h.domains._dir / "domains" / f"{domain.id}.json"
+    domain_row = json.loads(domain_path.read_text(encoding="utf-8"))
+    domain_row["memory_scope_id"] = f"domain:{domain.id}"
+    domain_path.write_text(json.dumps(domain_row), encoding="utf-8")
+    assert h.domains.get_domain(domain.id).name == "homelab"
+    assert {item.name for item in h.domains.list_domains()} == {"self", "homelab"}
+
+    # V1.2 wrote kind/domain_id on suggestion drafts.
+    suggestion = h.domains.record_suggestion(draft("future lab"))
+    suggestion_path = h.domains._dir / "suggestions" / f"{suggestion.id}.json"
+    suggestion_row = json.loads(suggestion_path.read_text(encoding="utf-8"))
+    suggestion_row["draft"]["kind"] = "domain"
+    suggestion_row["draft"]["domain_id"] = None
+    suggestion_path.write_text(json.dumps(suggestion_row), encoding="utf-8")
+    assert h.domains.list_suggestions()[0].draft.name == "future lab"
+    assert h.domains.confirm_suggestion(suggestion.id).name == "future lab"
 
 
 def test_plan_resolves_normalized_names_and_reports_unresolved_misses(make_harness) -> None:
