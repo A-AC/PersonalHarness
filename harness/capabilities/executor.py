@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from harness.constants import SELF_DOMAIN_ID, ExecutionStatus, MemoryScopeKind, PermissionLevel
 from harness.contracts.actions import ExecutionResult
-from harness.contracts.capabilities import ExecuteRequest, Manifest, OperationSpec
+from harness.contracts.capabilities import ArgumentValidation, ExecuteRequest, Manifest, OperationSpec
 from harness.contracts.domains import DomainRegistry
 from harness.contracts.events import Event, EventLog
 from harness.contracts.memory import MemoryCandidate, MemoryManager
@@ -180,6 +180,35 @@ class FileCapabilityExecutor:
             result.status = ExecutionStatus.UNKNOWN
             result.message = scripted.get("message") or "unknown outcome"
         return self._finish(result, started, sequence)
+
+    def validate_arguments(
+        self,
+        capability: str,
+        operation: str,
+        arguments: dict[str, Any],
+    ) -> ArgumentValidation:
+        """Validate shape and schema without dispatching or writing an attempt.
+
+        Permission policy and domain enablement are intentionally not applied
+        here: an approved modification still goes through the real executor,
+        which remains the authority for those guards.
+        """
+        if capability not in self._manifests:
+            return ArgumentValidation(False, [f"capability not registered: {capability}"])
+        manifest = self._manifests[capability]
+        if not manifest.available:
+            return ArgumentValidation(False, [f"capability unavailable: {capability}"])
+        op = self._operation(manifest, operation)
+        if op is None:
+            return ArgumentValidation(False, [f"operation not found: {capability}.{operation}"])
+        normalized, errors, notes = self._normalize_args(op, arguments)
+        return ArgumentValidation(
+            ok=not errors,
+            errors=errors,
+            normalized_arguments=normalized if not errors else {},
+            notes=notes,
+            permission=op.permission,
+        )
 
     def _permitted(self, permission: str, capability: str) -> bool:
         if capability.startswith("harness_"):

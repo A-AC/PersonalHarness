@@ -27,6 +27,8 @@ class ActModel(BaseModel):
     operation: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     reason: str | None = None
+    requires_confirmation: bool = False
+    risk: str | None = None
 
 
 class ContinueModel(BaseModel):
@@ -62,6 +64,8 @@ PROPOSAL_SCHEMA_LOOSE = {
         "status": {"type": "string", "enum": ["completed", "cancelled", "abandoned"]},
         "summary": {"type": "string"},
         "reason": {"type": "string"},
+        "requires_confirmation": {"type": "boolean"},
+        "risk": {"type": "string"},
     },
     "required": ["kind"],
 }
@@ -98,6 +102,8 @@ PROPOSAL_SCHEMA_STRICT = {
                 "operation": {"type": "string"},
                 "arguments": {"type": "object"},
                 "reason": {"type": "string"},
+                "requires_confirmation": {"type": "boolean"},
+                "risk": {"type": "string"},
             },
             ["capability", "operation"],
         ),
@@ -160,7 +166,14 @@ def parse_proposal(raw: str) -> Proposal:
         return AskAction(question=m.question, missing=m.missing, reason=m.reason)
     if kind == "act":
         m = _validate(ActModel, data)
-        return ActAction(capability=m.capability, operation=m.operation, arguments=m.arguments, reason=m.reason)
+        return ActAction(
+            capability=m.capability,
+            operation=m.operation,
+            arguments=m.arguments,
+            reason=m.reason,
+            requires_confirmation=m.requires_confirmation,
+            risk=m.risk,
+        )
     if kind == "continue":
         m = _validate(ContinueModel, data)
         return ContinueAction(purpose=m.purpose, reason=m.reason)

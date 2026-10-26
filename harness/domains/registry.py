@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from harness.constants import SELF_DOMAIN_ID, SELF_DOMAIN_NAME
 from harness.contracts.domains import Domain, StructureDraft, Suggestion
@@ -29,7 +30,25 @@ class FileDomainRegistry:
         self._events = events
         (directory / "domains").mkdir(parents=True, exist_ok=True)
         (directory / "suggestions").mkdir(parents=True, exist_ok=True)
+        self._suggestion_listener: Callable[[Suggestion], None] | None = None
         self.ensure_self()
+
+    def attach_suggestion_listener(self, listener: Callable[[Suggestion], None]) -> None:
+        """Mirror suggestion lifecycle changes into a durable decision log.
+
+        The registry remains the domain source of truth. A listener failure must
+        not roll back a confirmed or declined suggestion, so notifications are
+        best effort.
+        """
+        self._suggestion_listener = listener
+
+    def _notify_suggestion(self, suggestion: Suggestion) -> None:
+        if self._suggestion_listener is None:
+            return
+        try:
+            self._suggestion_listener(suggestion)
+        except Exception:
+            pass
 
     def _rw(self) -> tuple[int, float]:
         return int(self._settings.get("storage.atomic_retries")), float(self._settings.get("storage.atomic_retry_s"))
@@ -156,6 +175,7 @@ class FileDomainRegistry:
                 data={"name": draft.name, "reason": draft.reason},
             )
         )
+        self._notify_suggestion(suggestion)
         return suggestion
 
     def decline_suggestion(self, suggestion_id: str) -> Suggestion:
@@ -174,6 +194,7 @@ class FileDomainRegistry:
         self._events.append(
             Event(id=new_id("evt"), ts=now_ts(), actor="user", operation="domain.suggestion.decline", target=suggestion.id, result="declined")
         )
+        self._notify_suggestion(suggestion)
         return suggestion
 
     def confirm_suggestion(self, suggestion_id: str) -> Domain:
@@ -182,6 +203,15 @@ class FileDomainRegistry:
         created = self.create_domain(draft, confirmed=True)
         data["status"] = "confirmed"
         self._save("suggestions", data["id"], data)
+        self._notify_suggestion(
+            Suggestion(
+                id=data["id"],
+                draft=draft,
+                ts=data["ts"],
+                status="confirmed",
+                cooldown_until=data.get("cooldown_until"),
+            )
+        )
         return created
 
     def list_suggestions(self) -> list[Suggestion]:

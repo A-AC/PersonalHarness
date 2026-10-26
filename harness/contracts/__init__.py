@@ -1,9 +1,23 @@
 """Replaceable manager contracts. Types and signatures only."""
 
-from harness.contracts.capabilities import CapabilityExecutor, ExecuteRequest, Manifest, OperationSpec
+from harness.contracts.capabilities import (
+    ArgumentValidation,
+    CapabilityExecutor,
+    ExecuteRequest,
+    Manifest,
+    OperationSpec,
+)
 from harness.contracts.chat import MemoryUse, MemoryWrite, TurnDetail, TurnService
 from harness.contracts.context import ContextPackage, ContextBuilder, ContextSection, InclusionRecord
 from harness.contracts.consolidation import ConsolidationRun, ConsolidationService
+from harness.contracts.control import ActionGate, ApprovedAction, ControlDirective, ControlPlane
+from harness.contracts.decisions import (
+    Decision,
+    DecisionInterpretation,
+    DecisionResolver,
+    DecisionStore,
+    PendingDecision,
+)
 from harness.contracts.domains import Domain, DomainRegistry, StructureDraft, Suggestion
 from harness.contracts.events import Event, EventLog
 from harness.contracts.history import HistoryNote, HistorySegment, HistoryService, HistoryView
@@ -38,6 +52,9 @@ from harness.contracts.actions import (
 
 __all__ = [
     "ActAction",
+    "ActionGate",
+    "ApprovedAction",
+    "ArgumentValidation",
     "AskAction",
     "CapabilityExecutor",
     "ConsolidationRun",
@@ -46,6 +63,12 @@ __all__ = [
     "ContextPackage",
     "ContextSection",
     "ContinueAction",
+    "ControlDirective",
+    "ControlPlane",
+    "Decision",
+    "DecisionInterpretation",
+    "DecisionResolver",
+    "DecisionStore",
     "Domain",
     "DomainRegistry",
     "EndAction",
@@ -72,6 +95,7 @@ __all__ = [
     "ModelResult",
     "OperationSpec",
     "OutcomeCapture",
+    "PendingDecision",
     "Persona",
     "PersonaDraft",
     "PersonaProposal",

@@ -12,7 +12,7 @@ explicitly registered capability, a configured MCP tool, or an instruction-only
 skill.
 
 State is file-backed and inspectable: settings, memory, domains, tasks,
-sessions, traces, events, persona versions, consolidation runs, and
+decisions, sessions, traces, events, persona versions, consolidation runs, and
 execution attempts all live under one data directory as UTF-8 JSON/JSONL with
 UTC ISO-8601 timestamps.
 
@@ -37,6 +37,12 @@ The v1 scope is deliberately small:
 - **Conversation with durable tasks.** A turn becomes one or more persisted
   tasks; a blocked task asks the user and resumes with the reply as a
   constraint, without stopping unrelated tasks.
+- **Control plane and durable decisions.** Before planning or dispatching, a
+  deterministic control plane resolves open proposals. Approvals, rejections,
+  modifications, deferrals, cancellations, clarification questions, and
+  unrelated requests are recorded as decision events. A bare "yes" resolves a
+  single applicable decision; with several it asks which one, and it never
+  authorizes an unrelated proposal.
 - **Five-action protocol.** `respond`, `ask`, `act`, `continue`, and `end`.
   Malformed proposals consume a bounded retry budget and end in a visible
   failure, not a silent success.
@@ -84,6 +90,8 @@ together. See [CODEMAP.md](CODEMAP.md) for the full module and storage map.
 ```text
 user text
   -> session interaction (append-only)
+  -> control plane: resolve a pending decision (approve / reject / modify /
+     defer / cancel / clarify) or classify the turn as an unrelated request
   -> structure command?  yes -> registry create/confirm/decline, or
                                 enter/leave/switch an existing domain
                          no  -> model task plan (with the structure directory),
@@ -92,9 +100,9 @@ user text
   -> persisted tasks
   -> next ready task
   -> budgeted context (persona, memory, structure directory, active domain,
-     history, capabilities)
+     pending decisions, history, capabilities)
   -> model proposal (respond / ask / act / continue / end), strict or loose schema
-  -> validation + permission check + internal-schema/honesty guards
+  -> validation + permission check + confirmation gate + internal-schema/honesty guards
   -> capability dispatch -> attempt record + evidence + event
   -> repeat until response, question, completion, or a limit
   -> trace + assistant update + turn result
@@ -104,6 +112,7 @@ user text
 | --- | --- |
 | Composition root | `harness/app.py` |
 | Contracts and protocols | `harness/contracts/` |
+| Control plane and decisions | `harness/control/` |
 | Orchestration | `harness/orchestrator/` |
 | File-backed managers | `harness/{settings,events,traces,session,domains,tasks,profile,memory,capabilities,consolidation}/` |
 | Model adapters | `harness/model/` |
@@ -706,6 +715,8 @@ Important groups:
 - `domain.suggestion.*`: repeated-subject threshold and cooldown;
   `domain.match_overlap` is the name overlap at which a suggestion is a duplicate
 - `loop.*`: iteration/time/retry limits, honesty and internal-schema guards
+- `control.confirmation.*`: whether confirmation gating is enabled and which
+  permission classes (or `all`) require a one-time decision
 - `session.history_window`, `ui.*`, `events/traces.retention_days`
 
 V1.1 defaults are `response_format: json_schema`, `action_schema: strict`,
@@ -754,9 +765,16 @@ Important invariants:
 - The model may only **suggest** a domain (`harness_structure`). Creation
   happens only after an explicit user command or confirmation. It may enter or
   leave an existing domain, but never create one for a switch request.
-- A bare "yes" or "no" confirms or declines a suggestion only when exactly one
-  suggestion is pending and no task is awaiting the user; otherwise it is a
-  normal turn.
+- A bare "yes" or "no" resolves exactly one applicable pending decision. If a
+  task is awaiting the user, the reply answers that question instead. When more
+  than one decision could apply, the harness asks which one and never guesses.
+- Domain suggestions are mirrored into the durable decision log, so confirming
+  or declining one is recorded like any other decision; the registry remains
+  the domain source of truth.
+- A confirmation authorizes exactly one dispatch. It never either grants or
+  bypasses a capability permission, domain enablement, argument check, or
+  execution guard: the ordinary executor still runs when the approved action is
+  dispatched.
 - Capability execution is validated in this order: registration, availability,
   operation exists, idempotency key, domain enablement, permission policy,
   argument schema, dispatch, result recording. Argument validation reports every
@@ -775,6 +793,44 @@ Important invariants:
   merged on read.
 - All timestamps are UTC ISO-8601 (`Z`). Files are UTF-8 with LF endings and
   writes use a temporary file plus `os.replace`.
+
+## Decisions and confirmations
+
+A decision is a durable proposal, not an authorization. Each one has a stable
+`dec_*` id, kind (`action`, `plan`, or `domain_creation`), status (`pending`,
+`deferred`, `approved`, `rejected`, `cancelled`, `completed`, `failed`,
+`superseded`, `expired`), prompt, summary, scope, risk, linked task, and the
+proposal it describes. Files live under `<data>/decisions/dec_*.json`.
+
+The control plane runs before planning or execution on every turn. It syncs
+domain suggestions, resolves an explicit structure command, then asks the
+deterministic resolver what the latest message means for the open decisions. A
+reply can approve, reject, modify, defer, cancel, or ask a clarifying question,
+or it can be an unrelated request that leaves the decisions untouched. When the
+choice is genuinely ambiguous it asks; it never treats a keyword or an
+unrelated question as authorization.
+
+An approved action is returned to the existing interaction loop as an
+`ApprovedAction` and dispatched through the ordinary capability executor. The
+execution is recorded against the decision, and success is claimed only when the
+executor reports `succeeded`; denied, failed, unavailable, and unknown outcomes
+are reported honestly. Approval is one-time and does not change settings,
+permission policy, or domain enablement. A later request creates a new decision.
+
+By default `control.confirmation.enabled` is true and
+`control.confirmation.permissions` is `destructive`, so a destructive operation
+is gated even when policy would deny it; the user can approve, and the executor
+then records the real denial. Set the permission list to `write`, `read`, or
+`all` to widen the gate. An operation can also declare
+`requires_confirmation=True`, and the model may set `requires_confirmation` on
+an `act` proposal; neither grants permission.
+
+"yes, but don't restart" modifies a plan by removing matching steps before
+approval. If the exclusion removes every step or leaves arguments invalid, the
+decision stays pending and nothing executes. Deferred decisions remain open and
+can be approved later. Rejected or cancelled proposals are terminal and never
+dispatch. Conversation and full resets remove the decision log with the tasks
+and interactions it references.
 
 ## Domains
 
@@ -878,6 +934,7 @@ data/
   sessions/session.json, session_meta.json, interactions.jsonl
   registry/domains/*.json, suggestions/*.json
   tasks/tsk_*.json
+  decisions/dec_*.json
   persona/persona.json, history.json, proposals/per_*.json
   capabilities/attempts/op_*.json
   memory/records/mem_*.json, usage.jsonl

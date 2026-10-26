@@ -19,6 +19,7 @@ ID_PREFIXES = (
     "sug",
     "per",
     "chg",
+    "dec",
 )
 
 
@@ -34,11 +35,43 @@ class TaskState(StrEnum):
 
 class BlockReason(StrEnum):
     AWAITING_USER = "awaiting_user"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
     DEPENDENCY = "dependency"
     LIMIT = "limit"
     MODEL_UNAVAILABLE = "model_unavailable"
     INTERRUPTED = "interrupted"
     CAPABILITY_UNAVAILABLE = "capability_unavailable"
+
+
+class DecisionStatus(StrEnum):
+    """Lifecycle of a durable confirmation/decision.
+
+    ``pending`` and ``deferred`` are open decisions. The remaining values are
+    terminal for one proposal; a new request must create a new decision.
+    """
+
+    PENDING = "pending"
+    DEFERRED = "deferred"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SUPERSEDED = "superseded"
+    EXPIRED = "expired"
+
+
+class DecisionIntent(StrEnum):
+    """How a user message relates to an open decision."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
+    MODIFY = "modify"
+    DEFER = "defer"
+    CANCEL = "cancel"
+    CLARIFY = "clarify"
+    UNRELATED = "unrelated"
+    NONE = "none"
 
 
 class MemoryKind(StrEnum):

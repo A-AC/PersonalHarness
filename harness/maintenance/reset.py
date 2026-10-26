@@ -54,6 +54,7 @@ class FileResetService:
             "events",
             "capabilities/attempts",
             "tasks",
+            "decisions",
             "consolidation",
         ),
         "full": (
@@ -65,6 +66,7 @@ class FileResetService:
             "events",
             "registry",
             "tasks",
+            "decisions",
             "persona",
             "capabilities/attempts",
             "memory",

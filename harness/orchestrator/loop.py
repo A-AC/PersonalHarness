@@ -10,6 +10,7 @@ from harness.constants import SELF_DOMAIN_ID, ActionKind, BlockReason, Execution
 from harness.contracts.actions import ActAction, AskAction, EndAction, ExecutionResult, Proposal, RespondAction
 from harness.contracts.capabilities import CapabilityExecutor, ExecuteRequest
 from harness.contracts.context import ContextBuilder
+from harness.contracts.control import ApprovedAction, ControlDirective, ControlPlane
 from harness.contracts.domains import DomainRegistry, StructureDraft
 from harness.contracts.events import Event, EventLog
 from harness.contracts.history import HistoryService
@@ -67,6 +68,7 @@ class DefaultInteractionLoop:
         events: EventLog,
         history: HistoryService,
         outcomes: ExecutionOutcomeRecorder | None = None,
+        control: ControlPlane | None = None,
     ):
         self._settings = settings
         self._model = model
@@ -79,6 +81,7 @@ class DefaultInteractionLoop:
         self._events = events
         self._history = history
         self._outcomes = outcomes
+        self._control = control
         # Per-task non-succeeded attempts, keyed by capability.operation. Kept
         # across a blocked/resumed run so a later success can still resolve the
         # lesson left by an earlier attempt of the same task.
@@ -113,30 +116,53 @@ class DefaultInteractionLoop:
         messages: list[str],
         emit: TurnListener | None,
     ) -> TurnResult:
-        structure_started = time.monotonic()
-        structure = self._handle_structure_command(user_text)
-        timeline.record("structure_check", structure_started, {"handled": structure is not None})
-        if structure is not None:
-            messages.extend(structure)
-            text = "\n".join(messages)
-            self._sessions.append_assistant(interaction.id, text, task_ids=[])
-            timeline.stage("response", duration_ms=0, detail={"kind": "structure", "text": text})
-            result = TurnResult(interaction_id=interaction.id, messages=messages, tasks=self._tasks.list())
-            self._write_turn_trace(interaction.id, timeline, result)
-            self._history.after_turn(interaction.id)
-            return result
+        directive = self._begin_turn(user_text, interaction.id, timeline)
+        if directive is not None and directive.mode in {"handled", "execute"}:
+            if directive.mode == "handled":
+                messages.extend(directive.messages)
+            else:
+                messages.extend(
+                    self._run_approved_actions(directive, interaction.id, timeline, emit)
+                )
+            interaction.task_ids = [
+                task.id for task in self._tasks.list() if task.interaction_id == interaction.id
+            ]
+            return self._finish_turn(interaction, timeline, messages)
 
-        waiting = [
-            task
-            for task in self._tasks.list(states=[TaskState.BLOCKED])
-            if task.block_reason == BlockReason.AWAITING_USER
-        ]
-        if waiting:
-            for task in waiting:
-                self._tasks.append_constraint(task.id, f"User reply: {user_text}")
-                self._tasks.transition(task.id, TaskState.READY, reason=None)
+        if directive is not None:
+            if directive.mode == "resume":
+                waiting = [
+                    task
+                    for task in self._tasks.list(states=[TaskState.BLOCKED])
+                    if task.block_reason == BlockReason.AWAITING_USER
+                ]
+                for task in waiting:
+                    self._tasks.append_constraint(task.id, f"User reply: {user_text}")
+                    self._tasks.transition(task.id, TaskState.READY, reason=None)
+            else:
+                self._plan_tasks(user_text, interaction.id, timeline, emit)
         else:
-            self._plan_tasks(user_text, interaction.id, timeline, emit)
+            # Fallback for a loop constructed without a Control Plane.
+            structure_started = time.monotonic()
+            structure = self._handle_structure_command(user_text)
+            timeline.record("structure_check", structure_started, {"handled": structure is not None})
+            if structure is not None:
+                messages.extend(structure)
+                interaction.task_ids = []
+                return self._finish_turn(interaction, timeline, messages)
+
+            waiting = [
+                task
+                for task in self._tasks.list(states=[TaskState.BLOCKED])
+                if task.block_reason == BlockReason.AWAITING_USER
+            ]
+            if waiting:
+                for task in waiting:
+                    self._tasks.append_constraint(task.id, f"User reply: {user_text}")
+                    self._tasks.transition(task.id, TaskState.READY, reason=None)
+            else:
+                self._plan_tasks(user_text, interaction.id, timeline, emit)
+
         created = self._tasks.list()
         interaction.task_ids = [task.id for task in created if task.interaction_id == interaction.id]
         suggestion_started = time.monotonic()
@@ -151,6 +177,36 @@ class DefaultInteractionLoop:
             messages.extend(result_messages)
             ready = self._tasks.next_ready()
 
+        return self._finish_turn(interaction, timeline, messages)
+
+    def _begin_turn(
+        self,
+        user_text: str,
+        interaction_id: str,
+        timeline: TurnTimeline | None = None,
+    ) -> ControlDirective | None:
+        if self._control is None:
+            return None
+        started = time.monotonic()
+        directive = self._control.begin_turn(user_text, interaction_id)
+        if timeline is not None:
+            timeline.record(
+                "control",
+                started,
+                {
+                    "mode": directive.mode,
+                    "intent": directive.intent,
+                    "decisions": directive.decision_ids,
+                },
+            )
+        return directive
+
+    def _finish_turn(
+        self,
+        interaction,
+        timeline: TurnTimeline,
+        messages: list[str],
+    ) -> TurnResult:
         text = "\n".join(messages)
         response_started = time.monotonic()
         self._sessions.append_assistant(interaction.id, text, task_ids=interaction.task_ids)
@@ -536,6 +592,168 @@ class DefaultInteractionLoop:
         )
         return f"We've talked about this a few times, want me to create a domain for '{' '.join(words)}'?"
 
+    def _run_approved_actions(
+        self,
+        directive: ControlDirective,
+        interaction_id: str,
+        timeline: TurnTimeline,
+        emit: TurnListener | None = None,
+    ) -> list[str]:
+        """Dispatch exactly the actions the user approved.
+
+        The Control Plane already resolved the decision and the executor still
+        enforces capability, policy, domain, and argument guards. These actions
+        intentionally skip the confirmation gate because approval *is* the
+        one-time confirmation; nothing else is granted.
+        """
+        if not directive.actions:
+            return ["There was no approved action to run."]
+        messages: list[str] = []
+        task = self._approved_task(directive.actions, interaction_id)
+        decision_id = directive.decision_ids[0] if directive.decision_ids else ""
+        total = len(directive.actions)
+        for index, approved in enumerate(directive.actions):
+            final = index == total - 1
+            task = self._task_for_approved(approved, task)
+            task = self._tasks.get(task.id)
+            if task.state in {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.FAILED}:
+                messages.append(
+                    f"I couldn't run the approved action: the linked task is no longer active."
+                )
+                break
+            if task.state != TaskState.RUNNING:
+                try:
+                    self._tasks.transition(task.id, TaskState.RUNNING, reason=None)
+                except ValueError:
+                    messages.append(
+                        "I couldn't run the approved action because its task could not be resumed."
+                    )
+                    break
+            proposal = self._approved_proposal(approved)
+            execution = self._dispatch_approved(
+                proposal,
+                task,
+                interaction_id,
+                timeline,
+            )
+            if decision_id and self._control is not None:
+                self._control.record_execution(
+                    decision_id,
+                    execution,
+                    task_id=task.id,
+                    final=final or execution.status != ExecutionStatus.SUCCEEDED,
+                )
+            succeeded = execution.status == ExecutionStatus.SUCCEEDED
+            if succeeded:
+                self._tasks.mark_succeeded_execution(task.id)
+                message = f"Completed {proposal.capability}.{proposal.operation}: {execution.message}."
+            elif execution.status == ExecutionStatus.UNKNOWN:
+                message = self._honest_failure_text(execution)
+            else:
+                message = self._failure_response(execution)
+            messages.append(message)
+            self._tasks.mark_delivered(task.id, message)
+            if not succeeded or final:
+                self._tasks.transition(task.id, TaskState.COMPLETED, reason=None)
+                self._tasks.record_outcome(
+                    task.id, TaskOutcome(summary=message, status=TaskState.COMPLETED)
+                )
+                timeline.stage(
+                    "response",
+                    duration_ms=0,
+                    detail={"kind": "approved_action", "task_id": task.id, "text": message},
+                )
+            if not succeeded:
+                break
+        return messages
+
+    def _approved_task(self, actions: list[ApprovedAction], interaction_id: str) -> Task:
+        for action in actions:
+            if action.task_id:
+                try:
+                    existing = self._tasks.get(action.task_id)
+                except KeyError:
+                    continue
+                if existing.state not in {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.FAILED}:
+                    return existing
+        first = actions[0]
+        goal = str(
+            first.proposal.get("goal")
+            or first.proposal.get("summary")
+            or "Execute approved action"
+        )
+        return self._tasks.create(TaskSpec(goal=goal, interaction_id=interaction_id))
+
+    def _task_for_approved(self, approved: ApprovedAction, default: Task) -> Task:
+        if not approved.task_id:
+            return default
+        try:
+            candidate = self._tasks.get(approved.task_id)
+        except KeyError:
+            return default
+        if candidate.state in {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.FAILED}:
+            return default
+        return candidate
+
+    @staticmethod
+    def _approved_proposal(approved: ApprovedAction) -> ActAction:
+        data = approved.proposal or {}
+        return ActAction(
+            capability=str(data.get("capability") or ""),
+            operation=str(data.get("operation") or ""),
+            arguments=dict(data.get("arguments") or {}),
+            reason=data.get("reason"),
+            requires_confirmation=False,
+        )
+
+    def _dispatch_approved(
+        self,
+        proposal: ActAction,
+        task: Task,
+        interaction_id: str,
+        timeline: TurnTimeline,
+    ) -> ExecutionResult:
+        execution_started = time.monotonic()
+        timeline.begin(
+            "execution",
+            {"task_id": task.id, "capability": proposal.capability, "operation": proposal.operation},
+        )
+        self_request = matches_keywords(
+            task.goal,
+            str(self._settings.get("context.self_scope_keywords") or ""),
+        )
+        execution = self._capabilities.execute(
+            ExecuteRequest(
+                task_id=task.id,
+                domain_id=task.domain_id,
+                capability=proposal.capability,
+                operation=proposal.operation,
+                arguments=proposal.arguments,
+                interaction_id=interaction_id,
+                self_request=self_request,
+            )
+        )
+        timeline.record("execution", execution_started, self._envelope_dict(execution))
+        self._capture_outcome(
+            task,
+            execution,
+            self_request,
+            self._task_failures.setdefault(task.id, {}),
+        )
+        self._events.append(
+            Event(
+                id=new_id("evt"),
+                ts=now_ts(),
+                actor="harness",
+                operation="loop.approved_action",
+                target=task.id,
+                result=execution.status,
+                trigger_ref=interaction_id,
+                refs=[execution.operation_id],
+            )
+        )
+        return execution
+
     def _run_task(
         self,
         task: Task,
@@ -714,6 +932,43 @@ class DefaultInteractionLoop:
                     break
                 continue
             if isinstance(proposal, ActAction):
+                gate = None
+                if self._control is not None:
+                    gate = self._control.gate_action(proposal, task, interaction_id)
+                if gate is not None and not gate.allowed:
+                    text = gate.prompt or (
+                        f"I need confirmation before running {proposal.capability}."
+                        f"{proposal.operation}. Should I proceed?"
+                    )
+                    trace.validation = {
+                        "ok": True,
+                        "blocked": "awaiting_confirmation",
+                        "action": "act",
+                        "decision_id": gate.decision.id if gate.decision else None,
+                    }
+                    timeline.record(
+                        "parse_validation",
+                        parse_started,
+                        {"ok": True, "blocked": "awaiting_confirmation"},
+                    )
+                    self._finish_trace(trace, interaction_id, timeline)
+                    self._tasks.mark_delivered(task.id, text)
+                    delivered.append(text)
+                    self._tasks.transition(
+                        task.id,
+                        TaskState.BLOCKED,
+                        reason=BlockReason.AWAITING_CONFIRMATION,
+                    )
+                    timeline.stage(
+                        "response",
+                        duration_ms=0,
+                        detail={
+                            "kind": "awaiting_confirmation",
+                            "task_id": task.id,
+                            "text": text,
+                        },
+                    )
+                    break
                 denied = self._identical_denied(proposal, fingerprints, identical_limit)
                 if denied:
                     invalid_used += 1

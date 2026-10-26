@@ -8,7 +8,12 @@ from harness.capabilities.executor import FileCapabilityExecutor
 from harness.consolidation.service import FileConsolidationService
 from harness.context.builder import DefaultContextBuilder
 from harness.contracts.capabilities import ExecuteRequest
+from harness.contracts.control import ControlPlane
+from harness.contracts.decisions import DecisionResolver, DecisionStore
 from harness.contracts.domains import StructureDraft
+from harness.control.decisions import FileDecisionStore
+from harness.control.plane import DefaultControlPlane
+from harness.control.resolver import DefaultDecisionResolver
 from harness.domains.registry import FileDomainRegistry
 from harness.events.log import FileEventLog
 from harness.history.service import FileHistoryService
@@ -39,6 +44,9 @@ class Harness:
     sessions: FileSessionManager
     domains: FileDomainRegistry
     tasks: FileTaskManager
+    decisions: DecisionStore
+    decision_resolver: DecisionResolver
+    control: ControlPlane
     profile: FileSelfProfile
     capabilities: FileCapabilityExecutor
     memory: FileMemoryManager | InMemoryMemoryManager
@@ -52,6 +60,7 @@ class Harness:
 
     def on_start(self) -> None:
         self.tasks.on_process_start()
+        self.control.on_start()
 
 
 def build_harness(
@@ -70,8 +79,21 @@ def build_harness(
     sessions = FileSessionManager(root / "sessions", settings, events)
     domains = FileDomainRegistry(root / "registry", settings, events)
     tasks = FileTaskManager(root / "tasks", settings, events)
+    decisions = FileDecisionStore(root / "decisions", settings, events)
     profile = FileSelfProfile(root / "persona", settings, events)
     capabilities = FileCapabilityExecutor(root / "capabilities", settings, events, domains)
+    decision_resolver = DefaultDecisionResolver()
+    control = DefaultControlPlane(
+        settings=settings,
+        sessions=sessions,
+        tasks=tasks,
+        domains=domains,
+        capabilities=capabilities,
+        decisions=decisions,
+        resolver=decision_resolver,
+        events=events,
+    )
+    domains.attach_suggestion_listener(decisions.sync_suggestion)
 
     def same_name(left: str, right: str) -> bool:
         if normalize_name(left) == normalize_name(right):
@@ -206,7 +228,7 @@ def build_harness(
         else:
             model = OpenAICompatAdapter(settings)
     history = FileHistoryService(root / "history", settings, sessions, model, events)
-    context = DefaultContextBuilder(settings, memory, profile, domains, capabilities, sessions, history)
+    context = DefaultContextBuilder(settings, memory, profile, domains, capabilities, sessions, history, decisions=decisions)
     outcomes = ExecutionOutcomeCapture(settings=settings, events=events, memory=memory)
     loop = DefaultInteractionLoop(
         settings=settings,
@@ -220,6 +242,7 @@ def build_harness(
         events=events,
         history=history,
         outcomes=outcomes,
+        control=control,
     )
     consolidation = FileConsolidationService(
         root / "consolidation",
@@ -255,6 +278,9 @@ def build_harness(
         sessions=sessions,
         domains=domains,
         tasks=tasks,
+        decisions=decisions,
+        decision_resolver=decision_resolver,
+        control=control,
         profile=profile,
         capabilities=capabilities,
         memory=memory,

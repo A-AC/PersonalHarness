@@ -25,6 +25,10 @@ class OperationSpec:
     idempotent: bool = True
     accepts_idempotency_key: bool = False
     retryable_error_categories: list[str] = field(default_factory=list)
+    # An operation may declare that a one-time confirmation is always needed.
+    # Harness policy can additionally require confirmation for permission
+    # classes (see control.confirmation.permissions).
+    requires_confirmation: bool = False
 
 
 @dataclass
@@ -35,6 +39,17 @@ class Manifest:
     operations: list[OperationSpec]
     skill_body: str | None = None
     available: bool = True
+
+
+@dataclass
+class ArgumentValidation:
+    """Side-effect-free argument check used before re-approving a modification."""
+
+    ok: bool
+    errors: list[str] = field(default_factory=list)
+    normalized_arguments: dict[str, Any] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+    permission: str | None = None
 
 
 @dataclass
@@ -56,6 +71,12 @@ class CapabilityExecutor(Protocol):
     def list_manifests(self) -> list[Manifest]: ...
     def get(self, name: str) -> Manifest: ...
     def execute(self, req: ExecuteRequest) -> ExecutionResult: ...
+    def validate_arguments(
+        self,
+        capability: str,
+        operation: str,
+        arguments: dict[str, Any],
+    ) -> ArgumentValidation: ...
     def script_next(self, capability: str, envelope: dict[str, Any]) -> None: ...
     def last_attempts(self, task_id: str) -> list[ExecutionResult]: ...
     def get_attempt(self, operation_id: str) -> ExecutionResult | None: ...

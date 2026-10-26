@@ -3,6 +3,7 @@ from __future__ import annotations
 from harness.constants import MemoryType, SELF_DOMAIN_ID
 from harness.contracts.capabilities import CapabilityExecutor
 from harness.contracts.context import ContextPackage, ContextSection, InclusionRecord
+from harness.contracts.decisions import DecisionStore
 from harness.contracts.domains import DomainRegistry
 from harness.contracts.history import HistoryService
 from harness.contracts.memory import MemoryManager, UsageEntry
@@ -45,6 +46,7 @@ class DefaultContextBuilder:
         capabilities: CapabilityExecutor,
         sessions: SessionManager,
         history: HistoryService,
+        decisions: DecisionStore | None = None,
     ):
         self._settings = settings
         self._memory = memory
@@ -53,6 +55,7 @@ class DefaultContextBuilder:
         self._capabilities = capabilities
         self._sessions = sessions
         self._history = history
+        self._decisions = decisions
 
     def build(self, task: Task, session: Session, *, trace_id: str | None = None) -> ContextPackage:
         persona = self._profile.current()
@@ -129,6 +132,9 @@ class DefaultContextBuilder:
             task_text += f"\n{current_time_block(self._settings)}"
         if any(item.startswith("User reply:") for item in task.constraints):
             task_text += "\nResumed: the latest user message answers your pending question."
+        pending_text = self._pending_decision_text(task)
+        if pending_text:
+            task_text += "\n" + pending_text
         history_view = self._history.build()
         history_text = history_view.text
         for note in history_view.included:
@@ -201,6 +207,25 @@ class DefaultContextBuilder:
             excluded=excluded,
             stats={"history": history_view.stats},
         )
+
+    def _pending_decision_text(self, task: Task) -> str:
+        if self._decisions is None:
+            return ""
+        try:
+            pending = [
+                item
+                for item in self._decisions.pending()
+                if task.id in item.task_ids
+            ]
+        except Exception:
+            return ""
+        if not pending:
+            return ""
+        lines = [
+            f"- {item.id}: {item.summary} (risk: {item.risk})"
+            for item in pending
+        ]
+        return "Pending decisions for this task:\n" + "\n".join(lines)
 
     def structure_text(self, session: Session) -> str:
         """Render the compact domain directory.

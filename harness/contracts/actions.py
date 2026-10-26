@@ -25,6 +25,11 @@ class ActAction:
     operation: str
     arguments: dict[str, Any] = field(default_factory=dict)
     reason: str | None = None
+    # The model may ask the harness to collect a one-time confirmation before
+    # dispatch. This is a proposal, not an authorization: the harness still
+    # enforces every capability and policy guard.
+    requires_confirmation: bool = False
+    risk: str | None = None
     kind: Literal["act"] = "act"
 
 

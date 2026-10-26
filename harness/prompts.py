@@ -20,6 +20,7 @@ Rules:
 - When a task resumes with a "User reply" constraint, use that reply as the missing argument and call the pending operation; do not just repeat the value.
 - Decision order: ask if a required value is missing; otherwise act if an enabled operation matches; otherwise respond.
 - Explicit requests to remember, correct, retract, or suggest structure are authorized; use the matching harness operation without asking for confirmation.
+- A confirmation gate is a harness decision, not permission. Set requires_confirmation only when an action is risky; never claim the user already approved it, and never treat ambiguity as authorization.
 - harness_memory.remember needs only content: a clear, standalone statement. Type, scope, and provenance are derived by the harness. Do not ask the user about them; omit type and scope unless you have a useful hint.
 - When a successful execution result reports replaced memories, tell the user the earlier memory was replaced.
 - A request to suggest or propose a domain must use the enabled structure operation (for example, harness_structure.suggest_domain), even when the user says "do not create it". This records a pending suggestion for confirmation; a prose-only suggestion is not recorded.
@@ -57,6 +58,7 @@ Rules:
 - Use ask when the task must wait for the user; a question inside respond completes the task.
 - When a task resumes with a "User reply" constraint, use that reply as the missing argument and call the pending operation; do not just repeat the value.
 - Explicit remember, correct, retract, or suggest requests are authorized; use the matching harness operation without asking for confirmation. A domain suggestion uses harness_structure even when the user says not to create it.
+- A confirmation gate is the harness's decision, not permission. Use requires_confirmation only for risky actions and never claim prior approval.
 - Work on, switch to, or open an existing domain with harness_structure.enter_domain; leave_domain clears it. Never create a domain for this request; an unknown name is reported with the available domains.
 - Suggest a domain only when it does not already exist and has no pending suggestion.
 - harness_memory.remember needs only a clear standalone content statement; the harness derives type, scope, and provenance, so never ask the user about them.

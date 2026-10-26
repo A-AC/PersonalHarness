@@ -35,9 +35,11 @@ It has no concrete imports.
 | --- | --- |
 | `actions.py` | Five action types and `ExecutionResult` |
 | `chat.py` | Turn event/listener, turn detail with retrieved memories and writes, and the single turn-service protocol |
-| `capabilities.py` | Manifest, operation spec, execute request, executor protocol |
+| `capabilities.py` | Manifest, operation spec, execute request, argument validation, executor protocol |
 | `consolidation.py` | Consolidation run and service protocol |
 | `context.py` | Context package/section/inclusion and builder protocol |
+| `control.py` | Control-plane directive, action gate, approved action, and coordinator protocol |
+| `decisions.py` | Decision record, store/resolver protocols, and deterministic interpretation |
 | `domains.py` | Domain/draft/suggestion and registry protocol |
 | `events.py` | Event and event-log protocol |
 | `history.py` | History note/segment/view and the replaceable history-service protocol |
@@ -62,8 +64,11 @@ It has no concrete imports.
 | `harness/traces/store.py` | Per-call trace files with prompt/inclusion/validation data |
 | `harness/session/manager.py` | Session resume (including old files without an active domain), append-only interactions with user/assistant timestamps, subject hits, persisted active domain |
 | `harness/session/turns.py` | `DefaultTurnService`: one serialized turn entry point for CLI and web, progress listener, trace/memory detail read model |
-| `harness/domains/registry.py` | Self domain, explicit structure creation, suggestions, normalized suggestion cooldown, enablement |
+| `harness/domains/registry.py` | Self domain, explicit structure creation, suggestions, normalized suggestion cooldown, enablement, and a best-effort suggestion listener that mirrors lifecycle changes into the decision log |
 | `harness/tasks/manager.py` | Task files, valid transitions, dependency release, sequencing, running-task domain reassignment; legacy rows with removed structure keys load by filtering to current fields |
+| `harness/control/decisions.py` | File-backed decision log (`decisions/dec_*.json`), open/terminal queries, task/suggestion lookup, suggestion mirroring |
+| `harness/control/resolver.py` | Deterministic reading of a reply in decision context: explicit/contextual selection, ambiguity, approval/rejection/modification/defer/cancel, question vs unrelated request |
+| `harness/control/plane.py` | Turn coordination: structure commands, decision resolutions, plan/approved-action directives, confirmation gating, execution recording, task cancellation |
 | `harness/profile/provider.py` | Persona versions and proposed edits |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
@@ -73,7 +78,7 @@ It has no concrete imports.
 | `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
 | `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
 | `harness/memory/tokens.py` | Token/overlap aliases for retrieval |
-| `harness/context/builder.py` | Budgeted context sections (including a bounded active-domain directory that drops whole entries), scopes, prompt variant, local current-time block, task created/memory updated age markers, memory tags with kind, bounded history, capability disclosure with enum values/defaults |
+| `harness/context/builder.py` | Budgeted context sections (including a bounded active-domain directory that drops whole entries), pending decisions for the task, scopes, prompt variant, local current-time block, task created/memory updated age markers, memory tags with kind, bounded history, capability disclosure with enum values/defaults |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
 | `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`); memory enums/defaults generated from `constants` |
 | `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records |
@@ -81,7 +86,7 @@ It has no concrete imports.
 | `harness/capabilities/mcp.py` | Optional stdio MCP discovery/call via the official SDK |
 | `harness/orchestrator/parse.py` | Pydantic parsing, loose/strict proposal JSON schemas, actionable parse errors |
 | `harness/orchestrator/machine.py` | Allowed-state and action-transition rules |
-| `harness/orchestrator/loop.py` | Turn handling, explicit structure commands (including switch/open/leave and suggestion confirmation hygiene), heuristic/LLM planning with the domain directory and active-domain inheritance, task loop, retry cap, honesty/internal-schema guards, turn timeline and metrics |
+| `harness/orchestrator/loop.py` | Turn handling through the control plane, approved-action dispatch, heuristic/LLM planning with the domain directory and active-domain inheritance, task loop, retry cap, confirmation gate, honesty/internal-schema guards, turn timeline and metrics |
 | `harness/orchestrator/timeline.py` | Per-turn stage recorder (start offset, duration, detail) serialized into traces |
 | `harness/consolidation/service.py` | Evidence snapshot, optional model extraction, deterministic retype/merge/supersede pass, run report, rollback |
 | `harness/maintenance/reset.py` | Full/selective state wipe, timestamped backup archive, seed re-application, stale-reference scrub, reset audit event |
@@ -97,8 +102,14 @@ It has no concrete imports.
 user text (CLI `turn` or web chat)
   -> DefaultTurnService.submit (one lock; shared by both clients)
   -> SessionManager.record_interaction (append-only, UTC ts)
-  -> structure command?  yes -> create / confirm / decline, or enter/leave/switch
-                                an existing domain (never create on switch)
+  -> ControlPlane.begin_turn
+       sync suggestions into the decision log
+       explicit structure command? -> handled by the registry
+       open decisions? -> resolver says approve/reject/modify/defer/cancel/
+                          clarify; unrelated input falls through to planning
+       task awaiting the user? -> answer/resume that question first
+  -> (plan) structure command?  yes -> create / confirm / decline, or
+                                enter/leave/switch an existing domain
                          no  -> short single request in heuristic mode?
                                   yes -> TaskManager.create(one code task)
                                   no  -> ModelAdapter.complete(task plan with directory)
@@ -106,7 +117,7 @@ user text (CLI `turn` or web chat)
   -> TaskManager.next_ready
   -> ContextBuilder.build(task, session, trace_id)
        persona + preferences + bounded structure directory
-       + domain + task
+       + domain + task + pending decisions for this task
        + local current time + bounded history (full/summary/segment, compact ts
        and gap markers, memory updated/age markers)
        + enabled capability manifests with enum values/defaults;
@@ -114,12 +125,15 @@ user text (CLI `turn` or web chat)
   -> ModelAdapter.complete(proposal, schema=strict|loose, on_delta=...)
   -> parse_proposal -> orchestrator.machine.apply_action
        internal-schema ask? -> reject and retry
-       act -> CapabilityExecutor.execute
+       act -> ControlPlane.gate_action
+              confirmation required? -> persist Decision, block task, deliver prompt
+              approved/not gated -> CapabilityExecutor.execute
               validate every field, coerce/default optional hints, reject placeholders
               memory hint inputs pass through to the memory core for precise fallback notes
-              -> attempt file + event
+              -> attempt file + event; record the outcome against the decision
   -> response/end after a non-succeeded execution? -> honesty guard rejects success claims
   -> repeat until response/ask/end or a limit
+  -> (approve) ApprovedAction -> same capability executor, no new authorization
   -> TraceStore.put + model.call event
   -> SessionManager.append_assistant (UTC assistant ts)
   -> HistoryService.after_turn (off-path rolling summary, best effort)
@@ -299,9 +313,9 @@ composition root; it imports no concrete component.
 
 | Scope | Removes | Re-seeds / keeps |
 | --- | --- | --- |
-| `full` | settings file + history, sessions, traces, history, events, registry, tasks, persona, capability attempts, memories, consolidation | default settings from `settings/catalog.py`, code-defined `DEFAULT_PERSONA`, reserved `self` domain, a new session with no active domain |
+| `full` | settings file + history, sessions, traces, history, events, registry, tasks, decisions, persona, capability attempts, memories, consolidation | default settings from `settings/catalog.py`, code-defined `DEFAULT_PERSONA`, reserved `self` domain, a new session with no active domain |
 | `memories` | `memory/`, `consolidation/`, memory ids in retained traces/events/attempts | conversations, tasks, domains, persona, settings, and the active domain stay |
-| `conversations` | sessions, traces, history, events, capability attempts, tasks, consolidation; memory usage and conversation source refs | memories, domains, persona, settings stay; a new session is created with no active domain |
+| `conversations` | sessions, traces, history, events, capability attempts, tasks, decisions, consolidation; memory usage and conversation source refs | memories, domains, persona, settings stay; a new session is created with no active domain |
 
 Before a wipe (unless `maintenance.reset.backup` is false or the CLI passes
 `--no-backup`) it writes `backups/reset_<scope>_<UTC timestamp>.zip` containing
@@ -338,6 +352,7 @@ The CLI is `harness reset [--scope full|memories|conversations] [--yes]
 | `registry/domains/*.json` | Domain records, including reserved `self` |
 | `registry/suggestions/*.json` | Suggested domains and status/cooldown |
 | `tasks/tsk_*.json` | Task state, constraints, outcome, flags, sequence |
+| `decisions/dec_*.json` | Durable decision/proposal, status, scope, risk, resolution, execution history |
 | `persona/persona.json` | Current persona version |
 | `persona/history.json` | Persona version history |
 | `persona/proposals/per_*.json` | Proposed persona edits |
