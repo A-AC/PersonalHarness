@@ -74,6 +74,7 @@ class WorkScheduler:
         events: EventLog,
         consolidation: Any | None = None,
         runner: Callable[[int], TurnResult] | None = None,
+        learning_review: Any | None = None,
     ):
         self._settings = settings
         self._tasks = tasks
@@ -82,6 +83,7 @@ class WorkScheduler:
         self._events = events
         self._consolidation = consolidation
         self._runner = runner
+        self._learning_review = learning_review
         self._lock = threading.Lock()
         self._blocked: str | None = None
         self._epoch = 0
@@ -167,6 +169,7 @@ class WorkScheduler:
             self._requeue_recoverable(report, now)
             self._notify_due(report, now)
             self._scheduled_consolidation(report, now)
+            self._scheduled_learning_review(report, now)
             self._run_ready(report)
             self._emit_tick_event(report, trigger="tick")
             return report
@@ -436,6 +439,52 @@ class WorkScheduler:
                     kind="consolidation",
                     action="failed",
                     reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+
+    def _scheduled_learning_review(self, report: TickReport, now: datetime) -> None:
+        """Run the deterministic learning review when it is due.
+
+        The review scans persisted evidence and creates staged candidates at
+        most; it never invokes a model, so ``model_used`` stays false. A
+        review with no meaningful new evidence changes nothing.
+        """
+        if self._learning_review is None:
+            return
+        if not bool(self._settings.get("learning.review_schedule_enabled")):
+            return
+        interval = float(self._settings.get("learning.review_interval_s"))
+        last: Any | None = None
+        try:
+            events = self._events.query(operation="learning.review", limit=1)
+            last = events[-1] if events else None
+        except Exception:
+            last = None
+        if last is not None:
+            age = _age_seconds(str(last.ts), now)
+            if age is not None and age < interval:
+                return
+        try:
+            result = self._learning_review.review(trigger="schedule")
+        except Exception as exc:
+            report.items.append(
+                TickItem(
+                    kind="learning_review",
+                    action="failed",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            return
+        if result.items or result.changed:
+            report.items.append(
+                TickItem(
+                    kind="learning_review",
+                    action="ran",
+                    reason=(
+                        f"learning review created {len(result.candidates)} candidate(s), "
+                        f"{len(result.items)} finding(s)"
+                    ),
+                    detail={"candidates": list(result.candidates)},
                 )
             )
 

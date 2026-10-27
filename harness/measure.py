@@ -44,6 +44,14 @@ def learning_report(harness: Harness, *, limit: int = 500) -> dict[str, Any]:
         if any(item.id == entry.memory_id and item.status == MemoryStatus.RETRACTED for item in memories)
     )
     inferred_retracted = sum(1 for item in inferred if item.status == MemoryStatus.RETRACTED)
+    journal = harness.learning_journal.list(limit=limit)
+    decisions: dict[str, int] = {}
+    for entry in journal:
+        decisions[entry.decision] = decisions.get(entry.decision, 0) + 1
+    skills = harness.skill_library.list()
+    skill_status: dict[str, int] = {}
+    for record in skills:
+        skill_status[record.status] = skill_status.get(record.status, 0) + 1
     return {
         "too_little_data": too_little,
         "task_success": (completed / terminal) if terminal else None,
@@ -61,5 +69,13 @@ def learning_report(harness: Harness, *, limit: int = 500) -> dict[str, Any]:
             (len(usage) - included_later_retracted) / len(usage) if usage else None
         ),
         "included_later_retracted_proxy": included_later_retracted,
+        "learning_journal": {
+            "entries": len(journal),
+            "decisions": dict(sorted(decisions.items())),
+        },
+        "skills": {
+            "records": len(skills),
+            "status": dict(sorted(skill_status.items())),
+        },
         "note": "Values are computed from stored events, tasks, traces, and the usage log. Live-eval precision is reported only by the eval suite.",
     }

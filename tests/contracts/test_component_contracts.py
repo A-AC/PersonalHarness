@@ -13,10 +13,14 @@ from harness.contracts import (
     EventLog,
     InteractionLoop,
     HistoryService,
+    LearningJournal,
+    LearningPipeline,
+    LearningReview,
     MemoryManager,
     SelfProfile,
     SessionManager,
     SettingsService,
+    SkillLibrary,
     TaskManager,
     TraceStore,
     ResetService,
@@ -85,6 +89,10 @@ def test_composition_root_satisfies_protocols(harness: Harness) -> None:
         (ResetService, harness.reset),
         (TurnService, harness.chat),
         (WorkScheduler, harness.scheduler),
+        (LearningJournal, harness.learning_journal),
+        (SkillLibrary, harness.skill_library),
+        (LearningPipeline, harness.learning_pipeline),
+        (LearningReview, harness.learning_review),
     ]
     for protocol, instance in bindings:
         for name, member in inspect.getmembers(protocol):

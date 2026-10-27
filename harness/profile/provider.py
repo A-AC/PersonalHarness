@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Callable
 
 from harness.contracts.events import Event, EventLog
 from harness.contracts.profile import Persona, PersonaDraft, PersonaProposal, PersonaVersion
@@ -26,10 +27,16 @@ DEFAULT_PERSONA = Persona(
 
 
 class FileSelfProfile:
-    def __init__(self, directory: Path, settings: SettingsService, events: EventLog):
+    def __init__(self, directory: Path, settings: SettingsService, events: EventLog, approve_guard: Callable[[PersonaDraft], list[str]] | None = None):
         self._dir = directory
         self._settings = settings
         self._events = events
+        # Optional safety validator wired by the composition root: it returns
+        # violated invariants for a draft, and a non-empty list blocks
+        # approval. Persona edits are the only sanctioned strategy change;
+        # this guard keeps a staged proposal from weakening a safety
+        # invariant even if it slipped past proposal-time validation.
+        self._approve_guard = approve_guard
         directory.mkdir(parents=True, exist_ok=True)
         self._current_path = directory / "persona.json"
         self._history_path = directory / "history.json"
@@ -79,6 +86,12 @@ class FileSelfProfile:
     def approve(self, proposal_id: str, actor: str) -> Persona:
         data = read_json(self._proposals_dir / f"{proposal_id}.json")
         draft = PersonaDraft(**data["draft"])
+        if self._approve_guard is not None:
+            violations = self._approve_guard(draft)
+            if violations:
+                raise ValueError(
+                    "persona proposal weakens a safety invariant: " + "; ".join(violations)
+                )
         current = self.current()
         persona = Persona(
             version=current.version + 1,

@@ -5,7 +5,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from harness.constants import MemoryOrigin
 from harness.contracts.consolidation import ConsolidationRun
@@ -74,6 +74,7 @@ class FileConsolidationService:
         events: EventLog,
         profile: SelfProfile,
         domains: DomainRegistry,
+        persona_guard: Callable[[PersonaDraft], list[str]] | None = None,
     ):
         self._dir = directory
         self._settings = settings
@@ -83,6 +84,10 @@ class FileConsolidationService:
         self._events = events
         self._profile = profile
         self._domains = domains
+        # Optional safety validator for model-proposed persona/strategy edits,
+        # wired by the composition root. It returns the list of violated
+        # invariants; a non-empty list rejects the proposal before staging.
+        self._persona_guard = persona_guard
         self._lock = threading.RLock()
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -292,6 +297,15 @@ class FileConsolidationService:
                 operating_principles=list(proposal.get("operating_principles") or self._profile.current().operating_principles),
                 reason=str(proposal.get("reason") or "consolidation"),
             )
+            if self._persona_guard is not None:
+                violations = self._persona_guard(draft)
+                if violations:
+                    return {
+                        "kind": kind,
+                        "status": "rejected",
+                        "reason": "safety invariant violation",
+                        "violations": list(violations),
+                    }
             item = self._profile.propose_edit(draft, "consolidation")
             return {"kind": kind, "status": "queued", "id": item.id}
         if kind in {"new_memory", "merge", "confidence"}:

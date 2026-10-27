@@ -18,6 +18,11 @@ from harness.domains.inference import DefaultDomainInference
 from harness.domains.registry import FileDomainRegistry
 from harness.events.log import FileEventLog
 from harness.history.service import FileHistoryService
+from harness.learning.journal import FileLearningJournal
+from harness.learning.pipeline import EvidenceLearningPipeline
+from harness.learning.review import LearningReview
+from harness.learning.skills import FileSkillLibrary
+from harness.learning.strategy import check_persona_draft
 from harness.maintenance.reset import FileResetService
 from harness.memory.capture import ExecutionOutcomeCapture
 from harness.memory.classifier import KeywordMemoryClassifier
@@ -61,6 +66,10 @@ class Harness:
     chat: DefaultTurnService
     scheduler: WorkScheduler
     reset: FileResetService
+    learning_journal: FileLearningJournal
+    skill_library: FileSkillLibrary
+    learning_pipeline: EvidenceLearningPipeline
+    learning_review: LearningReview
 
     def on_start(self) -> None:
         self.tasks.on_process_start()
@@ -87,8 +96,19 @@ def build_harness(
     domains = FileDomainRegistry(root / "registry", settings, events)
     tasks = FileTaskManager(root / "tasks", settings, events)
     decisions = FileDecisionStore(root / "decisions", settings, events)
-    profile = FileSelfProfile(root / "persona", settings, events)
-    capabilities = FileCapabilityExecutor(root / "capabilities", settings, events, domains)
+    profile = FileSelfProfile(root / "persona", settings, events, approve_guard=check_persona_draft)
+    # Approved learned skills install into <data>/skills/active, which the
+    # executor discovers by default when no external skills dir is set.
+    skill_library = FileSkillLibrary(
+        root / "skills",
+        settings,
+        events,
+        on_change=None,  # refreshed below once the executor exists
+    )
+    configured_skills_dir = str(settings.get("capabilities.skills_dir") or "")
+    skills_dir = Path(configured_skills_dir) if configured_skills_dir else skill_library.active_dir
+    capabilities = FileCapabilityExecutor(root / "capabilities", settings, events, domains, skills_dir=skills_dir)
+    skill_library.attach_on_change(capabilities.reload_skills)
     decision_resolver = DefaultDecisionResolver()
     control = DefaultControlPlane(
         settings=settings,
@@ -276,6 +296,30 @@ def build_harness(
         events,
         profile,
         domains,
+        persona_guard=check_persona_draft,
+    )
+    # Learning pipeline: journal first (it is the traceability sink), then
+    # the pipeline that owns memory/procedure/strategy candidates, then the
+    # deterministic review the scheduler can run.
+    learning_journal = FileLearningJournal(root / "learning" / "journal", settings, events)
+    learning_pipeline = EvidenceLearningPipeline(
+        settings=settings,
+        events=events,
+        memory=memory,
+        skills=skill_library,
+        profile=profile,
+        journal=learning_journal,
+        sources=sources,
+    )
+    capabilities.attach_memory_observer(learning_pipeline.note_explicit_write)
+    learning_review = LearningReview(
+        settings=settings,
+        events=events,
+        tasks=tasks,
+        capabilities=capabilities,
+        memory=memory,
+        pipeline=learning_pipeline,
+        skills=skill_library,
     )
     chat = DefaultTurnService(
         loop=loop,
@@ -291,7 +335,17 @@ def build_harness(
         events=events,
         consolidation=consolidation,
         runner=lambda limit: chat.run_ready(limit=limit),
+        learning_review=learning_review,
     )
+
+    def after_reset(scope: str) -> None:
+        # A conversations wipe removes the attempts/interactions that pending
+        # skill candidates cite as evidence, so those unapproved candidates
+        # must not survive it; approved skills keep their self-contained text.
+        if scope == "conversations":
+            skill_library.drop_candidates()
+        capabilities.reload_skills()
+
     reset = FileResetService(
         root,
         settings=settings,
@@ -304,6 +358,7 @@ def build_harness(
         # whole duration (its runner also takes the turn lock), so a reset
         # can never interleave with background work.
         gates=[scheduler.exclusive, chat.exclusive, history.exclusive, consolidation.exclusive],
+        on_reset=after_reset,
     )
     harness = Harness(
         data_dir=root,
@@ -327,6 +382,10 @@ def build_harness(
         chat=chat,
         scheduler=scheduler,
         reset=reset,
+        learning_journal=learning_journal,
+        skill_library=skill_library,
+        learning_pipeline=learning_pipeline,
+        learning_review=learning_review,
     )
     harness.on_start()
     return harness

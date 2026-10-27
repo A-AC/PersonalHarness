@@ -29,6 +29,7 @@ class FileCapabilityExecutor:
         domains: DomainRegistry,
         memory: MemoryManager | None = None,
         structure_hook: Callable[[str, dict[str, Any], ExecuteRequest], dict[str, Any]] | None = None,
+        skills_dir: Path | None = None,
     ):
         self._dir = directory
         self._attempts_dir = directory / "attempts"
@@ -38,18 +39,42 @@ class FileCapabilityExecutor:
         self._domains = domains
         self._memory = memory
         self._structure_hook = structure_hook
+        self._memory_observer: Callable[[str, dict[str, Any]], None] | None = None
         self._scripts: dict[str, list[dict[str, Any]]] = {}
         self._manifests: dict[str, Manifest] = {m.name: m for m in [MOCK_MANIFEST, MEMORY_MANIFEST, STRUCTURE_MANIFEST]}
         self._mcp_specs: dict[str, McpServerSpec] = {}
-        skills_dir = str(settings.get("capabilities.skills_dir") or "")
-        if skills_dir:
-            for manifest in load_skills(Path(skills_dir)):
-                self._manifests[manifest.name] = manifest
+        if skills_dir is None:
+            configured = str(settings.get("capabilities.skills_dir") or "")
+            skills_dir = Path(configured) if configured else None
+        self._skills_dir = skills_dir
+        self._load_skills()
         mcp_file = str(settings.get("capabilities.mcp_servers_file") or "")
         if mcp_file:
             loaded, specs = load_mcp_manifests(Path(mcp_file), float(settings.get("capabilities.mcp_timeout_s")))
             self._manifests.update(loaded)
             self._mcp_specs.update(specs)
+
+    def _load_skills(self) -> None:
+        """(Re)discover SKILL.md folders. Only skill manifests are rebuilt;
+        registered capabilities and MCP servers are never touched."""
+        for name, manifest in list(self._manifests.items()):
+            if not manifest.operations and manifest.skill_body is not None:
+                del self._manifests[name]
+        if self._skills_dir is not None:
+            for manifest in load_skills(self._skills_dir):
+                self._manifests[manifest.name] = manifest
+
+    def reload_skills(self) -> None:
+        """Refresh discovered skills after the library changes active text."""
+        self._load_skills()
+
+    def attach_skills_dir(self, directory: Path) -> None:
+        self._skills_dir = directory
+        self._load_skills()
+
+    def attach_memory_observer(self, observer: Callable[[str, dict[str, Any]], None]) -> None:
+        """Hook called after an explicit memory write (journaling, best effort)."""
+        self._memory_observer = observer
 
     def attach_memory(self, memory: MemoryManager) -> None:
         self._memory = memory
@@ -417,6 +442,15 @@ class FileCapabilityExecutor:
             message = "already remembered" if result.duplicate else "remembered"
             if result.replaced:
                 message = f'replaced previous memory: "{result.replaced[0].content}"'
+            self._observe_memory_write(
+                "remember",
+                {
+                    "memory_id": record.id,
+                    "content": args["content"],
+                    "replaced": [{"id": item.id, "content": item.content} for item in result.replaced],
+                    "interaction_id": ref,
+                },
+            )
             return {"status": ExecutionStatus.SUCCEEDED, "data": data, "message": message}
         if req.operation == "correct":
             try:
@@ -437,6 +471,15 @@ class FileCapabilityExecutor:
             )
             if not result.accepted or result.record is None:
                 return {"status": ExecutionStatus.FAILED, "data": {}, "message": result.reason, "error_category": "validation"}
+            self._observe_memory_write(
+                "correct",
+                {
+                    "memory_id": result.record.id,
+                    "content": args["content"],
+                    "replaced": [{"id": old.id, "content": old.content}],
+                    "interaction_id": ref,
+                },
+            )
             return {"status": ExecutionStatus.SUCCEEDED, "data": {"memory_id": result.record.id, "supersedes": old.id}, "message": "corrected"}
         if req.operation == "retract":
             try:
@@ -454,6 +497,16 @@ class FileCapabilityExecutor:
         if req.domain_id:
             return f"domain:{req.domain_id}"
         return MemoryScopeKind.GLOBAL.value
+
+    def _observe_memory_write(self, operation: str, data: dict[str, Any]) -> None:
+        """Best-effort journaling of an explicit memory write."""
+        if self._memory_observer is None:
+            return
+        try:
+            self._memory_observer(operation, data)
+        except Exception:
+            # Journaling must never break the write it describes.
+            pass
 
     def _result(self, operation_id: str, req: ExecuteRequest, status: str, data: dict, message: str, error_category: str | None) -> ExecutionResult:
         return ExecutionResult(

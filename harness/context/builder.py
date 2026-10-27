@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from harness.constants import MemoryType, SELF_DOMAIN_ID
 from harness.contracts.capabilities import CapabilityExecutor
 from harness.contracts.context import ContextPackage, ContextSection, InclusionRecord
@@ -225,7 +227,9 @@ class DefaultContextBuilder:
         for note in history_view.excluded:
             excluded.append(InclusionRecord(item=note.item, reason=note.reason, section="history"))
 
-        cap_text = self._capability_text(task.domain_id)
+        cap_pair = self._capability_text(task.domain_id, task.goal)
+        cap_text = cap_pair[0]
+        excluded.extend(cap_pair[1])
         variant = str(self._settings.get("context.prompt_variant"))
         instructions = TRIMMED_INSTRUCTIONS if variant == "trimmed" else BASE_INSTRUCTIONS
         raw = {
@@ -566,7 +570,7 @@ class DefaultContextBuilder:
             goal, str(self._settings.get("context.self_scope_keywords") or "")
         )
 
-    def _capability_text(self, domain_id: str | None) -> str:
+    def _capability_text(self, domain_id: str | None, goal: str = "") -> tuple[str, list[InclusionRecord]]:
         enabled = set()
         if domain_id:
             try:
@@ -577,9 +581,27 @@ class DefaultContextBuilder:
             raw = str(self._settings.get("capabilities.default_enabled") or "")
             enabled = {item.strip() for item in raw.split(",") if item.strip()}
         lines = []
+        excluded: list[InclusionRecord] = []
         for manifest in self._capabilities.list_manifests():
-            if manifest.name not in enabled:
-                continue
+            is_skill = not manifest.operations and manifest.skill_body is not None
+            if is_skill:
+                # Skills are instruction text with no operations: they carry no
+                # permission of their own, so they are disclosed without being
+                # enabled like a capability would be. The operations a skill
+                # names still go through the normal permission checks.
+                missing = self._missing_preconditions(manifest, goal)
+                if missing:
+                    excluded.append(
+                        InclusionRecord(
+                            item=f"skill:{manifest.name}",
+                            reason=f"preconditions not met by this task: {', '.join(missing)}",
+                            section="capabilities",
+                        )
+                    )
+                    continue
+            else:
+                if manifest.name not in enabled:
+                    continue
             lines.append(f"- {manifest.name}: {manifest.purpose}")
             if not manifest.operations:
                 lines.append("  operations: instructions only")
@@ -592,7 +614,22 @@ class DefaultContextBuilder:
                 )
             if manifest.skill_body:
                 lines.append(manifest.skill_body)
-        return "\n".join(lines)
+        return "\n".join(lines), excluded
+
+    @staticmethod
+    def _missing_preconditions(manifest, goal: str) -> list[str]:
+        """Precondition tokens absent from the task goal (word-boundary match).
+
+        A skill with no preconditions always matches. A skill whose
+        preconditions are absent is not disclosed, so a learned procedure is
+        never reused for a task it does not apply to.
+        """
+        text = str(goal or "")
+        missing: list[str] = []
+        for token in manifest.preconditions or []:
+            if not re.search(r"(?<![a-z0-9])" + re.escape(str(token).lower()) + r"(?![a-z0-9])", text.lower()):
+                missing.append(str(token))
+        return missing
 
     def _argument_text(self, op, key: str, kind: str) -> str:
         text = f"{key}:{kind}"

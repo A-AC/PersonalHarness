@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("serve")
     sub.add_parser("health")
     sub.add_parser("consolidate")
+    sub.add_parser("review")
+    sub.add_parser("skills")
     sub.add_parser("tick")
     sub.add_parser("status")
     sub.add_parser("measure")
@@ -110,6 +112,41 @@ def main(argv: list[str] | None = None) -> int:
         run = harness.consolidation.run(trigger="cli")
         print(json.dumps({"id": run.id, "status": run.status, "results": run.results, "findings": run.findings}, default=str))
         return 0 if run.status == "completed" else 1
+    if args.command == "review":
+        report = harness.learning_review.review(trigger="cli")
+        print(
+            json.dumps(
+                {
+                    "ts": report.ts,
+                    "trigger": report.trigger,
+                    "changed": report.changed,
+                    "candidates": report.candidates,
+                    "items": [
+                        {"kind": item.kind, "action": item.action, "detail": item.detail}
+                        for item in report.items
+                    ],
+                    "notes": report.notes,
+                },
+                default=str,
+            )
+        )
+        return 0
+    if args.command == "skills":
+        rows = [
+            {
+                "id": record.id,
+                "name": record.name,
+                "status": record.status,
+                "preconditions": record.preconditions,
+                "tested": bool((record.test_evidence or {}).get("passed")),
+                "supersedes": record.supersedes,
+                "reason": record.provenance.get("reason") or record.provenance.get("source_kind"),
+                "updated_at": record.updated_at,
+            }
+            for record in harness.skill_library.list()
+        ]
+        print(json.dumps(rows, indent=2, default=str))
+        return 0
     if args.command == "tick":
         report = harness.scheduler.tick()
         print(

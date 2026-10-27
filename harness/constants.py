@@ -20,6 +20,8 @@ ID_PREFIXES = (
     "per",
     "chg",
     "dec",
+    "lrn",
+    "skl",
 )
 
 
@@ -166,6 +168,69 @@ class SourceKind(StrEnum):
     EXECUTION_OUTCOME = "execution_outcome"
     DOCUMENT = "document"
     IMPORTED = "imported"
+
+
+class LearningSignalKind(StrEnum):
+    """What kind of observation is being offered to the learning pipeline.
+
+    The kind says where the evidence came from, not what should be learned;
+    the pipeline maps a signal kind onto a learning category and an evidence
+    threshold before anything is retained.
+    """
+
+    USER_CORRECTION = "user_correction"
+    REPEATED_PREFERENCE = "repeated_preference"
+    TASK_SUCCESS = "task_success"
+    VERIFIED_FAILURE = "verified_failure"
+    REPEATED_WORKFLOW = "repeated_workflow"
+    REJECTED_BEHAVIOR = "rejected_behavior"
+    RECURRING_COMMITMENT = "recurring_commitment"
+    TRANSIENT_OBSERVATION = "transient_observation"
+    STRATEGY_PROPOSAL = "strategy_proposal"
+
+
+class LearningCategory(StrEnum):
+    """The three types of learning. They have different risk profiles and
+    different authorization levels, so they are never conflated:
+
+    - ``memory``: a durable fact/preference/decision/lesson, provenance-scoped,
+      reversible through supersession/retraction.
+    - ``procedure``: a reusable workflow turned into a staged skill candidate;
+      it never reaches the prompt until it is tested and approved.
+    - ``strategy``: a proposed change to how the assistant plans or decides;
+      always staged (persona proposal) and safety-validated first.
+    """
+
+    MEMORY = "memory"
+    PROCEDURE = "procedure"
+    STRATEGY = "strategy"
+
+
+class LearningDecision(StrEnum):
+    """What the pipeline decided to do with one signal.
+
+    ``applied`` changes effective behavior now (automatic, low risk, with
+    rollback). ``staged`` created a candidate that waits for an explicit
+    approval. ``rejected`` failed validation. ``insufficient`` did not have
+    strong enough evidence. ``duplicate`` matched existing knowledge.
+    """
+
+    APPLIED = "applied"
+    STAGED = "staged"
+    REJECTED = "rejected"
+    INSUFFICIENT = "insufficient"
+    DUPLICATE = "duplicate"
+
+
+class SkillStatus(StrEnum):
+    """Lifecycle of a learned skill. Candidates are never loaded into the
+    prompt; only ``approved`` skills are discoverable by the executor."""
+
+    CANDIDATE = "candidate"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    RETIRED = "retired"
+
 
 
 class EvidenceStatus(StrEnum):

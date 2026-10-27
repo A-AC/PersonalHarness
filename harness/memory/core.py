@@ -681,6 +681,11 @@ class MemoryCore:
                     continue
                 if older.kind != current.kind:
                     continue
+                if older.type != current.type:
+                    # Wording overlap alone must not merge records of
+                    # different subtypes (a fact is not a preference, a
+                    # procedure is not a lesson); they stay separate.
+                    continue
                 if normalize_content(older.content) == normalize_content(current.content):
                     kind = "merged"
                 elif overlap(older.content, current.content) >= threshold:

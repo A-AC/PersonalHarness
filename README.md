@@ -666,6 +666,8 @@ python -m harness [--data-dir DIR] COMMAND
 | `tick` | Run one scheduler heartbeat: recovery, reminders, maintenance, and eligible work |
 | `status` | Print the honest work status (working/waiting/blocked/deferred/due/failed) |
 | `consolidate` | Run one background consolidation pass |
+| `review` | Run one deterministic learning review (repeated workflows, failure patterns, pending candidates) |
+| `skills` | List learned skills and their lifecycle status |
 | `measure` | Print the learning report as JSON |
 | `eval` | Run the live deterministic-check eval suite |
 | `reset` | Back up and wipe learned state (`--scope full|memories|conversations`, requires `--yes`) |
@@ -1070,9 +1072,52 @@ Consolidation runs off the hot path (UI button or optional schedule). It first
 extracts inferred memories from recent conversation with verified source refs,
 then re-types only semantic-kind records, merges duplicates/near-duplicates, and
 resolves conflicts by recency. Procedural, episodic, and prospective records
-keep their type and kind. A run stores an input snapshot and a report of what was
+keep their type and kind. Merges also require the same semantic subtype, so
+wording overlap alone never merges a fact with a preference or a procedure
+with a lesson. A run stores an input snapshot and a report of what was
 added, merged, and superseded; it can be rolled back as a whole (and inferred
 rows individually).
+
+## Learning
+
+Learning is evidence-based and separated into three categories with different
+risks, so they are never conflated:
+
+- **Memory learning** (facts, preferences, decisions, lessons): explicit user
+  statements apply immediately with provenance and are reversible through
+  supersession/retraction; harness-observed learning (repeated preferences,
+  verified failures) is retained only past its evidence threshold, at lower
+  rank (`origin=inferred`, `corroborated`/`observed` evidence).
+- **Procedural learning** (skills): a workflow whose steps all succeeded in
+  enough distinct tasks becomes a *staged skill candidate*. The candidate is
+  never disclosed to the model until an explicit approval promotes it, an
+  improvement of an approved skill additionally requires recorded passing
+  test evidence, and every approval can be rolled back to the previous
+  version.
+- **Strategy learning** (persona/planning changes): a proposal is validated
+  against deterministic safety invariants first (honesty, permissions,
+  confirmation gates, no self-modification of settings/code) and is only
+  ever staged as a persona proposal; approval is a separate user action.
+
+Every learning decision — applied, staged, rejected, or below-threshold — is
+journaled under `data/learning/journal/` with its source evidence
+(interaction, attempt, and task ids), rationale, and the ids of anything it
+created, so each change is traceable back to the original observation.
+
+The deterministic learning review (`harness review`, or scheduled with
+`learning.review_schedule_enabled`) scans persisted evidence without any
+model call: repeated successful workflows become skill candidates, repeated
+failure fingerprints and pending candidates are surfaced as findings, and a
+review with no meaningful evidence changes nothing. The scheduler runs it on
+its heartbeat when enabled; it never approves anything by itself.
+
+Skills live as `SKILL.md` folders. Externally provided skills are discovered
+from `capabilities.skills_dir`; learned skills are managed under
+`data/skills/` (`records/` for metadata, `candidates/` for staged text,
+`active/` for approved text, which is also the default discovery directory).
+A skill may declare `preconditions` (required tokens); the context builder
+discloses a skill only when the task goal matches them, and records the
+omission as an exclusion with the reason.
 
 ## Capabilities
 
@@ -1092,8 +1137,11 @@ guessing.
 
 Optional extension points:
 
-- Skills: set `capabilities.skills_dir` to a folder of `<name>/SKILL.md` files.
-  See `examples/skills/homelab-notes/SKILL.md`.
+- Skills: set `capabilities.skills_dir` to a folder of `<name>/SKILL.md` files
+  (see `examples/skills/homelab-notes/SKILL.md`). When unset, learned skills
+  install into `data/skills/active`, which the executor discovers instead. A
+  skill's front matter may declare `preconditions`; it is disclosed only for
+  matching tasks. See the Learning section for the staged approval lifecycle.
 - MCP: set `capabilities.mcp_servers_file` to a YAML file of stdio servers. See
   `examples/mcp_servers.yaml` and `examples/mcp/echo_server.py`. A server that
   fails to start is listed as unavailable, not fatal.
@@ -1114,6 +1162,8 @@ data/
   capabilities/attempts/op_*.json
   memory/records/mem_*.json, usage.jsonl
   consolidation/run_*.json, run_*.input.json
+  learning/journal/lrn_*.json
+  skills/records/skl_*.json, candidates/<name>/SKILL.md, active/<name>/SKILL.md
   eval/...
 ```
 

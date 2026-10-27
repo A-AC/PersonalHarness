@@ -46,6 +46,7 @@ class FileResetService:
         "memories": (
             "memory",
             "consolidation",
+            "learning",
         ),
         "conversations": (
             "sessions",
@@ -56,6 +57,7 @@ class FileResetService:
             "tasks",
             "decisions",
             "consolidation",
+            "learning",
         ),
         "full": (
             "settings.yaml",
@@ -71,6 +73,8 @@ class FileResetService:
             "capabilities/attempts",
             "memory",
             "consolidation",
+            "learning",
+            "skills",
         ),
     }
 
@@ -89,6 +93,7 @@ class FileResetService:
         memory: MemoryManager,
         events: EventLog,
         gates: list[Gate] | None = None,
+        on_reset: Callable[[str], None] | None = None,
     ):
         self._root = Path(data_dir)
         self._settings = settings
@@ -98,6 +103,10 @@ class FileResetService:
         self._memory = memory
         self._events = events
         self._gates = list(gates or [])
+        # Optional composition-root hook called with the scope after the wipe:
+        # it refreshes derived in-memory state (for example the executor's
+        # discovered skill manifests) so disclosure matches the wiped disk.
+        self._on_reset = on_reset
         self._lock = threading.Lock()
         self._busy = False
 
@@ -132,6 +141,11 @@ class FileResetService:
                     )
                     backup_path = self._archive(chosen) if use_backup else None
                     removed = self._wipe(chosen)
+                    if self._on_reset is not None:
+                        try:
+                            self._on_reset(chosen)
+                        except Exception:
+                            pass
                     seeded = self._seed(chosen)
                     cleared = 0
                     if chosen == "memories":

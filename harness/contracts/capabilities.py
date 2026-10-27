@@ -39,6 +39,9 @@ class Manifest:
     operations: list[OperationSpec]
     skill_body: str | None = None
     available: bool = True
+    # Required tokens for a skill manifest to be disclosed for a task goal.
+    # Empty means the skill is always disclosed (when enabled/approved).
+    preconditions: list[str] = field(default_factory=list)
 
 
 @dataclass

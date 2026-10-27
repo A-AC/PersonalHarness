@@ -21,6 +21,20 @@ from harness.contracts.decisions import (
 from harness.contracts.domains import Domain, DomainRegistry, StructureDraft, Suggestion
 from harness.contracts.events import Event, EventLog
 from harness.contracts.history import HistoryNote, HistorySegment, HistoryService, HistoryView
+from harness.contracts.learning import (
+    JournalEntry,
+    LearningJournal,
+    LearningOutcome,
+    LearningPipeline,
+    LearningReview,
+    LearningSignal,
+    ReviewItem,
+    ReviewReport,
+    SkillDraft,
+    SkillLibrary,
+    SkillRecord,
+    SkillVersion,
+)
 from harness.contracts.loop import InteractionLoop, TurnEvent, TurnListener, TurnResult
 from harness.contracts.maintenance import RemovedState, ResetReport, ResetService
 from harness.contracts.memory import (
@@ -93,6 +107,12 @@ __all__ = [
     "InclusionRecord",
     "Interaction",
     "InteractionLoop",
+    "JournalEntry",
+    "LearningJournal",
+    "LearningOutcome",
+    "LearningPipeline",
+    "LearningReview",
+    "LearningSignal",
     "Manifest",
     "MemoryCandidate",
     "MemoryManager",
@@ -115,12 +135,18 @@ __all__ = [
     "ResetReport",
     "ResetService",
     "RespondAction",
+    "ReviewItem",
+    "ReviewReport",
     "SelfProfile",
     "Session",
     "SessionManager",
     "SettingChange",
     "SettingDef",
     "SettingsService",
+    "SkillDraft",
+    "SkillLibrary",
+    "SkillRecord",
+    "SkillVersion",
     "SourceResolver",
     "StructureDraft",
     "SubmitResult",

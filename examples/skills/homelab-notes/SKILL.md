@@ -1,6 +1,7 @@
 ---
 name: homelab-notes
 description: Keep homelab changes short, reversible, and tied to evidence.
+preconditions: homelab
 ---
 
 When the task concerns the homelab:

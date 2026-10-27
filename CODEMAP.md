@@ -11,8 +11,8 @@ composition/edge layer.
 
 | Path | Responsibility |
 | --- | --- |
-| `harness/__main__.py` | CLI: `serve`, `health`, `turn`, `tick`, `status`, `consolidate`, `measure`, `eval`, `reset` |
-| `harness/app.py` | `Harness` container and `build_harness()` wiring, including the structure hook (enter/leave/suggest with duplicate and cooldown checks) |
+| `harness/__main__.py` | CLI: `serve`, `health`, `turn`, `tick`, `status`, `consolidate`, `review`, `skills`, `measure`, `eval`, `reset` |
+| `harness/app.py` | `Harness` container and `build_harness()` wiring, including the structure hook (enter/leave/suggest with duplicate and cooldown checks), the learning stack (journal, skill library, pipeline, review), the persona safety guards, and the post-reset skill refresh |
 | `harness/constants.py` | Schema version, ID prefixes, enums, reserved `self` id |
 | `harness/storage/atomic.py` | UTC timestamps, safe IDs/filenames, atomic JSON/text, JSONL append |
 | `harness/text.py` | Tokenization, reasoning stripping, overlap, normalized name matching (`normalize_name`, `name_overlap`, `match_by_name`), token estimate, keyword matching, success-claim/unknown/placeholder checks shared by guards and evals |
@@ -43,6 +43,7 @@ It has no concrete imports.
 | `domains.py` | Domain/draft/suggestion, `DomainMatch`, the read-only `DomainInference` protocol, and the registry protocol |
 | `events.py` | Event and event-log protocol |
 | `history.py` | History note/segment/view and the replaceable history-service protocol |
+| `learning.py` | Learning signal/outcome/journal entry, skill draft/record/version, review item/report, and the journal/library/pipeline/review protocols |
 | `loop.py` | Turn result and interaction-loop protocol |
 | `maintenance.py` | Removed-state/report and the reset-service protocol |
 | `memory.py` | Memory record/candidate/submit/usage (with lifecycle metadata), `RankedMemory` with `score_parts`, the optional `SemanticScorer` contract, and the manager protocol |
@@ -71,32 +72,37 @@ It has no concrete imports.
 | `harness/control/decisions.py` | File-backed decision log (`decisions/dec_*.json`), open/terminal queries, task/suggestion lookup, suggestion mirroring |
 | `harness/control/resolver.py` | Deterministic reading of a reply in decision context: explicit/contextual selection, ambiguity, approval/rejection/modification/defer/cancel, question vs unrelated request |
 | `harness/control/plane.py` | Turn coordination: structure commands, decision resolutions (including reconciliation decisions for interrupted/unknown-outcome attempts), plan/approved-action directives, confirmation gating, task deferral on a deferred decision, execution recording, task cancellation |
-| `harness/profile/provider.py` | Persona versions and proposed edits |
+| `harness/profile/provider.py` | Persona versions and proposed edits, with an injectable approve-time safety guard |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
-| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback (procedural hints normalize non-procedure subtypes to `lesson`), kind-aware duplicate/conflict policy, lifecycle metadata persistence and derived lifecycle view, hybrid explainable retrieval (exact identifiers, lexical, optional semantic, scope priority, recency/provenance/kind weights, conflict and validity suppression), usage, consolidation maintenance (semantic-only retype), rollback |
+| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback (procedural hints normalize non-procedure subtypes to `lesson`), kind-aware duplicate/conflict policy (near-duplicate merges also require the same semantic subtype so wording overlap never conflates a fact with a preference), lifecycle metadata persistence and derived lifecycle view, hybrid explainable retrieval (exact identifiers, lexical, optional semantic, scope priority, recency/provenance/kind weights, conflict and validity suppression), usage, consolidation maintenance (semantic-only retype), rollback |
 | `harness/memory/semantic.py` | Pluggable `SemanticScorer` implementations: dependency-free lexical-semantic scorer (configurable concept groups, stemming, character n-grams) and the off switch; a deployment can substitute an embedding-backed scorer at the composition root |
 | `harness/memory/capture.py` | Deterministic execution-outcome capture: failure fingerprint dedupe, task-derived scope, resolving-success supersede, `memory.capture` events, no model call |
 | `harness/memory/classifier.py` | Replaceable deterministic (keyword-rule) memory type classifier plus the deterministic type-to-kind mapping |
 | `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
 | `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
 | `harness/memory/tokens.py` | Token/overlap aliases for retrieval |
-| `harness/context/builder.py` | Query-driven budgeted context: cross-project memory retrieval with priority scopes (self stays on demand), per-item memory trimming that drops whole blocks, project summary and stats, pending decisions for the task or its project protected from trimming, bounded active-domain directory that drops whole entries, persona-trim fallback when the total budget cannot fit the safety instructions, prompt variant, local current-time block, age markers, memory tags with kind/lifecycle, bounded history, capability disclosure with enum values/defaults, and inclusion/exclusion/budget stats |
+| `harness/context/builder.py` | Query-driven budgeted context: cross-project memory retrieval with priority scopes (self stays on demand), per-item memory trimming that drops whole blocks, project summary and stats, pending decisions for the task or its project protected from trimming, bounded active-domain directory that drops whole entries, persona-trim fallback when the total budget cannot fit the safety instructions, prompt variant, local current-time block, age markers, memory tags with kind/lifecycle, bounded history, capability disclosure with enum values/defaults, precondition-gated skill disclosure (a skill whose required tokens are absent from the task goal is excluded with a recorded reason), and inclusion/exclusion/budget stats |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
 | `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`); memory enums/defaults generated from `constants` |
-| `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records, one-scan attempts-by-task index |
-| `harness/capabilities/skills.py` | `SKILL.md` discovery |
+| `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records, one-scan attempts-by-task index, skill discovery from the configured or default active-skills dir with a `reload_skills` refresh, and a best-effort explicit-write observer hook for learning journaling |
+| `harness/capabilities/skills.py` | `SKILL.md` discovery with front-matter name/description/preconditions parsing |
 | `harness/capabilities/mcp.py` | Optional stdio MCP discovery/call via the official SDK |
 | `harness/orchestrator/parse.py` | Pydantic parsing, loose/strict proposal JSON schemas, actionable parse errors |
 | `harness/orchestrator/machine.py` | Allowed-state and action-transition rules |
 | `harness/orchestrator/loop.py` | Turn handling through the control plane, approved-action dispatch, heuristic/LLM planning with the domain directory, active-domain hint plus project inference for tasks with no planner domain (logged as `plan.domain_inference`, session selection preserved), multi-word suggestion gate, task loop, retry cap, confirmation gate, honesty/internal-schema guards, `run_ready` background execution path (same per-task loop, checkpoint per run, turn trace), turn timeline and metrics |
 | `harness/orchestrator/timeline.py` | Per-turn stage recorder (start offset, duration, detail) serialized into traces |
-| `harness/consolidation/service.py` | Evidence snapshot, optional model extraction, deterministic retype/merge/supersede pass, run report, rollback (run listing excludes `.input.json` snapshots) |
-| `harness/maintenance/reset.py` | Full/selective state wipe, timestamped backup archive, seed re-application, stale-reference scrub, reset audit event |
-| `harness/scheduler/service.py` | `WorkScheduler`: deterministic heartbeat (startup reconcile + ticks) over persisted tasks/decisions/attempts — unknown-outcome reconciliation decisions, dependency re-checks, deferred-window release, bounded/cooled requeues, one-time due reminders, scheduled consolidation, and bounded autonomous execution through the turn service; honest-status read model (`report()`), daemon-thread start/stop, and an `exclusive` reset gate |
+| `harness/consolidation/service.py` | Evidence snapshot, optional model extraction (persona/strategy edits pass an injectable safety guard before staging), deterministic retype/merge/supersede pass, run report, rollback (run listing excludes `.input.json` snapshots) |
+| `harness/learning/journal.py` | File-backed learning journal: one JSON entry per learning decision (signal kind, category, decision, rationale, source evidence refs, created-artifact refs) with an event mirror |
+| `harness/learning/strategy.py` | Deterministic safety invariants for learned strategy/skill text (honesty, permissions, confirmation gates, no settings/code self-modification, no auto-execution of unverified code, memory/tool text is data); validators for persona drafts and skill text |
+| `harness/learning/skills.py` | `FileSkillLibrary`: staged skill lifecycle (propose/record_test/approve/reject/retire/rollback) with safety-scanned text, slug names, overlap guards against trivial variations, provenance and version history, candidate text kept out of the executor's discovery dir, an untested candidate can never replace an approved skill, and an on-change disclosure refresh callback |
+| `harness/learning/pipeline.py` | `EvidenceLearningPipeline`: one deterministic entry point that classifies a signal into memory/procedure/strategy learning, gates on evidence strength (thresholds from settings; model explanations are never accepted as verified root causes), creates the candidate through the owning store, applies it at the right authorization level (memory can apply, procedures and strategy only stage), journals every decision with its source refs, and journals explicit corrections through the executor observer hook |
+| `harness/learning/review.py` | Deterministic, no-model learning review over persisted evidence: succeeded workflows repeated across enough distinct tasks become staged skill candidates (a failed step disqualifies the sequence), repeated failure fingerprints, pending candidates, and expired knowledge surface as findings; with no meaningful evidence it creates nothing |
+| `harness/maintenance/reset.py` | Full/selective state wipe (learning journal cleared on all scopes; the skills tree only on full), timestamped backup archive, seed re-application, stale-reference scrub, reset audit event, and an injectable post-reset hook that refreshes executor skill disclosure and drops conversation-wiped skill candidates |
+| `harness/scheduler/service.py` | `WorkScheduler`: deterministic heartbeat (startup reconcile + ticks) over persisted tasks/decisions/attempts — unknown-outcome reconciliation decisions, dependency re-checks, deferred-window release, bounded/cooled requeues, one-time due reminders, scheduled consolidation, the optional scheduled learning review (deterministic, never model-backed), and bounded autonomous execution through the turn service; honest-status read model (`report()`), daemon-thread start/stop, and an `exclusive` reset gate |
 | `harness/model/scripted.py` | Deterministic test adapter |
 | `harness/model/openai_http.py` | OpenAI-compatible HTTP adapter and health probe |
-| `harness/measure.py` | Learning report from stored events/tasks/memories/usage |
+| `harness/measure.py` | Learning report from stored events/tasks/memories/usage plus learning-journal and skill-library counters |
 | `harness/eval.py` | Isolated live eval, deterministic checks, long-history real-use and time-awareness scenarios, scripted honesty cases, p50/p95, malformed-output, prompt-token, and token metrics |
 | `harness/ui/web.py` | Authenticated server-rendered inspection/control UI (viewport-sized chat panel with a scrollable log, collapsible live strip, composer pinned to the panel bottom, and an active-domain selector outside the SSE path; completed turns are appended from server-rendered fragments over SSE without reloading, memory actions, on-demand/scheduled consolidation, stored conversation history, turn timeline, execution envelope, confirm-gated reset); chat streams stage/token events over SSE and links messages to traces and back; malformed control requests return 4xx with a message |
 
@@ -242,7 +248,12 @@ Memory policy is settings-driven: `memory.duplicate_overlap`,
 `memory.consolidation.retype`, `memory.capture.execution_outcomes`,
 `consolidation.extract_enabled`, `consolidation.schedule_enabled`/
 `schedule_interval_s` (the scheduler heartbeat runs the periodic pass), and
-the source policy. The `scheduler.*` group configures the heartbeat:
+the source policy. The `learning.*` group tunes the evidence thresholds
+(`min_workflow_repeats`, `min_workflow_steps`, `min_preference_repeats`,
+`min_failure_repeats`, `max_review_candidates`, `skill_name_overlap`) and the
+scheduled review (`review_schedule_enabled` default false,
+`review_interval_s`); all defaults keep the review opt-in exactly like
+scheduled consolidation. The `scheduler.*` group configures the heartbeat:
 `enabled`, `interval_s`, `max_tasks_per_tick` (0 keeps recovery/reminders but
 disables autonomous execution), `retry_cooldown_s`, `max_task_retries`, and
 `default_defer_hours`.
@@ -290,6 +301,8 @@ startup / scheduler.interval_s (serve thread) / harness tick (CLI)
   -> recoverable requeue (cooldown + retry budget) or retry-limit failure
   -> due reminder (once per deadline)
   -> scheduled consolidation when due
+  -> scheduled learning review when due (deterministic; no model calls;
+     creates staged skill candidates at most, findings otherwise)
   -> run ready tasks via TurnService.run_ready (checkpoint + turn trace)
   -> scheduler.tick event (only when something happened)
 ```
@@ -393,12 +406,14 @@ refs, `origin=inferred`, `run_id` attached), then runs the deterministic pass:
 re-type, merge exact/near-duplicates, and supersede older conflicting records by
 recency. Re-typing is limited to semantic-kind records; procedural, episodic,
 and prospective rows keep their type and kind, and a classifier result that
-would move a record to another kind is ignored. Newest active records win;
-older rows remain as history with `superseded_by`. Each run writes an evidence
-snapshot and a report of added, merged, and superseded rows. Rollback retracts
-records created by the run, restores merged/superseded losers, and restores
-previous types; inferred rows can also be retracted individually. The UI exposes
-manual run/rollback and can start a periodic run when
+would move a record to another kind is ignored. Merges require the same scope,
+kind, and semantic subtype, so wording overlap alone never merges a fact with a
+preference; conflicts additionally require the same type as before. Newest
+active records win; older rows remain as history with `superseded_by`. Each run
+writes an evidence snapshot and a report of added, merged, and superseded rows.
+Rollback retracts records created by the run, restores merged/superseded losers,
+and restores previous types; inferred rows can also be retracted individually.
+The UI exposes manual run/rollback and can start a periodic run when
 `consolidation.schedule_enabled` is true.
 
 Removed from V1: the proposed/approve/reject lifecycle, the memory approval
@@ -406,26 +421,116 @@ queue and approve endpoint, inferred-vs-explicit approval gating, and the
 `auto_commit` settings. Malformed memory/consolidation control requests now
 return 400/404 with a message instead of raising through the ASGI handler.
 
+## Learning lifecycle
+
+Phase 4 adds an evidence-based learning pipeline on top of the mechanisms
+above (it does not replace them). The core principle: learning must change
+future behavior in a traceable way, and the system must be able to evaluate
+whether the change helped — and revert it.
+
+**Three separated categories.** A signal is classified into exactly one of:
+
+- **Memory** (`user_correction`, `repeated_preference`, `rejected_behavior`,
+  `recurring_commitment`, `verified_failure`, `transient_observation`): facts,
+  preferences, decisions, lessons with provenance, scope, and temporal
+  validity. Handled by the existing memory lifecycle.
+- **Procedure** (`repeated_workflow`, `task_success`): a reusable workflow
+  becomes a staged skill candidate, never a direct prompt change.
+- **Strategy** (`strategy_proposal`): a persona/planning change is validated
+  against safety invariants and staged as a persona proposal.
+
+**Authorization levels.**
+
+| Change | Level | Reversibility |
+| --- | --- | --- |
+| Explicit user memory statement/correction | automatic (user-authorized) | supersession/retraction; journaled |
+| Harness-observed memory (repeated preference, verified failure past threshold) | automatic at low rank (`inferred` origin, `corroborated`/`observed` evidence) | retract; journaled |
+| New skill candidate | staged (pipeline/review only creates it) | reject removes it; journaled |
+| Skill activation (new or improvement) | approval-gated (`FileSkillLibrary.approve`) | rollback restores the previous version |
+| Skill replacing an approved skill | approval-gated **plus** recorded passing test evidence | rollback |
+| Persona/strategy change | approval-gated persona proposal; safety-guarded at proposal and approval | persona history; reject |
+
+**The pipeline** (`harness/learning/pipeline.py`) is the single entry point:
+classify → evidence gate → candidate creation through the owning store → apply
+at the right level → journal. The gate never accepts a bare success claim
+(`task_success` alone is insufficient) and never treats a model-generated
+explanation as a verified root cause (`verified_failure` requires structured
+execution evidence with the attempt operation ids). Explicit corrections that
+arrive through the `harness_memory.remember`/`correct` operations are
+journaled by the executor's best-effort observer hook.
+
+**The skill library** (`harness/learning/skills.py`) keeps candidates under
+`data/skills/candidates/<name>/SKILL.md`, outside the executor's discovery
+directory; only `approve` writes to `data/skills/active/<name>/SKILL.md` (the
+default discovery dir when `capabilities.skills_dir` is unset) and triggers a
+disclosure refresh. Skill text is safety-scanned at proposal; names are
+slug-shaped and overlapping variations are rejected. Every approval that
+replaces an approved skill requires harness-verified test evidence on the
+candidate, keeps the previous version on the retired record, and can be
+rolled back.
+
+**Precondition-gated disclosure.** A skill's front matter may declare
+`preconditions` (required tokens). The context builder discloses a skill only
+when the task goal contains them and records the omission as an exclusion
+with the reason — a learned procedure is never reused for a task it does not
+apply to. Skills are instruction text with no operations, so they are
+disclosed without capability enablement; every operation a skill names still
+goes through the normal permission checks.
+
+**Strategy safety.** `harness/learning/strategy.py` holds deterministic
+invariant patterns (honesty/success claims, permission and confirmation
+bypasses, guard disabling, settings/code self-modification, auto-execution of
+unverified code, memory/tool-text-as-instruction). The pipeline rejects a
+violating proposal outright, the consolidation service refuses to queue one,
+and the profile provider blocks approval of any staged proposal that
+violates them. The pipeline itself never writes settings, permissions, or
+code — strategy learning can only produce persona text proposals.
+
+**Background review** (`harness/learning/review.py`) is deterministic and
+model-free. It scans attempts by task: a fully succeeded sequence in
+completed tasks, repeated across `learning.min_workflow_repeats` distinct
+tasks, becomes a skill candidate through the pipeline (bounded by
+`learning.max_review_candidates`; a failed step disqualifies the sequence so
+a failed procedure is never learned as a successful one). Repeated failure
+fingerprints, pending candidates, and expired knowledge are findings for the
+user. A review with no meaningful evidence creates no candidates, writes no
+journal entries, and emits no events. The scheduler runs it from the
+heartbeat when `learning.review_schedule_enabled` is true (interval
+`learning.review_interval_s`, tracked by the last `learning.review` event);
+the CLI exposes the same pass as `harness review` and lists records as
+`harness skills`.
+
+**Traceability.** Every decision — applied, staged, rejected, insufficient,
+or duplicate — writes one journal entry (`data/learning/journal/lrn_*.json`)
+with the signal kind, category, rationale, source evidence refs
+(interaction/attempt/task ids), and the ids of anything it created, mirrored
+as a `learning.record` event. Skill records keep the reason and evidence in
+`provenance`; memory records keep source refs as before. The journal is
+cleared by every reset scope (its evidence rows are scope-dependent); the
+skill tree is only cleared by a full reset, while a conversations reset drops
+pending candidates whose evidence was wiped and keeps approved skills.
+
+
 ## Reset and state ownership
 
 All durable assistant state is rooted at the launch data directory
 (`--data-dir`, `HARNESS_DATA_DIR`, or `./data`): settings and change history,
 events, sessions, history summaries, traces, domain registry, tasks, persona,
-capability attempts, memories, and consolidation runs. The only non-durable
-state is the web UI's in-memory turn-job buffer. `eval/` and `experiments/`
-trees are measurement artifacts, not learned assistant state. `experiments/data`
-and `tmp_smoke` in the repository are gitignored test outputs outside the
-runtime tree.
+capability attempts, memories, consolidation runs, the learning journal, and
+the skill library. The only non-durable state is the web UI's in-memory
+turn-job buffer. `eval/` and `experiments/` trees are measurement artifacts,
+not learned assistant state. `experiments/data` and `tmp_smoke` in the
+repository are gitignored test outputs outside the runtime tree.
 
 `FileResetService` (`harness/maintenance/reset.py`) is the single maintenance
-boundary. It depends only on manager contracts and quiesce gates supplied by the
-composition root; it imports no concrete component.
+boundary. It depends only on manager contracts and quiesce gates supplied by
+the composition root; it imports no concrete component.
 
 | Scope | Removes | Re-seeds / keeps |
 | --- | --- | --- |
-| `full` | settings file + history, sessions, traces, history, events, registry, tasks, decisions, persona, capability attempts, memories, consolidation | default settings from `settings/catalog.py`, code-defined `DEFAULT_PERSONA`, reserved `self` domain, a new session with no active domain |
-| `memories` | `memory/`, `consolidation/`, memory ids in retained traces/events/attempts | conversations, tasks, domains, persona, settings, and the active domain stay |
-| `conversations` | sessions, traces, history, events, capability attempts, tasks, decisions, consolidation; memory usage and conversation source refs | memories, domains, persona, settings stay; a new session is created with no active domain |
+| `full` | settings file + history, sessions, traces, history, events, registry, tasks, decisions, persona, capability attempts, memories, consolidation, learning journal, skills | default settings from `settings/catalog.py`, code-defined `DEFAULT_PERSONA`, reserved `self` domain, a new session with no active domain |
+| `memories` | `memory/`, `consolidation/`, learning journal, memory ids in retained traces/events/attempts | conversations, tasks, domains, persona, settings, skills, and the active domain stay |
+| `conversations` | sessions, traces, history, events, capability attempts, tasks, decisions, consolidation, learning journal, pending skill candidates; memory usage and conversation source refs | memories, domains, persona, settings, approved skills stay; a new session is created with no active domain |
 
 Before a wipe (unless `maintenance.reset.backup` is false or the CLI passes
 `--no-backup`) it writes `backups/reset_<scope>_<UTC timestamp>.zip` containing
@@ -443,7 +548,10 @@ reset drops conversation-derived tasks instead of leaving them pointing at
 missing interactions. A memory reset scrubs memory ids from retained traces,
 events, and attempts and drops memory-operation attempts. A conversation reset
 clears memory usage and strips removed interaction/attempt/event ids from memory
-provenance into `provenance.reset_cleared_refs`. The UI requires the configured
+provenance into `provenance.reset_cleared_refs`. After the wipe, an
+injected composition-root hook refreshes executor skill disclosure and drops
+pending skill candidates on a conversations reset, so in-memory state can
+never show skills the wipe removed. The UI requires the configured
 confirmation word and returns 409 for mutating requests while a reset runs.
 The CLI is `harness reset [--scope full|memories|conversations] [--yes]
 [--no-backup]`.
@@ -472,6 +580,10 @@ The CLI is `harness reset [--scope full|memories|conversations] [--yes]
 | `memory/usage.jsonl` | Memory usage rows with task/trace ids |
 | `consolidation/run_*.json` | Consolidation run, proposals, results |
 | `consolidation/run_*.input.json` | Exact evidence snapshot for rollback/audit |
+| `learning/journal/lrn_*.json` | Learning journal: one traceable entry per learning decision |
+| `skills/records/skl_*.json` | Skill metadata: status, provenance, test evidence, version history |
+| `skills/candidates/<name>/SKILL.md` | Staged candidate text (never disclosed) |
+| `skills/active/<name>/SKILL.md` | Approved skill text; the executor's default discovery dir |
 | `backups/reset_*.zip` | Timestamped pre-reset archive and `_reset_manifest.json` |
 | `eval/<tag>/...` | Isolated per-scenario-per-repeat data dirs |
 | `eval/results/<tag>.json` | Eval config, summary, and run details |
@@ -496,6 +608,10 @@ The CLI is `harness reset [--scope full|memories|conversations] [--yes]
   Declare `enums`/`defaults` on the spec so prompt disclosure and runtime
   validation use the same source of truth.
 - Skill: add `<skills_dir>/<name>/SKILL.md` (instructions only, no operations).
+  A learned skill follows the staged lifecycle in "Learning lifecycle" instead
+  of being hand-dropped into the active directory: propose through the skill
+  library, review the candidate, approve (with test evidence when it replaces
+  an approved skill), and keep the version history for rollback.
 - MCP: declare a stdio server in the YAML file; tools become operations and the
   configured permission map controls policy. The harness does not bypass
   enablement or global permission policy for MCP calls.
