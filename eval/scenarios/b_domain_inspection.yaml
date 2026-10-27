@@ -1,0 +1,185 @@
+# B. Domain content inspection.
+#
+# These scenarios use the read-only inspect_domain service that backs the
+# /api/domains/{id} endpoint and the /domains/{id} page. Assertions read real
+# persisted records and distinguish global from project-scoped memories.
+scenarios:
+  - id: B01_inspect_populated_domain
+    name: Populated domain content is inspectable
+    category: B_domain_inspection
+    severity: high
+    description: >-
+      Metadata, scoped memories, global memories, tasks, and decisions are all
+      exposed from their owning managers. No content is synthesized.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+          capabilities: [mock]
+      active_domain: Garden
+      memories:
+        - key: garden_valve
+          content: The garden valve closes at dusk.
+          scope: domain:Garden
+        - key: global_units
+          content: The user prefers metric units globally.
+          scope: global
+      tasks:
+        - key: irrigation
+          goal: Plan garden irrigation zones
+          domain: Garden
+          state: ready
+      decisions:
+        - key: inspect_decision
+          task: irrigation
+          capability: mock
+          operation: echo
+          arguments:
+            text: inspect
+          prompt: Run the mock echo?
+    steps:
+      - kind: turn
+        input: Inspect the Garden project.
+        script:
+          - tasks:
+              - goal: Inspect the Garden project
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: The Garden project has stored notes, one task, and a pending proposal.
+        expect:
+          metric: context_retrieval
+          domain_content:
+            - domain: Garden
+              metadata_name_contains: Garden
+              scoped_memories_contains: [garden valve closes at dusk]
+              global_memories_contains: [metric units globally]
+              tasks_contains: [Plan garden irrigation zones]
+              decisions_contains: [mock.echo, echo]
+              global_distinct: true
+          misc:
+            no_error: true
+
+  - id: B02_switch_preserves_each_domain
+    name: Switching domains does not hide or corrupt stored content
+    category: B_domain_inspection
+    severity: high
+    description: Both domain contents remain inspectable after a switch.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+        - name: Homelab
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: garden_valve
+          content: The garden valve closes at dusk.
+          scope: domain:Garden
+        - key: homelab_switch
+          content: The homelab rack switch is at 10.0.0.2.
+          scope: domain:Homelab
+      tasks:
+        - key: garden_task
+          goal: Check the garden valve
+          domain: Garden
+          state: ready
+        - key: homelab_task
+          goal: Check the homelab switch
+          domain: Homelab
+          state: ready
+    steps:
+      - kind: turn
+        input: switch to Homelab
+        script: []
+        expect:
+          metric: context_retrieval
+          response:
+            contains: [homelab]
+          domains:
+            active: Homelab
+          domain_content:
+            - domain: Garden
+              scoped_memories_contains: [garden valve closes at dusk]
+              tasks_contains: [Check the garden valve]
+            - domain: Homelab
+              scoped_memories_contains: [rack switch is at 10.0.0.2]
+              tasks_contains: [Check the homelab switch]
+          misc:
+            no_error: true
+
+  - id: B03_empty_domain_is_empty
+    name: An empty domain is reported as empty, not invented
+    category: B_domain_inspection
+    severity: high
+    description: A freshly created domain has no memories, tasks, or decisions.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Empty Loft
+          reason: evaluation fixture
+    steps:
+      - kind: inspect
+        name: Inspect the freshly created domain
+        expect:
+          metric: context_retrieval
+          domain_content:
+            - domain: Empty Loft
+              metadata_name_contains: Empty Loft
+              empty: true
+              memories_empty: true
+              tasks_empty: true
+          misc:
+            no_error: true
+
+  - id: B04_global_and_scoped_are_distinct
+    name: Global and project-scoped memories are distinguishable
+    category: B_domain_inspection
+    severity: high
+    description: >-
+      A global preference is listed as global and a project preference as
+      scoped, with no duplication between the two blocks.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+        - name: Homelab
+          reason: evaluation fixture
+      memories:
+        - key: global_format
+          content: The user prefers concise bullet summaries.
+          scope: global
+        - key: garden_format
+          content: Garden plans use native plant species.
+          scope: domain:Garden
+        - key: homelab_format
+          content: Homelab notes include IP addresses.
+          scope: domain:Homelab
+    steps:
+      - kind: turn
+        input: Inspect the Garden project's stored preferences.
+        script:
+          - tasks:
+              - goal: Inspect Garden preferences
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: The Garden project stores one project preference and the global formatting preference.
+        expect:
+          metric: memory_scope
+          domain_content:
+            - domain: Garden
+              scoped_memories_contains: [native plant species]
+              global_memories_contains: [concise bullet summaries]
+              global_distinct: true
+          assertions:
+            - id: B04.other_project_memory_not_in_garden
+              type: domain_content
+              domain: Garden
+              scoped_memories_excludes: [IP addresses]
+              metric: memory_scope
+          misc:
+            no_error: true

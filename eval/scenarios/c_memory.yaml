@@ -1,0 +1,387 @@
+# C. Memory correctness and grounding.
+#
+# These scenarios inspect the persisted memory record and the context trace,
+# not only the assistant's wording. The model is scripted in deterministic mode
+# and replaced by the configured endpoint in live mode.
+scenarios:
+  - id: C01_global_preference_is_global
+    name: An explicitly global preference is stored globally and retrieved
+    category: C_memory_grounding
+    severity: high
+    description: >-
+      A preference the user says applies everywhere must not be scoped to the
+      active project. A later turn must retrieve it through the preferences
+      section, which is evidence from the context trace.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+      active_domain: Garden
+    steps:
+      - kind: turn
+        input: Please remember that I prefer concise bullet-point summaries in every project.
+        script:
+          - tasks:
+              - goal: Remember the global formatting preference
+                domain_name: Garden
+                depends_on: []
+          - kind: act
+            capability: harness_memory
+            operation: remember
+            arguments:
+              content: The user prefers concise bullet-point summaries in every project.
+              scope: global
+              type: preference
+          - kind: respond
+            message: Remembered that you prefer concise bullet-point summaries everywhere.
+        expect:
+          metric: memory_scope
+          memory:
+            scope:
+              content_contains: concise bullet-point summaries
+              scope: global
+          attempts:
+            any:
+              - capability: harness_memory
+                operation: remember
+                status: succeeded
+          misc:
+            no_error: true
+      - kind: turn
+        input: Summarize the homelab checklist for me.
+        script:
+          - tasks:
+              - goal: Summarize the homelab checklist
+                depends_on: []
+          - kind: respond
+            message: "Concise summary: router, switch, and NAS."
+        expect:
+          metric: memory_scope
+          context:
+            includes: [concise bullet-point summaries]
+          response:
+            contains: [concise summary]
+          misc:
+            no_error: true
+
+  - id: C02_project_preference_stays_scoped
+    name: A project-specific preference remains scoped to that project
+    category: C_memory_grounding
+    severity: high
+    description: >-
+      A preference stated for Garden is stored in domain:Garden and is not
+      rewritten as a global preference.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+        - name: Homelab
+          reason: evaluation fixture
+      active_domain: Garden
+    steps:
+      - kind: turn
+        input: For the Garden project, remember that plans should use native plant species.
+        script:
+          - tasks:
+              - goal: Remember the Garden planting preference
+                domain_name: Garden
+                depends_on: []
+          - kind: act
+            capability: harness_memory
+            operation: remember
+            arguments:
+              content: Garden planting plans should use native plant species.
+              scope: $domain:Garden
+              type: preference
+          - kind: respond
+            message: Remembered that Garden plans should use native plant species.
+        expect:
+          metric: memory_scope
+          memory:
+            scope:
+              content_contains: native plant species
+              scope: domain:Garden
+            active:
+              - content_contains: native plant species
+                scope: domain:Garden
+          misc:
+            no_error: true
+
+  - id: C03_correction_supersedes_old_fact
+    name: Correcting a fact supersedes the old memory
+    category: C_memory_grounding
+    severity: high
+    description: >-
+      The corrected statement must become the active fact and the old record
+      must be marked superseded by the replacement, not merely contradicted in
+      prose.
+    modes: [deterministic, live]
+    fixtures:
+      memories:
+        - key: c_old_valve
+          content: The garden irrigation valve closes at noon.
+          scope: global
+          type: fact
+    steps:
+      - kind: turn
+        input: Actually, the garden irrigation valve closes at dusk, not noon.
+        script:
+          - tasks:
+              - goal: Correct the garden valve closing time
+                depends_on: []
+          - kind: act
+            capability: harness_memory
+            operation: correct
+            arguments:
+              memory_id: $memory:c_old_valve
+              content: The garden irrigation valve closes at dusk.
+          - kind: respond
+            message: Updated the garden valve time to dusk.
+        expect:
+          metric: learning_lifecycle
+          memory:
+            superseded:
+              old_contains: closes at noon
+              new_contains: closes at dusk
+          attempts:
+            any:
+              - capability: harness_memory
+                operation: correct
+                status: succeeded
+          response:
+            contains: [updated]
+          misc:
+            no_error: true
+
+  - id: C04_exact_identifier_recall
+    name: An exact identifier is retrieved from memory
+    category: C_memory_grounding
+    severity: high
+    description: >-
+      The serial number must be present in the retrieved context and repeated
+      correctly. A plausible but different identifier fails.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Homelab
+          reason: evaluation fixture
+      active_domain: Homelab
+      memories:
+        - key: c_nas_serial
+          content: The homelab NAS serial number is SN-4417-QZ.
+          scope: domain:Homelab
+          type: fact
+    steps:
+      - kind: turn
+        input: What is the homelab NAS serial number?
+        script:
+          - tasks:
+              - goal: Retrieve the homelab NAS serial number
+                domain_name: Homelab
+                depends_on: []
+          - kind: respond
+            message: The homelab NAS serial number is SN-4417-QZ.
+        expect:
+          metric: grounded_recall
+          context:
+            retrieved_memory_contains: [SN-4417-QZ]
+          response:
+            contains: [SN-4417-QZ]
+            no_success_claim: true
+          misc:
+            no_error: true
+
+  - id: C05_paraphrased_retrieval
+    name: A relevant memory is retrieved with different wording
+    category: C_memory_grounding
+    severity: high
+    description: >-
+      The query does not repeat the stored wording. Retrieval must still
+      include the backup-key memory and the response must use it.
+    modes: [deterministic, live]
+    fixtures:
+      memories:
+        - key: c_backup_key
+          content: The spare backup key is inside the ceramic jar behind the flour.
+          scope: global
+          type: fact
+    steps:
+      - kind: turn
+        input: Where do we keep the emergency backup key?
+        script:
+          - tasks:
+              - goal: Find where the emergency backup key is kept
+                depends_on: []
+          - kind: respond
+            message: It is kept in the ceramic jar behind the flour.
+        expect:
+          metric: grounded_recall
+          context:
+            retrieved_memory_contains: [ceramic jar]
+          response:
+            contains: [ceramic jar]
+            no_success_claim: true
+          misc:
+            no_error: true
+
+  - id: C06_unknown_fact_not_claimed
+    name: An unknown fact is not claimed as remembered
+    category: C_memory_grounding
+    severity: critical
+    description: >-
+      No fixture contains a garage door code. The response must state the
+      limitation instead of inventing a code or claiming it is remembered.
+    modes: [deterministic, live]
+    fixtures:
+      memories:
+        - key: c_unrelated
+          content: The garden irrigation valve closes at dusk.
+          scope: global
+          type: fact
+    steps:
+      - kind: turn
+        input: What is the garage door code?
+        script:
+          - tasks:
+              - goal: Answer the garage door code question
+                depends_on: []
+          - kind: respond
+            message: I don't have that information; there is no record of a garage door code.
+        expect:
+          metric: grounding
+          response:
+            shows_limitation: true
+            no_success_claim: true
+            excludes: ["the code is", "code is 1", "I remember the code"]
+          memory:
+            absent:
+              - content_contains: garage door code
+          misc:
+            no_error: true
+
+  - id: C07_fact_vs_recommendation
+    name: Stored facts are distinguished from recommendations
+    category: C_memory_grounding
+    severity: high
+    description: >-
+      The fixtures state that no plant selection exists. A recommendation is
+      acceptable only when labelled as a suggestion, not as a decision.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: c_no_plants
+          content: No plant selection has been made for the Garden project.
+          scope: domain:Garden
+          type: fact
+    steps:
+      - kind: turn
+        input: What plants should the garden have?
+        script:
+          - tasks:
+              - goal: Recommend garden plants
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: No plant selection has been made. I suggest rosemary and lavender as options.
+        expect:
+          metric: grounding
+          context:
+            retrieved_memory_contains: [No plant selection has been made]
+          response:
+            contains: [no plant selection]
+            labels_suggestion: true
+            excludes: [you chose rosemary, we decided on lavender]
+            no_success_claim: true
+          misc:
+            no_error: true
+
+  - id: C08_irrelevant_memory_not_used
+    name: An irrelevant project memory is available but not used
+    category: C_memory_grounding
+    severity: high
+    description: >-
+      The active project has a stored valve fact available as project context,
+      but the question is about vegetables. The valve fact must not be
+      presented as relevant, and another project's rack fact must not be
+      injected or repeated.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+        - name: Homelab
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: c_valve_irrelevant
+          content: The garden irrigation valve closes at dusk.
+          scope: domain:Garden
+          type: fact
+        - key: c_rack_irrelevant
+          content: The homelab rack switch is at 10.0.0.2.
+          scope: domain:Homelab
+          type: fact
+    steps:
+      - kind: turn
+        input: Which vegetables grow well in partial shade?
+        script:
+          - tasks:
+              - goal: Suggest vegetables for partial shade
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: Leafy greens and root vegetables are good options for partial shade.
+        expect:
+          metric: memory_scope
+          context:
+            retrieved_memory_contains: [irrigation valve]
+            excludes: [rack switch is at 10.0.0.2]
+          response:
+            excludes: [valve, rack switch]
+            labels_suggestion: true
+          misc:
+            no_error: true
+
+  - id: C09_claims_supported_by_retrieval
+    name: Important claims are supported by retrieved evidence
+    category: C_memory_grounding
+    severity: high
+    description: >-
+      Every checklist item in the answer must come from the seeded memory and
+      the retrieval trace must show that memory.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Homelab
+          reason: evaluation fixture
+      active_domain: Homelab
+      memories:
+        - key: c_checklist
+          content: "The Homelab checklist has three items: router, switch, and NAS."
+          scope: domain:Homelab
+          type: fact
+    steps:
+      - kind: turn
+        input: Tell me the homelab checklist.
+        script:
+          - tasks:
+              - goal: Report the homelab checklist
+                domain_name: Homelab
+                depends_on: []
+          - kind: respond
+            message: "The Homelab checklist has three items: router, switch, and NAS."
+        expect:
+          metric: grounded_recall
+          context:
+            retrieved_memory_contains: [router, switch, and NAS]
+          response:
+            contains: [router, switch, NAS]
+            no_success_claim: true
+          misc:
+            no_error: true

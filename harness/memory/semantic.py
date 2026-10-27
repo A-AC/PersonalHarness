@@ -120,12 +120,25 @@ class LexicalSemanticScorer:
         # Character trigrams help with punctuation and compound-word variants
         # ("home-lab" vs "home lab") without pretending to understand language.
         char = self._char_similarity(query, content)
-        return max(0.0, min(1.0, coverage * 0.85 + char * 0.15))
+        value = max(0.0, min(1.0, coverage * 0.85 + char * 0.15))
+        # Negligible overlap is noise, not evidence of relevance. Without this
+        # floor any two English sentences share a few trigrams and pass the
+        # "semantic" gate, injecting unrelated project memories.
+        return value if value >= 0.05 else 0.0
 
     @staticmethod
     def _char_similarity(left: str, right: str) -> float:
         def grams(value: str) -> set[str]:
-            text = " ".join(re.findall(r"[a-z0-9]+", (value or "").lower()))
+            # Compare content words only. Function words ("the", "in", "is")
+            # otherwise give every English sentence a non-zero trigram overlap,
+            # which lets an unrelated memory pass the semantic relevance gate
+            # just because it belongs to the active project.
+            tokens = [
+                token
+                for token in re.findall(r"[a-z0-9]+", (value or "").lower())
+                if token not in STOPWORDS
+            ]
+            text = " ".join(tokens)
             if len(text) < 3:
                 return set()
             return {text[index : index + 3] for index in range(len(text) - 2)}

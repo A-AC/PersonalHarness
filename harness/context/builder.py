@@ -96,9 +96,11 @@ class DefaultContextBuilder:
 
         # Scope filtering is deliberately open to every project so relevant
         # knowledge from another project remains retrievable. Priority scopes
-        # only break ties and supply a small bonus, never an absolute filter.
-        # The reserved self scope stays on demand, matching the assistant's
-        # private memory boundary.
+        # add a small bonus and mark the active project's records as project
+        # context, so they stay visible even when the goal does not repeat
+        # their wording. They are never an absolute filter. The reserved self
+        # scope stays on demand, matching the assistant's private memory
+        # boundary.
         scopes = ["global"]
         for item in self._domains.list_domains():
             if item.id == SELF_DOMAIN_ID:

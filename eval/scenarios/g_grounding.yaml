@@ -1,0 +1,337 @@
+# G. Hallucination and grounding.
+#
+# Every expected fact comes from a fixture. A response is only correct when the
+# persisted memory and the context trace support what it says. Negative cases
+# check that unknown, cross-project, outdated, and unsupported claims do not
+# appear. Recommendations are allowed only when clearly labelled as suggestions.
+scenarios:
+  - id: G01_known_fact_recall
+    name: A known checklist is recalled from the seeded project memory
+    category: G_grounding
+    severity: high
+    description: >-
+      The Homelab checklist fixture contains exactly router, switch, and NAS.
+      The answer must repeat only those items and the retrieval trace must show
+      the source memory.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Homelab
+          reason: evaluation fixture
+      active_domain: Homelab
+      memories:
+        - key: g_checklist
+          content: "The Homelab checklist has three items: router, switch, and NAS."
+          scope: domain:Homelab
+          type: fact
+    steps:
+      - kind: turn
+        input: Tell me the homelab checklist.
+        script:
+          - tasks:
+              - goal: Report the homelab checklist
+                domain_name: Homelab
+                depends_on: []
+          - kind: respond
+            message: "The Homelab checklist has three items: router, switch, and NAS."
+        expect:
+          metric: grounded_recall
+          context:
+            retrieved_memory_contains: [router, switch, and NAS]
+          response:
+            contains: [router, switch, NAS]
+            excludes: [UPS, monitor]
+            no_success_claim: true
+          misc:
+            no_error: true
+            required_evidence: [trace, prompt, memories]
+
+  - id: G02_unknown_dimensions_acknowledged
+    name: Unknown garden dimensions are acknowledged, not invented
+    category: G_grounding
+    severity: critical
+    description: >-
+      The fixture states that no dimensions exist. The answer must say so and
+      must not present a made-up measurement as a stored fact.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: g_no_dimensions
+          content: No garden dimensions have been provided for the Garden project.
+          scope: domain:Garden
+          type: fact
+    steps:
+      - kind: turn
+        input: What are the garden dimensions?
+        script:
+          - tasks:
+              - goal: Answer the garden dimensions question
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: No garden dimensions have been provided, so I don't have measurements to share.
+        expect:
+          metric: grounding
+          context:
+            retrieved_memory_contains: [No garden dimensions have been provided]
+          response:
+            shows_limitation: true
+            no_success_claim: true
+            excludes: ["metres", "meters", "feet wide", "10 by", "6 by", "the garden is 4"]
+          misc:
+            no_error: true
+            required_evidence: [trace, prompt, memories]
+
+  - id: G03_suggestion_not_a_decision
+    name: A plant recommendation is labelled as a suggestion, not a past decision
+    category: G_grounding
+    severity: high
+    description: >-
+      No plant selection has been made. Generic advice or a useful clarifying
+      question is acceptable, but the answer must not claim the user chose or
+      decided on those plants, and it must not merely defer with a false
+      "currently running" status.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: g_no_plants
+          content: No plant selection has been made for the Garden project.
+          scope: domain:Garden
+          type: fact
+    steps:
+      - kind: turn
+        input: What plants should I put in the garden?
+        script:
+          - tasks:
+              - goal: Recommend garden plants
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: No plant selection has been made. I suggest rosemary and lavender as options.
+        expect:
+          metric: grounding
+          context:
+            retrieved_memory_contains: [No plant selection has been made]
+          response:
+            metric: unsupported_claim
+            labels_suggestion: true
+            excludes:
+              - you chose
+              - you decided
+              - we selected
+              - you selected
+              - your selection is
+              - please wait
+              - currently running
+            no_success_claim: true
+          misc:
+            no_error: true
+            required_evidence: [trace, prompt, memories]
+
+  - id: G04_wrong_project_fact_not_used
+    name: A cross-project fact is not presented as the active project's fact
+    category: G_grounding
+    severity: critical
+    description: >-
+      Retrieval may surface relevant knowledge from another project by design,
+      so the Homelab rack height is present in the prompt as a trap. The Garden
+      question must still state the limitation and must not repeat 42U or treat
+      the Homelab fact as a Garden measurement. The fact must remain scoped to
+      Homelab.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+        - name: Homelab
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: g_homelab_rack
+          content: The homelab rack is 42U high.
+          scope: domain:Homelab
+          type: fact
+    steps:
+      - kind: turn
+        input: How tall is the garden rack?
+        script:
+          - tasks:
+              - goal: Answer the garden rack height question
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: I don't have a garden rack height on record for the Garden project.
+        expect:
+          metric: grounding
+          memory:
+            scope:
+              content_contains: homelab rack is 42U
+              scope: domain:Homelab
+          context:
+            includes: [42U]
+          response:
+            shows_limitation: true
+            no_success_claim: true
+            excludes: [42U, "forty-two", homelab rack]
+          misc:
+            no_error: true
+            required_evidence: [trace, prompt, memories]
+
+  - id: G05_outdated_fact_not_used
+    name: An outdated fact is superseded and not repeated
+    category: G_grounding
+    severity: high
+    description: >-
+      The old valve time is superseded by the new one. The answer and retrieval
+      evidence must use dusk and must not present noon as current.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: g_old_valve
+          content: The garden irrigation valve closes at noon.
+          scope: domain:Garden
+          type: fact
+        - key: g_new_valve
+          content: The garden irrigation valve closes at dusk.
+          scope: domain:Garden
+          type: fact
+          supersedes_content: closes at noon
+    steps:
+      - kind: turn
+        input: When does the garden irrigation valve close?
+        script:
+          - tasks:
+              - goal: Report the garden irrigation valve time
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: The garden irrigation valve closes at dusk.
+        expect:
+          metric: grounding
+          memory:
+            superseded:
+              old_contains: closes at noon
+              new_contains: closes at dusk
+          context:
+            retrieved_memory_contains: [closes at dusk]
+            excludes: [closes at noon]
+          response:
+            contains: [dusk]
+            excludes: [noon]
+            no_success_claim: true
+          misc:
+            no_error: true
+            required_evidence: [trace, prompt, memories]
+
+  - id: G06_unsupported_selection_claim_rejected
+    name: The assistant does not claim an unsupported prior selection
+    category: G_grounding
+    severity: critical
+    description: >-
+      The only fixture says no plant selection exists. A claim that a plant was
+      already chosen, or an invented selected plant, is a grounding failure.
+      A direct denial is sufficient; offering new suggestions is optional.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: g_selection_absent
+          content: No plant selection has been made for the Garden project.
+          scope: domain:Garden
+          type: fact
+    steps:
+      - kind: turn
+        input: Which plants did I already choose for the garden?
+        script:
+          - tasks:
+              - goal: Answer the earlier plant selection question
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: >-
+              No plant selection has been made, so I don't have a previous choice
+              to report. I can suggest options if you want.
+        expect:
+          metric: grounding
+          context:
+            retrieved_memory_contains: [No plant selection has been made]
+          response:
+            metric: unsupported_claim
+            contains: [no plant selection]
+            excludes:
+              - you chose
+              - you selected
+              - you decided
+              - your choice was
+              - you picked rosemary
+              - you picked lavender
+            no_success_claim: true
+          misc:
+            no_error: true
+            required_evidence: [trace, prompt, memories]
+
+  - id: G07_global_preference_grounded
+    name: A globally stored formatting preference supports the answer
+    category: G_grounding
+    severity: high
+    description: >-
+      The formatting preference is stored globally, retrieved through the
+      preferences section, and used without being scoped to the active project.
+    modes: [deterministic, live]
+    fixtures:
+      domains:
+        - name: Garden
+          reason: evaluation fixture
+        - name: Homelab
+          reason: evaluation fixture
+      active_domain: Garden
+      memories:
+        - key: g_global_format
+          content: The user prefers concise bullet-point summaries in every project.
+          scope: global
+          type: preference
+        - key: g_project_fact
+          content: The homelab rack is 42U high.
+          scope: domain:Homelab
+          type: fact
+    steps:
+      - kind: turn
+        input: How should you format a project summary for me?
+        script:
+          - tasks:
+              - goal: State the preferred summary format
+                domain_name: Garden
+                depends_on: []
+          - kind: respond
+            message: I will use concise bullet points, as you prefer in every project.
+        expect:
+          metric: memory_scope
+          memory:
+            scope:
+              content_contains: concise bullet-point summaries
+              scope: global
+          context:
+            retrieved_memory_contains: [concise bullet-point summaries]
+            excludes: [homelab rack is 42U]
+          response:
+            contains: [bullet]
+            excludes: [table, homelab rack]
+            no_success_claim: true
+          misc:
+            no_error: true
+            required_evidence: [trace, prompt, memories]

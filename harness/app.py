@@ -11,10 +11,12 @@ from harness.contracts.capabilities import ExecuteRequest
 from harness.contracts.control import ControlPlane
 from harness.contracts.decisions import DecisionResolver, DecisionStore
 from harness.contracts.domains import StructureDraft
+from harness.contracts.settings import SettingsService
 from harness.control.decisions import FileDecisionStore
 from harness.control.plane import DefaultControlPlane
 from harness.control.resolver import DefaultDecisionResolver
 from harness.domains.inference import DefaultDomainInference
+from harness.domains.inspect import inspect_domain as _inspect_domain
 from harness.domains.registry import FileDomainRegistry
 from harness.events.log import FileEventLog
 from harness.history.service import FileHistoryService
@@ -71,12 +73,39 @@ class Harness:
     learning_pipeline: EvidenceLearningPipeline
     learning_review: LearningReview
 
+    def inspect_domain(self, domain_id: str, *, event_limit: int = 200) -> dict:
+        return _inspect_domain(self, domain_id, event_limit=event_limit)
+
     def on_start(self) -> None:
         self.tasks.on_process_start()
         self.control.on_start()
         # Deterministic recovery runs even when the heartbeat is disabled:
         # interrupted and unknown-outcome work must never look runnable.
         self.scheduler.reconcile()
+
+
+def build_settings_service(
+    path: str | Path, *, env: dict[str, str] | None = None
+) -> FileSettingsService:
+    """Create the persisted settings service used by a harness or probe."""
+
+    return FileSettingsService(Path(path), env=env)
+
+
+def build_scripted_model() -> ScriptedAdapter:
+    """Create an empty scripted adapter for deterministic evaluation."""
+
+    return ScriptedAdapter([])
+
+
+def build_configured_model(settings: SettingsService) -> OpenAICompatAdapter:
+    """Create the configured live model adapter without substituting a fake."""
+
+    return OpenAICompatAdapter(settings)
+
+
+def is_scripted_model(model: object) -> bool:
+    return isinstance(model, ScriptedAdapter)
 
 
 def build_harness(

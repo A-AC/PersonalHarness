@@ -328,6 +328,13 @@ class MemoryCore:
         query_tokens = {item for item in tokens(query_text) if item not in STOPWORDS}
         query_identifiers = {item.lower() for item in IDENTIFIER_RE.findall(query_text)}
         priority = set(scope_priority or [])
+        # A task explicitly attached to a project treats that project's records
+        # as project context. Cross-project records still have to earn their
+        # place through lexical/semantic relevance, but an active project's own
+        # facts remain visible even when the goal does not repeat their wording.
+        active_project_scopes = {
+            scope for scope in priority if scope.startswith("domain:")
+        }
         allowed_kinds = set(kinds or [])
         reference = now or now_ts()
         reference_dt = parse_ts(reference)
@@ -398,8 +405,10 @@ class MemoryCore:
             )
             if not hits and not exact_hits and not phrase_exact and record.type != MemoryType.PREFERENCE:
                 # Optional semantic similarity is the only reason an unrelated
-                # lexical candidate may still be useful.
-                if semantic <= 0.0:
+                # lexical candidate may still be useful. Records in the active
+                # project are exempt: they are project context, not merely a
+                # keyword hit.
+                if semantic <= 0.0 and record.scope not in active_project_scopes:
                     continue
             exact = weights["exact"] if (exact_hits or phrase_exact) else 0.0
             scope_score = 0.0
@@ -427,7 +436,7 @@ class MemoryCore:
                 + (explicit_bonus if record.origin == MemoryOrigin.EXPLICIT else 0.0)
                 + (preference_bonus if record.type == MemoryType.PREFERENCE else 0.0)
             )
-            if query_tokens and lexical <= 0 and not exact_hits and semantic <= 0 and record.type != MemoryType.PREFERENCE:
+            if query_tokens and lexical <= 0 and not exact_hits and semantic <= 0 and record.type != MemoryType.PREFERENCE and record.scope not in active_project_scopes:
                 continue
             if score < min_score and record.type != MemoryType.PREFERENCE:
                 continue
@@ -443,6 +452,13 @@ class MemoryCore:
                 reason_parts.append(f"semantic {semantic:.2f}")
             if record.scope in priority:
                 reason_parts.append("scope relevant")
+            if (
+                record.scope in active_project_scopes
+                and not hits
+                and not exact_hits
+                and semantic <= 0
+            ):
+                reason_parts.append("active project context")
             reason_parts.append(f"score {score:.2f}")
             ranked.append(
                 RankedMemory(

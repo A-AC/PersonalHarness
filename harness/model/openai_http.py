@@ -74,6 +74,39 @@ class OpenAICompatAdapter:
         except httpx.HTTPError:
             return False
 
+    def model_ids(self, role: str) -> list[str] | None:
+        """Return the model ids the endpoint advertises, or ``None``.
+
+        ``None`` means the endpoint does not expose a usable model list (for
+        example a minimal OpenAI-compatible server). Callers must not treat
+        that as proof the configured model is missing. A non-empty list is
+        authoritative: a configured alias absent from it cannot serve a
+        request even though the server itself is healthy.
+        """
+
+        endpoint = str(self._settings.get(self._role_key(role, "endpoint")))
+        timeout = min(
+            float(self._settings.get("models.health_timeout_s")),
+            float(self._settings.get(self._role_key(role, "timeout_s"))),
+        )
+        try:
+            models_url = endpoint.rsplit("/", 2)[0] + "/models"
+            response = httpx.get(models_url, timeout=timeout)
+            if response.status_code != 200:
+                return None
+            body = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list):
+            return None
+        ids = [
+            str(item["id"])
+            for item in data
+            if isinstance(item, dict) and item.get("id")
+        ]
+        return ids or None
+
     def _post(
         self,
         endpoint: str,

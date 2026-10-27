@@ -16,6 +16,7 @@ from harness.app import Harness
 from harness.contracts.chat import TurnEvent
 from harness.contracts.profile import PersonaDraft
 from harness.contracts.settings import SettingsError
+from harness.domains.inspect import inspect_domain
 from harness.measure import learning_report
 from harness.storage.atomic import new_id
 
@@ -828,7 +829,9 @@ def create_app(harness: Harness) -> Starlette:
             )
 
         drows = "".join(
-            f"<tr><td>{_esc(item.id)}</td><td>{_esc(item.name)}</td><td>{_esc(item.created_by)}</td>"
+            f'<tr><td><a href="/domains/{_esc(item.id)}">{_esc(item.id)}</a></td>'
+            f'<td><a href="/domains/{_esc(item.id)}">{_esc(item.name)}</a></td>'
+            f"<td>{_esc(item.created_by)}</td>"
             f"<td>{_esc(item.created_reason)}</td><td>{_esc(item.capability_names)}</td>"
             f"<td>{actions(item.id, item.name)}</td></tr>"
             for item in harness.domains.list_domains(include_archived=True)
@@ -848,6 +851,79 @@ def create_app(harness: Harness) -> Starlette:
             + srows
             + "</table>"
         )
+
+    async def domain_detail(request: Request) -> HTMLResponse:
+        domain_id = request.path_params["domain_id"]
+        try:
+            content = inspect_domain(harness, domain_id)
+        except KeyError:
+            return _error_page(f"domain not found: {domain_id}", 404)
+        meta = content["metadata"]
+        counts = content["counts"]
+        memory_rows = "".join(
+            f"<tr><td>{_esc(item['id'])}</td><td>{_esc(item['type'])}</td>"
+            f"<td>{_esc(item['scope'])}</td><td>{_esc(item['status'])}</td>"
+            f"<td>{_esc(item['content'])}</td></tr>"
+            for group in ("domain_scoped", "global", "self")
+            for item in content["memories"][group]
+        )
+        task_rows = "".join(
+            f"<tr><td>{_esc(item['id'])}</td><td>{_esc(item['state'])}</td>"
+            f"<td>{_esc(item['goal'])}</td><td>{_esc(item['due_at'])}</td>"
+            f"<td>{_esc(item['updated_at'])}</td></tr>"
+            for item in content["tasks"]
+        )
+        decision_rows = "".join(
+            f"<tr><td>{_esc(item['id'])}</td><td>{_esc(item['status'])}</td>"
+            f"<td>{_esc(item['summary'])}</td><td>{_esc(item['resolution'])}</td></tr>"
+            for item in content["decisions"]
+        )
+        event_rows = "".join(
+            f"<tr><td>{_esc(item['ts'])}</td><td>{_esc(item['operation'])}</td>"
+            f"<td>{_esc(item['result'])}</td><td>{_esc(item['data'])}</td></tr>"
+            for item in content["events"]
+        )
+        empty_note = (
+            "<p class='muted'>This domain has no stored memories, tasks, or decisions. "
+            "Nothing is inferred to make it look populated.</p>"
+            if content["empty"]
+            else ""
+        )
+        return _page(
+            f"<h1>Domain: {_esc(meta['name'])}</h1>"
+            f"<p class='muted'><a href='/api/domains/{_esc(meta['id'])}'>JSON</a></p>"
+            f"{empty_note}"
+            "<h2>Metadata</h2><table>"
+            f"<tr><th>id</th><td>{_esc(meta['id'])}</td></tr>"
+            f"<tr><th>name</th><td>{_esc(meta['name'])}</td></tr>"
+            f"<tr><th>status</th><td>{_esc(meta['status'])}</td></tr>"
+            f"<tr><th>created by</th><td>{_esc(meta['created_by'])}</td></tr>"
+            f"<tr><th>created at</th><td>{_esc(meta['created_at'])}</td></tr>"
+            f"<tr><th>reason</th><td>{_esc(meta['created_reason'])}</td></tr>"
+            f"<tr><th>capabilities</th><td>{_esc(meta['capability_names'])}</td></tr>"
+            "</table>"
+            f"<h2>Summary</h2><pre>{_esc(content['summary'] or 'No summary stored.')}</pre>"
+            f"<h2>Memory ({counts['domain_memories']} scoped, {counts['global_memories']} global, "
+            f"{counts['self_memories']} self)</h2>"
+            "<table><tr><th>id</th><th>type</th><th>scope</th><th>status</th><th>content</th></tr>"
+            f"{memory_rows}</table>"
+            f"<h2>Tasks ({counts['tasks']})</h2>"
+            "<table><tr><th>id</th><th>state</th><th>goal</th><th>due</th><th>updated</th></tr>"
+            f"{task_rows}</table>"
+            f"<h2>Decisions ({counts['decisions']})</h2>"
+            "<table><tr><th>id</th><th>status</th><th>summary</th><th>resolution</th></tr>"
+            f"{decision_rows}</table>"
+            f"<h2>Events ({counts['events']})</h2>"
+            "<table><tr><th>ts</th><th>operation</th><th>result</th><th>data</th></tr>"
+            f"{event_rows}</table>"
+        )
+
+    async def domain_api(request: Request) -> JSONResponse:
+        try:
+            content = inspect_domain(harness, request.path_params["domain_id"])
+        except KeyError:
+            return JSONResponse({"error": "domain not found"}, status_code=404)
+        return JSONResponse(content)
 
     async def capabilities(_request: Request) -> HTMLResponse:
         rows = []
@@ -1098,6 +1174,8 @@ def create_app(harness: Harness) -> Starlette:
         Route("/persona", persona, methods=["GET", "POST"]),
         Route("/tasks", tasks),
         Route("/domains", domains, methods=["GET", "POST"]),
+        Route("/domains/{domain_id}", domain_detail),
+        Route("/api/domains/{domain_id}", domain_api),
         Route("/history", history),
         Route("/capabilities", capabilities),
         Route("/consolidation", consolidation, methods=["GET", "POST"]),

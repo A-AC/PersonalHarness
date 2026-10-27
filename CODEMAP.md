@@ -4,15 +4,15 @@
 components import other components only through `harness/contracts/*` (plus
 shared structural modules such as `constants`, `storage`, `text`, `timefmt`,
 and `prompts`). `harness/app.py` is the composition root; `harness/ui/web.py`,
-`harness/measure.py`, `harness/eval.py`, and `harness/__main__.py` sit at the
-composition/edge layer.
+`harness/measure.py`, `harness/eval.py`, `harness/evaluation/runner.py`, and
+`harness/__main__.py` sit at the composition/edge layer.
 
 ## Entry points and composition
 
 | Path | Responsibility |
 | --- | --- |
-| `harness/__main__.py` | CLI: `serve`, `health`, `turn`, `tick`, `status`, `consolidate`, `review`, `skills`, `measure`, `eval`, `reset` |
-| `harness/app.py` | `Harness` container and `build_harness()` wiring, including the structure hook (enter/leave/suggest with duplicate and cooldown checks), the learning stack (journal, skill library, pipeline, review), the persona safety guards, and the post-reset skill refresh |
+| `harness/__main__.py` | CLI: `serve`, `health`, `turn`, `tick`, `status`, `consolidate`, `review`, `skills`, `measure`, `eval`, `reset`; `eval` keeps the legacy suite without `--mode` and routes to the scenario evaluator with `--mode`, `--scenario-dir`, or `--summary` (selection, repeats, sandbox, config source, reports, comparison, list) |
+| `harness/app.py` | `Harness` container and `build_harness()` wiring, including the structure hook (enter/leave/suggest with duplicate and cooldown checks), the learning stack (journal, skill library, pipeline, review), the persona safety guards, adapter/settings composition helpers used by the evaluator, read-only `inspect_domain()`, and the post-reset skill refresh |
 | `harness/constants.py` | Schema version, ID prefixes, enums, reserved `self` id |
 | `harness/storage/atomic.py` | UTC timestamps, safe IDs/filenames, atomic JSON/text, JSONL append |
 | `harness/text.py` | Tokenization, reasoning stripping, overlap, normalized name matching (`normalize_name`, `name_overlap`, `match_by_name`), token estimate, keyword matching, success-claim/unknown/placeholder checks shared by guards and evals |
@@ -33,6 +33,7 @@ composition/edge layer.
 | `tests/conftest.py` | `make_harness`, scripted `plan`/`act`/`ask`/`respond` builders, settings writer, and the shared baseline fixture |
 | `tests/test_end_to_end.py` | 18 integrated scenarios from user input through planning, execution, persistence, restart, and recovery; uses scripted model output only where a real model call is required |
 | `tests/test_evaluation_audit.py` | 15 known-answer measurements for decision resolution, memory retrieval, project association, task recovery/state, permission enforcement, and learning/rollback |
+| `tests/test_evaluation_framework.py` | Automated tests for the scenario evaluator: loading/selection, sandbox refusal, fixtures, assertion evidence (including denial/clarification handling), metrics/reports/redaction, comparison, domain inspection, UI/API routes, isolated runner execution, CLI list/run/summary/compare, endpoint/model probing, and full-category coverage |
 
 The Phase 5 measured results, fixture sizes, and caveats are in
 [README.md](README.md#phase-5-audit-measured-results). The audit tests assert
@@ -81,6 +82,7 @@ It has no concrete imports.
 | `harness/session/turns.py` | `DefaultTurnService`: one serialized turn entry point for CLI and web, progress listener, trace/memory detail read model, plus `run_ready` so the scheduler executes eligible work under the same lock and epoch gate |
 | `harness/domains/registry.py` | Self domain, explicit structure creation, suggestions, normalized suggestion cooldown, enablement, and a best-effort suggestion listener that mirrors lifecycle changes into the decision log |
 | `harness/domains/inference.py` | Read-only project inference: additive name/memory/task/history evidence plus a small active-domain bonus, confidence threshold and ambiguity margin, short project summaries; never creates, moves, or renames anything |
+| `harness/domains/inspect.py` | Read-only domain content inspection: metadata, summary, domain/global/self memories, tasks, related decisions, lifecycle events, counts, and an explicit `empty` flag; used by the UI/API and evaluator |
 | `harness/tasks/manager.py` | Task files, valid transitions (including `deferred` and reason-only blocked changes), dependency release, priority-aware sequencing, checkpoints (bounded), deferral windows, counted resumes, running-task domain reassignment; legacy rows with removed structure keys load by filtering to current fields |
 | `harness/control/decisions.py` | File-backed decision log (`decisions/dec_*.json`), open/terminal queries, task/suggestion lookup, suggestion mirroring |
 | `harness/control/resolver.py` | Deterministic reading of a reply in decision context: explicit/contextual selection, ambiguity, approval/rejection/modification/defer/cancel, and question vs unrelated request. Questions that refer to the decision set itself ("which one?", "what are my options?") are clarifications, never new planner work. |
@@ -88,14 +90,14 @@ It has no concrete imports.
 | `harness/profile/provider.py` | Persona versions and proposed edits, with an injectable approve-time safety guard |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
 | `harness/history/service.py` | Budgeted history strategies (`full`, rolling `summary`, gap `segment`), compact time/gap markers, off-path summary generation and fallback |
-| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback (procedural hints normalize non-procedure subtypes to `lesson`), kind-aware duplicate/conflict policy (near-duplicate merges also require the same semantic subtype so wording overlap never conflates a fact with a preference), lifecycle metadata persistence and derived lifecycle view, hybrid explainable retrieval (exact identifiers, lexical, optional semantic, scope priority, recency/provenance/kind weights, conflict and validity suppression), usage, consolidation maintenance (semantic-only retype), rollback |
+| `harness/memory/core.py` | Candidate validation, classifier-driven semantic typing, orthogonal kind derivation/hint fallback (procedural hints normalize non-procedure subtypes to `lesson`), kind-aware duplicate/conflict policy (near-duplicate merges also require the same semantic subtype so wording overlap never conflates a fact with a preference), lifecycle metadata persistence and derived lifecycle view, hybrid explainable retrieval (exact identifiers, lexical, optional semantic, scope priority, recency/provenance/kind weights, conflict and validity suppression; records in the active project scope remain visible as project context even without a lexical match while cross-project records still need relevance), usage, consolidation maintenance (semantic-only retype), rollback |
 | `harness/memory/semantic.py` | Pluggable `SemanticScorer` implementations: dependency-free lexical-semantic scorer (configurable concept groups, stemming, character n-grams) and the off switch; a deployment can substitute an embedding-backed scorer at the composition root |
 | `harness/memory/capture.py` | Deterministic execution-outcome capture: failure fingerprint dedupe, task-derived scope, resolving-success supersede, `memory.capture` events, no model call |
 | `harness/memory/classifier.py` | Replaceable deterministic (keyword-rule) memory type classifier plus the deterministic type-to-kind mapping |
 | `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
 | `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
 | `harness/memory/tokens.py` | Token/overlap aliases for retrieval |
-| `harness/context/builder.py` | Query-driven budgeted context: cross-project memory retrieval with priority scopes (self stays on demand), per-item memory trimming that drops whole blocks, project summary and stats, pending decisions for the task or its project protected from trimming, bounded active-domain directory that drops whole entries, persona-trim fallback when the total budget cannot fit the safety instructions, prompt variant, local current-time block, age markers, memory tags with kind/lifecycle, bounded history, capability disclosure with enum values/defaults, precondition-gated skill disclosure (a skill whose required tokens are absent from the task goal is excluded with a recorded reason), and inclusion/exclusion/budget stats. Skill blocks are emitted before ordinary capability blocks so end-of-section clipping cannot silently drop a disclosed learned procedure; the skill's operations still pass the normal permission and confirmation checks. |
+| `harness/context/builder.py` | Query-driven budgeted context: cross-project memory retrieval with priority scopes (the active project's records are project context; self stays on demand), per-item memory trimming that drops whole blocks, project summary and stats, pending decisions for the task or its project protected from trimming, bounded active-domain directory that drops whole entries, persona-trim fallback when the total budget cannot fit the safety instructions, prompt variant, local current-time block, age markers, memory tags with kind/lifecycle, bounded history, capability disclosure with enum values/defaults, precondition-gated skill disclosure (a skill whose required tokens are absent from the task goal is excluded with a recorded reason), and inclusion/exclusion/budget stats. Skill blocks are emitted before ordinary capability blocks so end-of-section clipping cannot silently drop a disclosed learned procedure; the skill's operations still pass the normal permission and confirmation checks. |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
 | `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`); memory enums/defaults generated from `constants` |
 | `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records, one-scan attempts-by-task index, skill discovery from the configured or default active-skills dir with a `reload_skills` refresh, and a best-effort explicit-write observer hook for learning journaling |
@@ -114,9 +116,19 @@ It has no concrete imports.
 | `harness/maintenance/reset.py` | Full/selective state wipe (learning journal cleared on all scopes; the skills tree only on full), timestamped backup archive, seed re-application, stale-reference scrub, reset audit event, and an injectable post-reset hook that refreshes executor skill disclosure and drops conversation-wiped skill candidates |
 | `harness/scheduler/service.py` | `WorkScheduler`: deterministic heartbeat (startup reconcile + ticks) over persisted tasks/decisions/attempts — unknown-outcome reconciliation decisions, dependency re-checks, deferred-window release, bounded/cooled requeues, one-time due reminders, scheduled consolidation, the optional scheduled learning review (deterministic, never model-backed), and bounded autonomous execution through the turn service; honest-status read model (`report()`), daemon-thread start/stop, and an `exclusive` reset gate. A tick folds reconcile/requeue/reminder/maintenance findings into one `scheduler.tick` event, and a retry-limit exhaustion is reported and checkpointed only once rather than on every scan. |
 | `harness/model/scripted.py` | Deterministic test adapter |
-| `harness/model/openai_http.py` | OpenAI-compatible HTTP adapter and health probe |
+| `harness/model/openai_http.py` | OpenAI-compatible HTTP adapter, health probe, and advertised-model lookup used to reject a healthy server whose configured alias cannot serve requests |
 | `harness/measure.py` | Learning report from stored events/tasks/memories/usage plus learning-journal and skill-library counters |
 | `harness/eval.py` | Isolated live eval, deterministic checks, long-history real-use and time-awareness scenarios, scripted honesty cases, p50/p95, malformed-output, prompt-token, and token metrics |
+| `harness/evaluation/models.py` | Serializable result model: scenarios, steps, assertions, step observations, scenario runs, evaluation runs |
+| `harness/evaluation/loader.py` | YAML/JSON loading, default merging, validation, duplicate-ID checks, and mode/category/tag/ID selection |
+| `harness/evaluation/safety.py` | Dedicated sandbox resolution, `.harness-eval-sandbox` marker, protected-path refusal, and non-empty-directory refusal |
+| `harness/evaluation/fixtures.py` | Legal fixture state through public managers (domains, active domain, scoped/global memories, tasks with legal transitions, decisions, skills, attempts) plus `$domain:`/`$memory:`/`$task:`/`$decision:`/`$skill:`/`$interaction:` interpolation |
+| `harness/evaluation/runner.py` | Deterministic and live execution through `build_harness`; turn/inspect/tick/restart/sleep/review/learning-signal/skill steps; endpoint health and advertised-model probe; per-scenario/repeat isolation; evidence snapshots; cleanup |
+| `harness/evaluation/assertions.py` | Evidence-based assertion engine: responses, task/decision/memory state, domain content, context inclusion/exclusion and retrieval reasons, capability calls, forbidden operations, scheduler/learning state, tick and review reports, required evidence, metrics tags |
+| `harness/evaluation/metrics.py` | Scenario/assertion rates, denominators, category/severity summaries, named metrics (grounding, unsupported claims, scope, project association, recovery, learning, clarification, approvals, unauthorized dispatch), latency, and comparison |
+| `harness/evaluation/report.py` | JSON and Markdown reports with config, steps, evidence, failures, interpretation limits, and secret redaction |
+| `harness/evaluation/compare.py` | Loads two reports and renders regressions, improvements, unchanged scenarios, latency/behavior changes, and critical safety failures |
+| `eval/scenarios/*.yaml` | 55 scenario definitions across A project continuity, B domain inspection, C memory grounding, D control plane, E scheduler, F learning, and G grounding |
 | `harness/ui/web.py` | Authenticated server-rendered inspection/control UI (viewport-sized chat panel with a scrollable log, collapsible live strip, composer pinned to the panel bottom, and an active-domain selector outside the SSE path; completed turns are appended from server-rendered fragments over SSE without reloading, memory actions, on-demand/scheduled consolidation, stored conversation history, turn timeline, execution envelope, confirm-gated reset); chat streams stage/token events over SSE and links messages to traces and back; malformed control requests return 4xx with a message |
 
 ## Turn data flow
@@ -613,8 +625,10 @@ The CLI is `harness reset [--scope full|memories|conversations] [--yes]
 | `skills/candidates/<name>/SKILL.md` | Staged candidate text (never disclosed) |
 | `skills/active/<name>/SKILL.md` | Approved skill text; the executor's default discovery dir |
 | `backups/reset_*.zip` | Timestamped pre-reset archive and `_reset_manifest.json` |
-| `eval/<tag>/...` | Isolated per-scenario-per-repeat data dirs |
-| `eval/results/<tag>.json` | Eval config, summary, and run details |
+| `eval/<tag>/...` | Isolated per-scenario-per-repeat data dirs for the legacy suite |
+| `eval/results/<tag>.json` | Scenario-evaluator or legacy eval config, summary, scenario/step/assertion evidence, and failure details |
+| `eval/results/<tag>.md` | Human-readable scenario-evaluator summary with category/severity rates, metrics, latency, failures, and evidence |
+| `eval/scenarios/*.yaml` | Source scenario suite (committed, not runtime state) |
 | `experiments/results/<tag>.json` | Experiment config, summary, per-run traces, fixed scenario set |
 | `experiments/results/cold_start_idle.json` | Idle/warm/concurrent cold-start probe samples and model state |
 | `experiments/results/cold_start_unload.json` | Forced-unload reload measurement |
