@@ -545,6 +545,7 @@ class DefaultInteractionLoop:
         active_domain = self._sessions.active_domain()
         misses: list[dict[str, Any]] = []
         inferred: list[dict[str, Any]] = []
+        unresolved: list[dict[str, Any]] = []
         for spec in plan:
             depends: list[str] = []
             for idx in spec.get("depends_on") or []:
@@ -588,9 +589,29 @@ class DefaultInteractionLoop:
                                 "ambiguous": match.ambiguous,
                                 "reason": match.reason,
                                 "evidence": match.evidence,
+                                "status": "inferred",
                             }
                         )
                     domain_id = match.domain_id
+                elif match is not None and match.domain_id and match.score > 0:
+                    # The request resembles an existing project, but the match
+                    # is not confident enough to route new work. Report that
+                    # decision (including tied candidates) instead of silently
+                    # falling back with no trace.
+                    unresolved.append(
+                        {
+                            "task_goal": goal,
+                            "domain_id": match.domain_id,
+                            "domain_name": match.name,
+                            "score": round(match.score, 4),
+                            "confident": match.confident,
+                            "ambiguous": match.ambiguous,
+                            "candidates": list(match.candidates or []),
+                            "reason": match.reason,
+                            "evidence": match.evidence,
+                            "status": "ambiguous" if match.ambiguous else "uncertain",
+                        }
+                    )
             created.append(
                 self._tasks.create(
                     TaskSpec(
@@ -615,6 +636,7 @@ class DefaultInteractionLoop:
                     data={
                         "matches": inferred,
                         "active_domain_id": active_domain,
+                        "resolved": True,
                     },
                 )
             )
@@ -622,7 +644,37 @@ class DefaultInteractionLoop:
                 timeline.record(
                     "plan.domain_inference",
                     time.monotonic(),
-                    {"matches": inferred, "active_domain_id": active_domain},
+                    {"matches": inferred, "active_domain_id": active_domain, "resolved": True},
+                )
+        if unresolved:
+            ambiguous = any(item["ambiguous"] for item in unresolved)
+            result = "ambiguous" if ambiguous else "uncertain"
+            self._events.append(
+                Event(
+                    id=new_id("evt"),
+                    ts=now_ts(),
+                    actor="harness",
+                    operation="plan.domain_inference",
+                    target=trace_id or interaction_id,
+                    result=result,
+                    trigger_ref=interaction_id,
+                    data={
+                        "matches": unresolved,
+                        "active_domain_id": active_domain,
+                        "resolved": False,
+                    },
+                )
+            )
+            if timeline is not None:
+                timeline.record(
+                    "plan.domain_inference",
+                    time.monotonic(),
+                    {
+                        "matches": unresolved,
+                        "active_domain_id": active_domain,
+                        "resolved": False,
+                        "result": result,
+                    },
                 )
         if misses:
             # Never silently write None: the planner miss is observable even

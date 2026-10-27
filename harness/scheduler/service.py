@@ -146,12 +146,19 @@ class WorkScheduler:
         unknown-outcome task for runnable work.
         """
         report = TickReport(ts=now_ts(), enabled=True)
-        now = datetime.now(timezone.utc)
+        self._reconcile_report(report, datetime.now(timezone.utc))
+        self._emit_tick_event(report, trigger="reconcile")
+        return report
+
+    def _reconcile_report(self, report: TickReport, now: datetime) -> None:
+        """Apply the recovery steps to an existing report.
+
+        ``tick`` folds these items into the single end-of-tick event instead of
+        emitting a second ``reconcile`` event for the same pass.
+        """
         self._reconcile_unknown_outcomes(report, now)
         self._recheck_dependencies(report)
         self._release_deferred(report, now)
-        self._emit_tick_event(report, trigger="reconcile")
-        return report
 
     def tick(self) -> TickReport:
         epoch = self._epoch
@@ -164,8 +171,9 @@ class WorkScheduler:
                 )
             if not bool(self._settings.get("scheduler.enabled")):
                 return TickReport(ts=now_ts(), enabled=False)
-            report = self.reconcile()
+            report = TickReport(ts=now_ts(), enabled=True)
             now = datetime.now(timezone.utc)
+            self._reconcile_report(report, now)
             self._requeue_recoverable(report, now)
             self._notify_due(report, now)
             self._scheduled_consolidation(report, now)
@@ -337,23 +345,27 @@ class WorkScheduler:
             self._tasks.transition(task.id, TaskState.FAILED, reason=BlockReason.RETRY_LIMIT)
         except ValueError:
             pass
-        if not already:
-            self._tasks.record_checkpoint(
-                task.id,
-                f"Retry budget exhausted ({task.resume_count} resumes); the scheduler will not requeue this again.",
-                {"kind": "retry_limit", "resume_count": task.resume_count},
+        if already:
+            # The exhaustion was recorded and announced on an earlier tick.
+            # Continuing to add a report item every scan is noise, not a new
+            # finding; the task remains failed and is never requeued again.
+            return
+        self._tasks.record_checkpoint(
+            task.id,
+            f"Retry budget exhausted ({task.resume_count} resumes); the scheduler will not requeue this again.",
+            {"kind": "retry_limit", "resume_count": task.resume_count},
+        )
+        self._safe_event(
+            Event(
+                id=new_id("evt"),
+                ts=now_ts(),
+                actor="harness",
+                operation="task.retry_exhausted",
+                target=task.id,
+                result=TaskState.FAILED.value,
+                data={"resume_count": task.resume_count},
             )
-            self._safe_event(
-                Event(
-                    id=new_id("evt"),
-                    ts=now_ts(),
-                    actor="harness",
-                    operation="task.retry_exhausted",
-                    target=task.id,
-                    result=TaskState.FAILED.value,
-                    data={"resume_count": task.resume_count},
-                )
-            )
+        )
         report.items.append(
             TickItem(
                 kind="requeue",

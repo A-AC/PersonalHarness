@@ -24,6 +24,7 @@ from harness.contracts.settings import SettingsService
 from harness.contracts.sources import SourceResolver
 from harness.learning.strategy import check_persona_draft
 from harness.storage.atomic import new_id, now_ts
+from harness.text import STOPWORDS, word_tokens
 
 # The memory core only accepts these structured keys for execution-outcome
 # sources; the pipeline builds exactly this shape from attempt evidence.
@@ -63,6 +64,88 @@ def workflow_slug(workflow: list[str]) -> str:
             parts.append(tail)
     slug = "workflow-" + "-".join(parts)
     return slug[:48].rstrip("-")
+
+
+# Words that describe the act of asking/doing rather than the subject of the
+# work. They are poor relevance gates for a learned procedure: two unrelated
+# requests often share "check" or "update".
+GENERIC_GOAL_TOKENS = {
+    "again",
+    "also",
+    "always",
+    "check",
+    "confirm",
+    "create",
+    "delete",
+    "done",
+    "ensure",
+    "find",
+    "fix",
+    "give",
+    "help",
+    "list",
+    "look",
+    "make",
+    "need",
+    "note",
+    "notes",
+    "open",
+    "read",
+    "remove",
+    "run",
+    "save",
+    "send",
+    "show",
+    "start",
+    "status",
+    "stop",
+    "tell",
+    "then",
+    "thing",
+    "update",
+    "use",
+    "using",
+    "verify",
+    "want",
+    "work",
+    "write",
+}
+
+
+def derive_workflow_preconditions(workflow: list[str], goals: list[str]) -> list[str]:
+    """Derive relevance tokens from the task goals a workflow was observed in.
+
+    A learned procedure should be disclosed when a later request is about the
+    same subject, not only when it repeats a capability name such as ``mock``.
+    The preconditions are content words common to every observed goal, with
+    generic task verbs/stopwords and the workflow's own capability/operation
+    tokens removed. They are intentionally conservative: when no common
+    subject word exists the caller falls back to the old capability token.
+
+    This is lexical relevance, not understanding. Paraphrases that share no
+    word with the observed goals will not match.
+    """
+    tool_tokens: set[str] = set()
+    for step in workflow:
+        tool_tokens.update(
+            part
+            for part in re.split(r"[^a-z0-9]+", str(step).lower())
+            if len(part) >= 3
+        )
+    excluded = STOPWORDS | GENERIC_GOAL_TOKENS | tool_tokens
+    goal_sets: list[set[str]] = []
+    for goal in goals:
+        tokens = {
+            token
+            for token in word_tokens(goal)
+            if len(token) >= 3 and token not in excluded
+        }
+        if tokens:
+            goal_sets.append(tokens)
+    if not goal_sets:
+        return []
+    common = set.intersection(*goal_sets)
+    return sorted(common)[:3]
 
 
 class EvidenceLearningPipeline:
@@ -305,10 +388,16 @@ class EvidenceLearningPipeline:
     def _learn_procedure(self, signal: LearningSignal, kind: str) -> LearningOutcome:
         workflow = [str(item) for item in (signal.evidence.get("workflow") or []) if str(item)]
         tasks = [str(item) for item in (signal.evidence.get("task_ids") or []) if str(item)]
+        goals = [str(item) for item in (signal.evidence.get("goals") or []) if str(item)]
         name = str(signal.evidence.get("name") or workflow_slug(workflow))
-        preconditions = [
-            str(item) for item in (signal.evidence.get("preconditions") or [workflow[0].split(".")[0]]) if str(item)
+        explicit_preconditions = [
+            str(item) for item in (signal.evidence.get("preconditions") or []) if str(item)
         ]
+        preconditions = explicit_preconditions or derive_workflow_preconditions(workflow, goals)
+        if not preconditions and workflow:
+            # No goal evidence to learn relevance from (for example a direct
+            # pipeline call): keep the old, conservative capability token.
+            preconditions = [workflow[0].split(".")[0]]
         existing = self._skills.get_by_name(name)
         if existing is not None and existing.status in {"candidate", "approved"}:
             return self._finish(
@@ -332,6 +421,7 @@ class EvidenceLearningPipeline:
                 "source_refs": [str(item) for item in signal.source_refs][:40],
                 "workflow": workflow,
                 "task_ids": tasks,
+                "task_goals": goals,
                 "observed_at": signal.observed_at or now_ts(),
             },
         )

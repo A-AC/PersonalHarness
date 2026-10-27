@@ -709,14 +709,22 @@ traces. No model judges another model.
 ## Tests
 
 ```bash
-python -m pytest tests -q
+python -m pytest tests -o addopts="" -q
 ```
 
-The suite has two tiers:
+`pyproject.toml` sets `addopts = "-q"`, so `-o addopts=""` keeps the final
+pass-count line visible. The suite has two tiers:
 
 - deterministic behavior tests using `ScriptedAdapter`
 - contract tests for manager protocols, memory implementation parity, component
   import boundaries, settings, and storage
+
+Focused audit suites added in Phase 5:
+
+```bash
+python -m pytest tests/test_end_to_end.py -o addopts="" -q
+python -m pytest tests/test_evaluation_audit.py -o addopts="" -q
+```
 
 `tests/test_eval.py` exercises the eval runner with a scripted adapter; it does
 not replace a live run. `pytest -m live` is reserved for live tests and is not
@@ -727,6 +735,101 @@ Container checks are separate from the pytest suite:
 ```bash
 python scripts/container_check.py
 ```
+
+### Phase 5 audit: measured results
+
+The baseline before this audit was **366 passed**. The current deterministic
+suite is **401 passed, 74 warnings in about 29 seconds** (Python 3.14): the
+baseline plus 35 new tests (18 end-to-end, 15 known-answer audit, and 2
+regression tests for the defects below). Warnings are dependency/configuration
+warnings, not failures.
+
+Every number below comes from a small labeled fixture set. These are
+reproducible correctness checks, not a claim of general intelligence or a
+live-model benchmark.
+
+| Metric | Labeled set | Method | Result |
+| --- | --- | --- | --- |
+| Decision-resolution accuracy | 12 replies over 2 open proposals | `DefaultDecisionResolver.interpret`; compare intent and selected decision with the expected pair | **12/12** (100%) |
+| Memory retrieval success | 8 memories, 8 queries, global plus 3 project scopes | `MemoryCore.retrieve`; expected answer token in rank 1 and rank 3 | **Top-1 8/8, Top-3 8/8** |
+| Project association | 4 clear requests plus 1 deliberately tied request | `DefaultDomainInference.infer`; correct project and `confident=True` for clear cases | **4/4 clear**; tied case `confident=False`, `ambiguous=True`, candidates `{garden, homelab}` |
+| Task recovery and state correctness | 6 labeled transitions | restart of a running task, dependency release, retryable requeue, non-retryable failure, bounded-retry announcement, pending approval across restart | **6/6** |
+| Regression pass rate | 401 tests | full pytest suite | **401/401 passed**; baseline 366/366 |
+| Permission/authorization violations detected | 6 dangerous requests plus 1 permitted control | executor policy, approval bypass, approval replay, unsafe skill text | **6/6 blocked**; permitted read **1/1 succeeded** |
+| Learning improvement | 4 disclosure outcomes plus 2 negative cases | same workflow twice → deterministic review → approve → retire; failed workflow; rollback | disclosure **0 → 1** relevant, **0** unrelated, **0** after retirement; **0** candidates for failed work; rollback restores the previous approved skill |
+
+The 18 end-to-end scenarios cover all requested user situations:
+
+| User situation | Scenario(s) |
+| --- | --- |
+| Starts a new project | explicit structure command creates one project and leaves unrelated projects untouched |
+| Mentions an existing project without selecting it | inference associates the new task without changing the session selection |
+| Discusses two projects in one session | memories and tasks stay scoped to their own project and context |
+| Refers to prior-session information | knowledge is recalled after a restart from persisted memory |
+| Corrects a remembered preference | the correction supersedes the old fact and later retrieval uses the new one |
+| Gives a short approval or refusal | "yes" dispatches once; "no" leaves the task unexecuted |
+| Modifies a proposed action | an approved subset runs; an invalid modification runs nothing |
+| Interrupts or cancels ongoing work | cancellation terminates the task without dispatch |
+| Starts a multi-turn task | the question blocks the task and the answer resumes it with a constraint |
+| Restarts the application during work | the interrupted task recovers as `blocked: interrupted`, never silently re-runs |
+| Asks for a status update | `status` reports pending, blocked, and failed work honestly |
+| Triggers a scheduled review or due task | a due task is surfaced once without model polling |
+| Repeats a workflow | a repeated verified workflow becomes a staged skill and is disclosed only for matching work |
+
+Additional end-to-end cases cover ambiguous replies, unrelated requests while a
+decision is pending, approval not bypassing permissions, unsafe/failed
+learning, and a task that must not be learned as a successful procedure.
+
+Caveats: these scenarios use scripted model output wherever a model call would
+otherwise be required; the persisted managers, permissions, decision log,
+retrieval, scheduler, and skill disclosure are the real implementations. No
+live-model eval was run in this phase, because no model endpoint or credentials
+were available. The resolver, project inference, retrieval, and learned-skill
+relevance are deterministic lexical/rule systems, so fixture accuracy does not
+establish paraphrase, cross-language, or open-world accuracy. See
+[Known limitations](#known-limitations).
+
+### Implemented vs planned
+
+Implemented and exercised by the suite:
+
+- durable tasks, decisions, execution attempts, restart recovery, and bounded
+  retries;
+- the deterministic scheduler heartbeat, due reminders, deferred windows, and
+  scheduled consolidation/learning review;
+- cross-project memory retrieval with provenance, supersession, correction, and
+  budget trimming;
+- explicit domain creation, project inference, and ambiguity reporting;
+- one-time approvals, modification, rejection, cancellation, deferral, and
+  reconciliation decisions;
+- the capability validation/permission path, honesty guard, and
+  internal-schema guard;
+- staged skill learning from repeated successful workflows, with approval,
+  retirement, rollback, and safety scanning.
+
+Implemented but heuristic or partial:
+
+- project inference is additive lexical/evidence scoring, not semantic
+  understanding;
+- decision interpretation is deterministic pattern matching, not a language
+  model;
+- default retrieval is lexical-semantic (concepts, stemming, n-grams), not an
+  embedding model;
+- learned-skill relevance is derived from shared goal tokens, so a paraphrase
+  with no shared word will not disclose the skill;
+- learning recognises repeated successful workflows and failure clusters; it
+  does not infer arbitrary new procedures or generalise beyond its evidence.
+
+Planned, not implemented:
+
+- an embedding-backed `SemanticScorer` is a supported injection point, but no
+  embedding backend is bundled;
+- live-model evaluation is opt-in and is not part of the default suite;
+- no multi-user accounts, built-in TLS, or API-key handling;
+- no autonomous domain creation, standing permissions from an approval, or
+  self-modifying settings/code;
+- no external scheduler integration: background work needs the process (or a
+  CLI `tick`) to run.
 
 ## Configuration
 
@@ -889,15 +992,20 @@ over persisted tasks, decisions, and attempt evidence. On startup
 6. runs scheduled consolidation when `consolidation.schedule_enabled` and the
    interval has elapsed (the web app's old private loop is gone; the
    heartbeat owns it now);
-7. optionally runs up to `scheduler.max_tasks_per_tick` ready tasks through
+7. runs the deterministic learning review when
+   `learning.review_schedule_enabled` and its interval have elapsed — it reads
+   persisted evidence only and can stage skill candidates, never approve them;
+8. optionally runs up to `scheduler.max_tasks_per_tick` ready tasks through
    `TurnService.run_ready` — the same serialized, gated turn path as a user
    message.
 
 The scan never calls the model. The model is invoked only when real work runs
-(step 7) or consolidation extraction is enabled, so a quiet heartbeat costs
+(step 8) or consolidation extraction is enabled, so a quiet heartbeat costs
 file reads, not tokens. While `serve` is running, a daemon thread ticks
 every `scheduler.interval_s`; on the CLI, `harness tick` runs one heartbeat
-and `harness status` prints the report.
+and `harness status` prints the report. A tick that changes nothing emits no
+`scheduler.tick` event; when it does change something, reconcile, requeue,
+reminder, and maintenance findings are folded into one event for that pass.
 
 ### Autonomy boundaries
 
@@ -938,7 +1046,9 @@ deterministic resolver what the latest message means for the open decisions. A
 reply can approve, reject, modify, defer, cancel, or ask a clarifying question,
 or it can be an unrelated request that leaves the decisions untouched. When the
 choice is genuinely ambiguous it asks; it never treats a keyword or an
-unrelated question as authorization.
+unrelated question as authorization. Questions that refer to the open
+proposals themselves — "which one?", "which proposal?", "what are my
+options?" — are clarifications, not new work, and create no task.
 
 An approved action is returned to the existing interaction loop as an
 `ApprovedAction` and dispatched through the ordinary capability executor. The
@@ -986,9 +1096,10 @@ recent conversation; a confident match associates the *new* task with that
 project without switching the session. Inference never creates a domain,
 renames one, or moves an existing task or memory, and every routing decision
 is logged as a `plan.domain_inference` event with its evidence. When no signal
-is confident the task simply keeps the active domain, and an ambiguous match
-is reported with its candidates instead of guessed. The structure directory in
-the prompt lists the active domain, non-archived domains,
+is confident the task simply keeps the active domain; a plausible but
+sub-threshold match is logged as `uncertain`, and a tied match is logged as
+`ambiguous` with its candidates instead of being guessed. The structure
+directory in the prompt lists the active domain, non-archived domains,
 and pending suggestions; the planner receives the same directory. The section
 has its own `context.budgets.structure` budget and drops whole entries rather
 than cutting a line, and the total-budget drop order is history, structure,
@@ -1117,7 +1228,11 @@ from `capabilities.skills_dir`; learned skills are managed under
 `active/` for approved text, which is also the default discovery directory).
 A skill may declare `preconditions` (required tokens); the context builder
 discloses a skill only when the task goal matches them, and records the
-omission as an exclusion with the reason.
+omission as an exclusion with the reason. For a learned workflow, those tokens
+are derived from content words shared by the goals it was observed in
+(stopwords, generic task verbs, and capability/operation names excluded), so a
+skill is not disclosed merely because a later task happens to use the same
+tool. This is lexical relevance; a paraphrase with no shared word will miss.
 
 ## Capabilities
 
@@ -1211,4 +1326,18 @@ See [CODEMAP.md](CODEMAP.md) for module responsibilities and the data-flow map.
 - The UI is intentionally server-rendered and small; it is not a public
   multi-user service.
 - The live eval needs a live model and network access to that endpoint. It is
-  not part of the default test suite.
+  not part of the default test suite. Phase 5 measured only the deterministic
+  scripted suite; no live-model accuracy claim is made.
+- Decision interpretation is conservative pattern matching. A bare selection
+  such as "the first one" identifies the target but still asks for an explicit
+  approval; "no, the first one" is likewise clarified rather than treated as
+  authorization. This is deliberate, but it costs a turn.
+- Learned-skill relevance uses shared content words from the goals where the
+  workflow was observed. A later request that shares no word with that
+  evidence will not disclose the skill, and removing too many common words can
+  make a skill narrower than a human would expect.
+- The audit datasets are fixture-scale (8-12 cases per metric). They detect
+  regressions and false authorization, not broad language understanding.
+- Scheduling is process-bound: there is no OS-level timer or external job
+  runner, so a due task or consolidation pass is noticed only on the next tick
+  while the process (or a CLI invocation) is running.

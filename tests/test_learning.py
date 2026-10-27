@@ -8,6 +8,7 @@ from harness.contracts.learning import LearningSignal, SkillDraft
 from harness.contracts.memory import MemoryCandidate
 from harness.contracts.profile import PersonaDraft
 from harness.contracts.tasks import TaskSpec
+from harness.learning.pipeline import derive_workflow_preconditions
 from harness.learning.skills import SkillValidationError
 
 
@@ -343,6 +344,29 @@ def test_single_workflow_occurrence_is_insufficient(make_harness) -> None:
     assert not any(item.kind == "workflow" for item in report.items)
 
 
+def test_workflow_preconditions_use_shared_goal_subject_not_capability() -> None:
+    # Generic verbs, stopwords, and the workflow's own tool/operation tokens do
+    # not gate relevance: the subject ("nas", "backup") does.
+    assert derive_workflow_preconditions(
+        ["mock.status", "mock.echo"],
+        ["Check the nas with mock.", "Check the nas again with mock."],
+    ) == ["nas"]
+    # A workflow observed under unrelated goals has no common subject, so the
+    # caller falls back to the capability token instead of over-claiming.
+    assert derive_workflow_preconditions(
+        ["mock.status", "mock.echo"],
+        ["Check the nas with mock.", "Update the printers with mock."],
+    ) == []
+    # Limited to three tokens and sorted for deterministic provenance.
+    assert derive_workflow_preconditions(
+        ["mock.status"],
+        ["Check alpha beta gamma delta", "Check alpha beta gamma delta again"],
+    ) == ["alpha", "beta", "delta"]
+    # No goal evidence at all means no relevance claim.
+    assert derive_workflow_preconditions(["mock.status"], []) == []
+
+
+
 # ------------------------------------------------ 5. controlled skill activation
 def test_untested_candidate_cannot_replace_a_trusted_skill(make_harness) -> None:
     h = make_harness([])
@@ -468,12 +492,18 @@ def test_approved_skill_is_disclosed_only_when_preconditions_match(make_harness)
     run_workflow_twice(h)
     h.learning_review.review(trigger="test")
     record = h.skill_library.list(status="candidate")[0]
-    assert record.preconditions == ["mock"]
+    # Relevance is learned from the shared subject of the observed goals
+    # ("nas"), not from the capability name every task happens to use.
+    assert record.preconditions == ["nas"]
+    assert record.provenance["task_goals"] and {
+        goal.lower().rstrip(".")
+        for goal in record.provenance["task_goals"]
+    } == {"check the nas with mock", "check the nas with mock again"}
     h.skill_library.approve(record.id, actor="user")
 
     manifest = h.capabilities.get("workflow-status-echo")
     assert manifest.skill_body is not None
-    assert manifest.preconditions == ["mock"]
+    assert manifest.preconditions == ["nas"]
 
     match = h.tasks.create(TaskSpec(goal="check the nas using the mock capability"))
     matched = h.context.build(match, h.sessions.current())

@@ -156,6 +156,23 @@ def test_question_is_not_approval(make_harness) -> None:
     assert h.capabilities.last_attempts(task.id) == []
 
 
+def test_which_one_asks_for_clarification_instead_of_planning(make_harness) -> None:
+    h = make_harness([])
+    task = h.tasks.create(TaskSpec(goal="two proposals"))
+    first = h.control.propose_action(task.id, "mock", "echo", {"text": "one"})
+    second = h.control.propose_action(task.id, "mock", "status", {"target": "two"})
+
+    result = h.loop.handle_turn("which one?")
+
+    # Asking which proposal is meant must not create new work or consume either
+    # decision; the control plane re-states the open choices.
+    assert "more than one pending decision" in result.messages[0].lower()
+    assert h.decisions.get(first.id).status == DecisionStatus.PENDING
+    assert h.decisions.get(second.id).status == DecisionStatus.PENDING
+    assert h.capabilities.last_attempts(task.id) == []
+    assert [item.goal for item in h.tasks.list()] == ["two proposals"]
+
+
 def test_defer_then_yes_approves_the_same_decision(make_harness) -> None:
     h = make_harness([])
     task = h.tasks.create(TaskSpec(goal="defer proposal"))

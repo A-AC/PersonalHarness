@@ -26,6 +26,19 @@ composition/edge layer.
 | `scripts/experiments.py` | Writes each experiment config, runs the fixed eval set, saves and tabulates results |
 | `scripts/cold_start_probe.py` | Idle/warm/concurrent llama-server latency probe with model-status and router hints |
 
+## Test suites
+
+| Path | Responsibility |
+| --- | --- |
+| `tests/conftest.py` | `make_harness`, scripted `plan`/`act`/`ask`/`respond` builders, settings writer, and the shared baseline fixture |
+| `tests/test_end_to_end.py` | 18 integrated scenarios from user input through planning, execution, persistence, restart, and recovery; uses scripted model output only where a real model call is required |
+| `tests/test_evaluation_audit.py` | 15 known-answer measurements for decision resolution, memory retrieval, project association, task recovery/state, permission enforcement, and learning/rollback |
+
+The Phase 5 measured results, fixture sizes, and caveats are in
+[README.md](README.md#phase-5-audit-measured-results). The audit tests assert
+small labeled datasets; they are regression evidence, not a general
+intelligence benchmark.
+
 ## Contracts
 
 `harness/contracts/` contains dataclasses, protocols, and shared error types.
@@ -70,7 +83,7 @@ It has no concrete imports.
 | `harness/domains/inference.py` | Read-only project inference: additive name/memory/task/history evidence plus a small active-domain bonus, confidence threshold and ambiguity margin, short project summaries; never creates, moves, or renames anything |
 | `harness/tasks/manager.py` | Task files, valid transitions (including `deferred` and reason-only blocked changes), dependency release, priority-aware sequencing, checkpoints (bounded), deferral windows, counted resumes, running-task domain reassignment; legacy rows with removed structure keys load by filtering to current fields |
 | `harness/control/decisions.py` | File-backed decision log (`decisions/dec_*.json`), open/terminal queries, task/suggestion lookup, suggestion mirroring |
-| `harness/control/resolver.py` | Deterministic reading of a reply in decision context: explicit/contextual selection, ambiguity, approval/rejection/modification/defer/cancel, question vs unrelated request |
+| `harness/control/resolver.py` | Deterministic reading of a reply in decision context: explicit/contextual selection, ambiguity, approval/rejection/modification/defer/cancel, and question vs unrelated request. Questions that refer to the decision set itself ("which one?", "what are my options?") are clarifications, never new planner work. |
 | `harness/control/plane.py` | Turn coordination: structure commands, decision resolutions (including reconciliation decisions for interrupted/unknown-outcome attempts), plan/approved-action directives, confirmation gating, task deferral on a deferred decision, execution recording, task cancellation |
 | `harness/profile/provider.py` | Persona versions and proposed edits, with an injectable approve-time safety guard |
 | `harness/history/store.py` | One atomic JSON file per stored history segment/summary |
@@ -82,7 +95,7 @@ It has no concrete imports.
 | `harness/memory/file_manager.py` | File-backed memory records and usage JSONL; legacy rows without `kind` derive it on load |
 | `harness/memory/inmemory.py` | Non-persistent parity implementation for swaps/tests, including legacy kind derivation |
 | `harness/memory/tokens.py` | Token/overlap aliases for retrieval |
-| `harness/context/builder.py` | Query-driven budgeted context: cross-project memory retrieval with priority scopes (self stays on demand), per-item memory trimming that drops whole blocks, project summary and stats, pending decisions for the task or its project protected from trimming, bounded active-domain directory that drops whole entries, persona-trim fallback when the total budget cannot fit the safety instructions, prompt variant, local current-time block, age markers, memory tags with kind/lifecycle, bounded history, capability disclosure with enum values/defaults, precondition-gated skill disclosure (a skill whose required tokens are absent from the task goal is excluded with a recorded reason), and inclusion/exclusion/budget stats |
+| `harness/context/builder.py` | Query-driven budgeted context: cross-project memory retrieval with priority scopes (self stays on demand), per-item memory trimming that drops whole blocks, project summary and stats, pending decisions for the task or its project protected from trimming, bounded active-domain directory that drops whole entries, persona-trim fallback when the total budget cannot fit the safety instructions, prompt variant, local current-time block, age markers, memory tags with kind/lifecycle, bounded history, capability disclosure with enum values/defaults, precondition-gated skill disclosure (a skill whose required tokens are absent from the task goal is excluded with a recorded reason), and inclusion/exclusion/budget stats. Skill blocks are emitted before ordinary capability blocks so end-of-section clipping cannot silently drop a disclosed learned procedure; the skill's operations still pass the normal permission and confirmation checks. |
 | `harness/capabilities/mock.py` | Pure-Python mock operations |
 | `harness/capabilities/harness_ops.py` | Memory and structure manifests (`enter_domain`, `leave_domain`, `suggest_domain`); memory enums/defaults generated from `constants` |
 | `harness/capabilities/executor.py` | All-field validation, hint coercion/pass-through, placeholder rejection, task-derived memory scope, enablement, permissions, dispatch, attempt records, one-scan attempts-by-task index, skill discovery from the configured or default active-skills dir with a `reload_skills` refresh, and a best-effort explicit-write observer hook for learning journaling |
@@ -90,16 +103,16 @@ It has no concrete imports.
 | `harness/capabilities/mcp.py` | Optional stdio MCP discovery/call via the official SDK |
 | `harness/orchestrator/parse.py` | Pydantic parsing, loose/strict proposal JSON schemas, actionable parse errors |
 | `harness/orchestrator/machine.py` | Allowed-state and action-transition rules |
-| `harness/orchestrator/loop.py` | Turn handling through the control plane, approved-action dispatch, heuristic/LLM planning with the domain directory, active-domain hint plus project inference for tasks with no planner domain (logged as `plan.domain_inference`, session selection preserved), multi-word suggestion gate, task loop, retry cap, confirmation gate, honesty/internal-schema guards, `run_ready` background execution path (same per-task loop, checkpoint per run, turn trace), turn timeline and metrics |
+| `harness/orchestrator/loop.py` | Turn handling through the control plane, approved-action dispatch, heuristic/LLM planning with the domain directory, active-domain hint plus project inference for tasks with no planner domain, multi-word suggestion gate, task loop, retry cap, confirmation gate, honesty/internal-schema guards, `run_ready` background execution path (same per-task loop, checkpoint per run, turn trace), turn timeline and metrics. Project inference is logged as `plan.domain_inference` with `resolved: true` for a confident match and `resolved: false` plus `status: ambiguous`/`uncertain` and candidates when it refuses to route; the session selection is never changed. |
 | `harness/orchestrator/timeline.py` | Per-turn stage recorder (start offset, duration, detail) serialized into traces |
 | `harness/consolidation/service.py` | Evidence snapshot, optional model extraction (persona/strategy edits pass an injectable safety guard before staging), deterministic retype/merge/supersede pass, run report, rollback (run listing excludes `.input.json` snapshots) |
 | `harness/learning/journal.py` | File-backed learning journal: one JSON entry per learning decision (signal kind, category, decision, rationale, source evidence refs, created-artifact refs) with an event mirror |
 | `harness/learning/strategy.py` | Deterministic safety invariants for learned strategy/skill text (honesty, permissions, confirmation gates, no settings/code self-modification, no auto-execution of unverified code, memory/tool text is data); validators for persona drafts and skill text |
 | `harness/learning/skills.py` | `FileSkillLibrary`: staged skill lifecycle (propose/record_test/approve/reject/retire/rollback) with safety-scanned text, slug names, overlap guards against trivial variations, provenance and version history, candidate text kept out of the executor's discovery dir, an untested candidate can never replace an approved skill, and an on-change disclosure refresh callback |
-| `harness/learning/pipeline.py` | `EvidenceLearningPipeline`: one deterministic entry point that classifies a signal into memory/procedure/strategy learning, gates on evidence strength (thresholds from settings; model explanations are never accepted as verified root causes), creates the candidate through the owning store, applies it at the right authorization level (memory can apply, procedures and strategy only stage), journals every decision with its source refs, and journals explicit corrections through the executor observer hook |
-| `harness/learning/review.py` | Deterministic, no-model learning review over persisted evidence: succeeded workflows repeated across enough distinct tasks become staged skill candidates (a failed step disqualifies the sequence), repeated failure fingerprints, pending candidates, and expired knowledge surface as findings; with no meaningful evidence it creates nothing |
+| `harness/learning/pipeline.py` | `EvidenceLearningPipeline`: one deterministic entry point that classifies a signal into memory/procedure/strategy learning, gates on evidence strength (thresholds from settings; model explanations are never accepted as verified root causes), creates the candidate through the owning store, applies it at the right authorization level (memory can apply, procedures and strategy only stage), journals every decision with its source refs, and journals explicit corrections through the executor observer hook. Learned procedure preconditions are derived from content words shared by the observed task goals, excluding stopwords, generic task verbs, and capability/operation names, with the old capability token only as a fallback when no goal evidence exists. |
+| `harness/learning/review.py` | Deterministic, no-model learning review over persisted evidence: succeeded workflows repeated across enough distinct tasks become staged skill candidates (a failed step disqualifies the sequence), carrying the observed task goals as provenance so relevance tokens can be derived; repeated failure fingerprints, pending candidates, and expired knowledge surface as findings; with no meaningful evidence it creates nothing |
 | `harness/maintenance/reset.py` | Full/selective state wipe (learning journal cleared on all scopes; the skills tree only on full), timestamped backup archive, seed re-application, stale-reference scrub, reset audit event, and an injectable post-reset hook that refreshes executor skill disclosure and drops conversation-wiped skill candidates |
-| `harness/scheduler/service.py` | `WorkScheduler`: deterministic heartbeat (startup reconcile + ticks) over persisted tasks/decisions/attempts — unknown-outcome reconciliation decisions, dependency re-checks, deferred-window release, bounded/cooled requeues, one-time due reminders, scheduled consolidation, the optional scheduled learning review (deterministic, never model-backed), and bounded autonomous execution through the turn service; honest-status read model (`report()`), daemon-thread start/stop, and an `exclusive` reset gate |
+| `harness/scheduler/service.py` | `WorkScheduler`: deterministic heartbeat (startup reconcile + ticks) over persisted tasks/decisions/attempts — unknown-outcome reconciliation decisions, dependency re-checks, deferred-window release, bounded/cooled requeues, one-time due reminders, scheduled consolidation, the optional scheduled learning review (deterministic, never model-backed), and bounded autonomous execution through the turn service; honest-status read model (`report()`), daemon-thread start/stop, and an `exclusive` reset gate. A tick folds reconcile/requeue/reminder/maintenance findings into one `scheduler.tick` event, and a retry-limit exhaustion is reported and checkpointed only once rather than on every scan. |
 | `harness/model/scripted.py` | Deterministic test adapter |
 | `harness/model/openai_http.py` | OpenAI-compatible HTTP adapter and health probe |
 | `harness/measure.py` | Learning report from stored events/tasks/memories/usage plus learning-journal and skill-library counters |
@@ -294,6 +307,13 @@ their task: nothing waiting on the user, an approval, or a reconciliation
 answer is auto-requeued or auto-run, and a deferred decision (not the clock)
 resumes deferred work.
 
+A tick applies reconcile, requeue, reminder, and maintenance steps to one
+report and emits one `scheduler.tick` event for that pass; a quiet tick emits
+none. `reconcile()` called on its own still emits its own event, because it is
+a standalone public operation. Retry-budget exhaustion is checkpointed,
+announced, and reported once; later ticks leave the failed task and its event
+log unchanged.
+
 ```text
 startup / scheduler.interval_s (serve thread) / harness tick (CLI)
   -> reconcile: unknown-outcome attempts -> reconciliation decision
@@ -473,9 +493,15 @@ rolled back.
 `preconditions` (required tokens). The context builder discloses a skill only
 when the task goal contains them and records the omission as an exclusion
 with the reason — a learned procedure is never reused for a task it does not
-apply to. Skills are instruction text with no operations, so they are
-disclosed without capability enablement; every operation a skill names still
-goes through the normal permission checks.
+apply to. When the review learns a workflow, it derives those tokens from
+content words shared by the observed task goals, excluding stopwords, generic
+task verbs, and the workflow's own capability/operation names; the old
+capability-name fallback is used only when no goal evidence exists. Skills are
+instruction text with no operations, so they are disclosed without capability
+enablement; every operation a skill names still goes through the normal
+permission checks. Skill blocks are rendered before ordinary capability blocks
+so the section's end-clipping cannot silently remove an already-disclosed
+skill.
 
 **Strategy safety.** `harness/learning/strategy.py` holds deterministic
 invariant patterns (honesty/success claims, permission and confirmation
@@ -491,7 +517,9 @@ model-free. It scans attempts by task: a fully succeeded sequence in
 completed tasks, repeated across `learning.min_workflow_repeats` distinct
 tasks, becomes a skill candidate through the pipeline (bounded by
 `learning.max_review_candidates`; a failed step disqualifies the sequence so
-a failed procedure is never learned as a successful one). Repeated failure
+a failed procedure is never learned as a successful one). The candidate keeps
+the observed task goals as provenance alongside the task/operation references.
+Repeated failure
 fingerprints, pending candidates, and expired knowledge are findings for the
 user. A review with no meaningful evidence creates no candidates, writes no
 journal entries, and emits no events. The scheduler runs it from the

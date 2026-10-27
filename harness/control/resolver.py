@@ -96,6 +96,16 @@ _NEW_REQUEST_START = re.compile(
     r"turn|book|order|search|look|read|write|call|play|summarize|help)\b",
     re.IGNORECASE,
 )
+# Questions that refer to the open decision set itself ("which one?", "which
+# proposal?", "what are my options?") are requests for clarification. They are
+# not new requests and must not be routed to the planner.
+_DECISION_REFERENCE = re.compile(
+    r"\b(?:which\s+(?:one|ones|option|options|decision|decisions|proposal|proposals|"
+    r"action|actions)|which\s+of\s+(?:these|those|them)|"
+    r"what\s+are\s+(?:my|the)\s+(?:options|choices|pending\s+(?:decisions|proposals))|"
+    r"what(?:'s|\s+is)\s+pending)\b",
+    re.IGNORECASE,
+)
 _STOPWORDS = {
     "the", "a", "an", "that", "this", "it", "to", "of", "for", "on", "in", "and",
     "or", "is", "are", "be", "please", "now", "then", "just", "really", "very",
@@ -324,6 +334,8 @@ class DefaultDecisionResolver:
             return True
         if not _QUESTION_START.search(normalized):
             return False
+        if _DECISION_REFERENCE.search(normalized):
+            return True
         if normalized in {"what", "why", "how", "which", "really", "huh"}:
             return True
         if self._select_explicit(stripped, decisions) is not None:

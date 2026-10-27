@@ -130,8 +130,9 @@ class LearningReview:
             if broken or len(steps) < min_steps:
                 continue
             signature = tuple(steps)
-            entry = signatures.setdefault(signature, {"tasks": [], "op_refs": []})
+            entry = signatures.setdefault(signature, {"tasks": [], "goals": [], "op_refs": []})
             entry["tasks"].append(task_id)
+            entry["goals"].append(task.goal)
             entry["op_refs"].extend(op_refs)
         proposed = 0
         for signature, entry in sorted(signatures.items()):
@@ -152,6 +153,7 @@ class LearningReview:
                     evidence={
                         "workflow": list(signature),
                         "task_ids": list(entry["tasks"]),
+                        "goals": list(entry["goals"]),
                     },
                 )
             )

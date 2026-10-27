@@ -581,6 +581,7 @@ class DefaultContextBuilder:
             raw = str(self._settings.get("capabilities.default_enabled") or "")
             enabled = {item.strip() for item in raw.split(",") if item.strip()}
         lines = []
+        skill_lines: list[str] = []
         excluded: list[InclusionRecord] = []
         for manifest in self._capabilities.list_manifests():
             is_skill = not manifest.operations and manifest.skill_body is not None
@@ -602,19 +603,24 @@ class DefaultContextBuilder:
             else:
                 if manifest.name not in enabled:
                     continue
-            lines.append(f"- {manifest.name}: {manifest.purpose}")
+            target = skill_lines if is_skill else lines
+            target.append(f"- {manifest.name}: {manifest.purpose}")
             if not manifest.operations:
-                lines.append("  operations: instructions only")
+                target.append("  operations: instructions only")
             for op in manifest.operations:
                 args = ", ".join(self._argument_text(op, key, kind) for key, kind in op.inputs.items()) or "none"
                 required = ", ".join(op.required) or "none"
-                lines.append(
+                target.append(
                     f"  - {op.name} ({op.permission}): {op.description} "
                     f"args: {args}; required: {required}"
                 )
             if manifest.skill_body:
-                lines.append(manifest.skill_body)
-        return "\n".join(lines), excluded
+                target.append(manifest.skill_body)
+        # Skills come first: the capabilities section is clipped from the end
+        # when it overflows, and a disclosed learned procedure must not be the
+        # part silently dropped. The skill's named operations still go through
+        # the normal permission and confirmation checks.
+        return "\n".join(skill_lines + lines), excluded
 
     @staticmethod
     def _missing_preconditions(manifest, goal: str) -> list[str]:
