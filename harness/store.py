@@ -204,9 +204,10 @@ class Domains:
     one. Routing never creates domains; unmatched input goes to ``general``.
     """
 
-    def __init__(self, db: Database, events: Events):
+    def __init__(self, db: Database, events: Events, config=None):
         self.db = db
         self.events = events
+        self.config = config
 
     def ensure_defaults(self) -> None:
         if not self.get(GENERAL_DOMAIN):
@@ -345,10 +346,50 @@ class Domains:
         }
 
     def _threshold(self) -> float:
-        return 1.5  # fixed evidence threshold; kept simple and testable
+        if self.config is None:
+            return 2.0
+        return float(self.config.get("domains.routing_threshold", 2.0))
 
     def _margin(self) -> float:
-        return 0.75
+        if self.config is None:
+            return 0.75
+        return float(self.config.get("domains.ambiguity_margin", 0.75))
+
+    def update(
+        self,
+        domain_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit domain metadata. Never changes the id or routing rules."""
+        current = self.get(domain_id)
+        if current is None:
+            raise KeyError(f"no such domain: {domain_id}")
+        fields: dict[str, Any] = {}
+        if name is not None and name.strip() and name.strip() != current["name"]:
+            fields["name"] = name.strip()
+        if description is not None and description != current["description"]:
+            fields["description"] = description
+        if status is not None:
+            if status not in ("active", "archived"):
+                raise ValueError("domain status must be active or archived")
+            if status != current["status"]:
+                fields["status"] = status
+        if not fields:
+            return current
+        fields["updated_at"] = util.iso()
+        sets = ", ".join(f"{key}=?" for key in fields)
+        self.db.execute(
+            f"UPDATE domains SET {sets} WHERE id=?",
+            (*fields.values(), domain_id),
+        )
+        self.events.record(
+            "domain.updated", domain_id=domain_id,
+            data={"fields": sorted(k for k in fields if k != "updated_at")},
+        )
+        return self.get(domain_id)  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +501,55 @@ class Tasks:
         )
         return int(row["retry_count"]) if row else 0
 
+    def set_retry(
+        self, task_id: str, next_retry_at: str | None, *, reset: bool = False
+    ) -> None:
+        """Schedule (or clear) the next automatic retry for a task."""
+        if reset:
+            self.db.execute(
+                "UPDATE tasks SET retry_count=0, next_retry_at=?, updated_at=?"
+                " WHERE id=?",
+                (next_retry_at, util.iso(), task_id),
+            )
+        else:
+            self.db.execute(
+                "UPDATE tasks SET next_retry_at=?, updated_at=? WHERE id=?",
+                (next_retry_at, util.iso(), task_id),
+            )
+
+    def clear_retry(self, task_id: str, *, reset_count: bool = True) -> None:
+        if reset_count:
+            self.db.execute(
+                "UPDATE tasks SET retry_count=0, next_retry_at=NULL,"
+                " updated_at=? WHERE id=?",
+                (util.iso(), task_id),
+            )
+        else:
+            self.db.execute(
+                "UPDATE tasks SET next_retry_at=NULL, updated_at=? WHERE id=?",
+                (util.iso(), task_id),
+            )
+
+    def due_for_retry(self, now: str | None = None) -> list[dict[str, Any]]:
+        """Paused tasks whose retry time has arrived, oldest due first."""
+        now = now or util.iso()
+        return rows_to_dicts(self.db.query(
+            "SELECT * FROM tasks WHERE status='paused' AND next_retry_at"
+            " IS NOT NULL AND next_retry_at<=? ORDER BY next_retry_at",
+            (now,),
+        ))
+
+    def set_domain(self, task_id: str, domain_id: str) -> dict[str, Any]:
+        self.db.execute(
+            "UPDATE tasks SET domain_id=?, updated_at=? WHERE id=?",
+            (domain_id, util.iso(), task_id),
+        )
+        self.events.record(
+            "task.domain", task_id=task_id, domain_id=domain_id,
+            data={"reason": "domain changed by user"},
+        )
+        return self.get(task_id)  # type: ignore[return-value]
+
     def list_by_status(self, statuses: tuple[str, ...]) -> list[dict[str, Any]]:
         marks = ",".join("?" for _ in statuses)
         return rows_to_dicts(
@@ -507,7 +597,10 @@ class Tasks:
         words = set(util.keywords(text))
         if not words:
             return {"task": None}
-        open_tasks = self.list_open(domain_id)
+        # Consider every open task, but prefer the routed domain: a follow-up
+        # that lands in ``general`` should still be able to resume work that
+        # lives in a specific domain when the wording matches.
+        open_tasks = self.list_open()
         waiting = [t for t in open_tasks if t["status"] == "waiting_user"]
         pool = waiting + [t for t in open_tasks if t["status"] != "waiting_user"]
         now = util.now_utc()
@@ -515,7 +608,11 @@ class Tasks:
         for task in pool[:20]:
             overlap = len(words & set(util.keywords(task["objective"])))
             score = float(overlap)
-            if task["status"] == "waiting_user":
+            same_domain = bool(domain_id) and task.get("domain_id") == domain_id
+            if same_domain:
+                score += 0.75
+            if task["status"] == "waiting_user" and (overlap or same_domain):
+                # A task that asked a question expects the next message.
                 score += 1.0
             age = (now - util.parse_iso(task["last_activity_at"])).total_seconds()
             if age < recency_boost_s:

@@ -67,9 +67,10 @@ terminal CLI that are two views of the same runtime.
   become unknown, never success. Unknown outcomes are surfaced and
   reconciled instead of silently retried. Runs paused by limits stay paused
   until the user or scheduler resumes them deliberately.
-- **Web UI + terminal CLI.** A polling chat page with task, approval,
-  schedule, memory, tool, event, and config panels; a CLI that talks to the
-  same HTTP API. No second runtime, no separate history.
+- **Web UI + terminal CLI.** A polling chat page with panels for tasks,
+  approvals, domains, persona, settings, schedules, memory, tools, events,
+  and configuration; a CLI that talks to the same HTTP API. No second
+  runtime, no separate history.
 
 ## Architecture at a glance
 
@@ -340,13 +341,14 @@ the web panel, the CLI, or a short chat reply. Short replies are resolved
 by deterministic keywords ("yes", "approve", "go ahead", "no", "reject",
 "cancel", ...) or, for short non-obvious wording, a tiny constrained model
 call that classifies affirmative/negative/ambiguous and nothing else.
-Ambiguous replies never approve. With more than one pending approval, no
-quick resolution happens — the assistant asks which action is meant.
-Approving executes exactly the bound action through the normal executor
-and records the real outcome; a rejected or cancelled approval can never
-be re-approved, and an approval whose run moved on is refused as stale.
-Optional expiry: set an `expires_at` when creating approvals (the API
-exposes `scheduler.approval_notify_s` for reminders).
+Ambiguous replies never approve. With more than one pending approval, a
+reply resolves one only when it also names that action (for example
+`approve Logs`); otherwise the assistant asks which action is meant.
+Approvals expire after `approvals.expires_after_s` (default one week; set
+`0` to disable). Approving executes exactly the bound action through the
+normal executor and records the real outcome; a rejected or cancelled
+approval can never be re-approved, and an approval whose run moved on is
+refused as stale.
 
 ### Scheduling and heartbeat
 
@@ -362,9 +364,13 @@ ordinary runtime with the same tools, permissions, approvals, and context.
 
 The heartbeat (one scheduler thread in the server process, tick interval
 `scheduler.tick_interval_s`) submits due schedules, resumes interrupted
-runs (configurable), retries model-failure pauses after a cooldown within
-a retry budget, sweeps expired approvals and temp memories, reminds once
-about pending approvals, and runs scheduled consolidation. It never
+runs (configurable), retries model-failure pauses with exponential backoff
+within a retry budget, sweeps expired approvals and temp memories, reminds
+once about pending approvals, and runs scheduled consolidation. Background
+model work is bounded per tick (`scheduler.max_runs_per_tick`,
+`scheduler.max_retries_per_tick`). Permanent protocol failures wait for a
+human unless `scheduler.retry_permanent` is enabled, and no retry starts
+behind an active user (`scheduler.user_activity_grace_s`). It never
 auto-resumes limit-paused tasks. Overlapping ticks are prevented with a
 non-blocking lock; quiet ticks record nothing in chat.
 
@@ -429,16 +435,21 @@ overrides: `HARNESS_DATA_DIR`, `HARNESS_HOST`, `HARNESS_PORT`,
 Main groups:
 
 - `model.*`: endpoint, model name, api key, paths, timeout, retries,
-  max_tokens, temperature, `enable_thinking`
+  max_tokens, temperature, `enable_thinking`, `context_window`,
+  `empty_retry_max_tokens`
 - `server.*`: host, port, access token
 - `limits.*`: iteration/tool/time budgets per run, tool result size
-- `context.*`: token budgets, recent-message window, memory and history
-  retrieval counts, per-section budgets
+- `context.*`: token budgets, reserved output and tool-schema headroom,
+  recent-message window, memory and history retrieval counts, per-section
+  budgets
 - `domains.*`: routing threshold, ambiguity margins
 - `memory.*`: result limits, temp expiry
 - `tools.*`: MCP servers file, skills dir, default MCP risk, risk overrides
 - `scheduler.*`: enabled, tick interval, missed policy and grace,
-  interrupted-run resume, retry cooldown and budget, approval reminders
+  interrupted-run resume, per-tick run/retry caps, retry cooldown and
+  exponential backoff, permanent-failure policy, user-activity grace,
+  approval reminders
+- `approvals.*`: expiry window, classifier token budget and thinking
 - `consolidation.*`: schedule interval, bounds
 - `persona.*`: name, speaker labels, purpose, principles, style, response
   preferences — the entire visible personality is here, not in code

@@ -127,7 +127,7 @@ class App:
 
         self.events = Events(self.db)
         self.messages = Messages(self.db)
-        self.domains = Domains(self.db, self.events)
+        self.domains = Domains(self.db, self.events, self.config)
         self.tasks = Tasks(self.db, self.events)
         self.memory = MemoryManager(
             self.db, self.events, self.artifacts_dir, self.config
@@ -188,7 +188,14 @@ class App:
           are ``interrupted`` and their task paused.
         """
         report = {"unknown_executions": 0, "interrupted_runs": [],
-                  "recovered_approvals": 0, "cancelled_approvals": 0}
+                  "recovered_approvals": 0, "cancelled_approvals": 0,
+                  "duplicate_approvals": 0, "expired_approvals": 0}
+
+        # 0. Expire stale approvals and collapse exact duplicates before any
+        #    reconciliation looks at them. Duplicate create_domain proposals
+        #    were the visible symptom of re-proposing instead of reusing.
+        report["expired_approvals"] = self.approvals.expire_stale()
+        report["duplicate_approvals"] = self.approvals.dedupe_pending()
 
         # 1. Tool attempts that were mid-flight when the process died.
         for row in rows_to_dicts(self.db.query(
@@ -430,10 +437,6 @@ class App:
             return
         transcript = util.loads(row["transcript"] or "[]", [])
         call_id = execution.get("tool_call_id")
-        if call_id and any(
-            message.get("tool_call_id") == call_id for message in transcript
-        ):
-            return
         if status == "unknown":
             body: Any = {
                 "status": "unknown",
@@ -452,6 +455,10 @@ class App:
                 "status": status,
                 "error": error or execution.get("error") or status,
             }
+        text = util.clip(util.dumps(body), int(
+            self.config.get("limits.max_tool_result_chars", 6000)
+        ))
+
         has_call = False
         if call_id:
             for message in transcript:
@@ -459,16 +466,39 @@ class App:
                     if call.get("id") == call_id:
                         has_call = True
                         break
-        text = util.clip(util.dumps(body), int(
-            self.config.get("limits.max_tool_result_chars", 6000)
-        ))
+        if call_id:
+            for index in range(len(transcript) - 1, -1, -1):
+                message = transcript[index]
+                if (
+                    message.get("role") != "tool"
+                    or message.get("tool_call_id") != call_id
+                ):
+                    continue
+                existing = util.loads(message.get("content") or "", {})
+                placeholder = (
+                    isinstance(existing, dict)
+                    and existing.get("status") in ("awaiting_approval", "unknown")
+                )
+                if not placeholder:
+                    return  # a real result is already recorded
+                transcript[index] = {
+                    "role": "tool", "tool_call_id": call_id, "content": text,
+                }
+                self.db.execute(
+                    "UPDATE runs SET transcript=? WHERE id=?",
+                    (util.dumps(transcript), execution["run_id"]),
+                )
+                return
         if call_id and has_call:
             transcript.append({
                 "role": "tool", "tool_call_id": call_id, "content": text,
             })
         else:
+            # Never inject a mid-transcript system message: strict chat
+            # templates (Qwen3.x) reject it with HTTP 500. A user-role
+            # observation is protocol-valid and still clearly marked.
             transcript.append({
-                "role": "system",
+                "role": "user",
                 "content": f"[recovery] {execution.get('tool')} {status}: {text}",
             })
         self.db.execute(

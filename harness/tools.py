@@ -478,7 +478,9 @@ class ToolRegistry:
             description=(
                 "Create a new domain: a durable, distinct area of work that "
                 "warrants its own knowledge (not a one-off topic). Requires "
-                "explicit user approval; state why it is needed."
+                "explicit user approval; state why it is needed. If the "
+                "domain already exists this returns it without creating or "
+                "asking again."
             ),
             parameters={
                 "type": "object",
@@ -491,6 +493,27 @@ class ToolRegistry:
             },
             risk=RISK_CONFIRM,  # the user must approve the exact creation
             handler=self._tool_create_domain,
+        ))
+        self.register(ToolSpec(
+            name="use_domain",
+            description=(
+                "Move the current task to an existing domain. Use this when "
+                "the work clearly belongs somewhere else. It never creates a "
+                "domain and never changes permissions."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Existing domain id or exact name.",
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["domain"],
+            },
+            risk=RISK_LOW,
+            handler=self._tool_use_domain,
         ))
 
     # handlers -------------------------------------------------------------
@@ -581,8 +604,13 @@ class ToolRegistry:
     def _tool_create_domain(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         assert ctx.domains
         name = args["name"].strip()
-        if ctx.domains.by_name(name):
-            return {"already_exists": name}
+        existing = ctx.domains.by_name(name)
+        if existing:
+            return {
+                "already_exists": existing["name"],
+                "domain_id": existing["id"],
+                "note": "nothing was created; the domain already exists",
+            }
         domain_id = util.new_id("dom")
         domain = ctx.domains.create(
             domain_id, name=name,
@@ -590,6 +618,28 @@ class ToolRegistry:
             created_by="model", seed_note=args.get("description") or None,
         )
         return {"domain_id": domain["id"], "name": domain["name"]}
+
+    def _tool_use_domain(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        assert ctx.domains and ctx.tasks
+        wanted = str(args["domain"]).strip()
+        domain = ctx.domains.get(wanted) or ctx.domains.by_name(wanted)
+        if domain is None:
+            raise ToolError(
+                f"no such domain: {wanted}; use an existing domain id or name"
+            )
+        if domain["status"] != "active":
+            raise ToolError(f"domain {domain['name']} is archived")
+        previous = ctx.tasks.get(ctx.task_id)
+        previous_domain = previous["domain_id"] if previous else None
+        ctx.tasks.set_domain(ctx.task_id, domain["id"])
+        ctx.domain_id = domain["id"]
+        return {
+            "task_id": ctx.task_id,
+            "domain_id": domain["id"],
+            "name": domain["name"],
+            "previous_domain_id": previous_domain,
+            "reason": args.get("reason") or "",
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -372,52 +372,71 @@ class Scheduler:
         per check."""
         report: dict[str, Any] = {
             "tick": util.iso(), "submitted": [], "resumed": [],
-            "retried": [], "notified": [], "skipped": 0,
+            "retried": [], "notified": [], "skipped": 0, "deferred": 0,
         }
         if not self._tick_lock.acquire(blocking=False):
             return {"tick": util.iso(), "skipped": "another tick is running"}
         try:
             now = util.now_utc()
+            max_runs = max(
+                0, int(self.config.get("scheduler.max_runs_per_tick", 1))
+            )
+            runs_started = 0
+
+            # 0. Collapse duplicate pending approvals before anything looks at
+            #    them; identical actions must never queue up per new task.
+            self.app.approvals.dedupe_pending()
+
             # 1. Due schedules (idempotent occurrence submission).
+            submitted_task_ids: set[str] = set()
             for item in self.submit_due(now):
+                submitted_task_ids.add(item["task"]["id"])
+                if max_runs and runs_started >= max_runs:
+                    report["deferred"] += 1
+                    continue
                 self._run_submitted(item)
+                runs_started += 1
                 report["submitted"].append(item["occurrence_id"])
             # 2. Scheduled tasks submitted but never started (crash gap).
             for task in self.tasks.list_by_status(("active",)):
                 if task["origin"] != "schedule":
                     continue
+                if task["id"] in submitted_task_ids:
+                    continue
                 runs = self.db.query_one(
                     "SELECT id FROM runs WHERE task_id=? LIMIT 1", (task["id"],)
                 )
-                if runs is None:
-                    self.runtime.start_run(
-                        task, {"kind": "schedule"}, trigger_text=task["objective"]
-                    )
-                    report["resumed"].append(task["id"])
+                if runs is not None:
+                    continue
+                if max_runs and runs_started >= max_runs:
+                    report["deferred"] += 1
+                    continue
+                self.runtime.start_run(
+                    task, {"kind": "schedule"}, trigger_text=task["objective"]
+                )
+                runs_started += 1
+                report["resumed"].append(task["id"])
             # 3. Approvals granted just before a crash but never claimed.
             for result in self.runtime.resume_approved_approvals():
-                report["resumed"].append(result.task_id)
+                if result.status not in ("skipped", "stale"):
+                    report["resumed"].append(result.task_id)
             # 4. Interrupted runs: resume once after a restart.
             if bool(self.config.get("scheduler.resume_interrupted", True)):
                 for run in rows_to_dicts(self.db.query(
                     "SELECT * FROM runs WHERE status='interrupted'"
                 )):
-                    self.runtime.resume_interrupted_run(run["id"])
+                    if max_runs and runs_started >= max_runs:
+                        report["deferred"] += 1
+                        continue
+                    outcome = self.runtime.resume_interrupted_run(run["id"])
+                    if outcome.status == "skipped":
+                        # Terminal task or stale debris: the run is closed,
+                        # not resumed, and must not consume a run slot.
+                        continue
+                    runs_started += 1
                     report["resumed"].append(run["task_id"])
-            # 5. Retry paused model failures after a cooldown, bounded.
-            cooldown = float(self.config.get("scheduler.retry_cooldown_s", 300))
-            max_retries = int(self.config.get("scheduler.max_task_retries", 3))
-            for task in self.tasks.list_by_status(("paused",)):
-                if not (task.get("status_reason") or "").startswith("model failure"):
-                    continue
-                if int(task.get("retry_count") or 0) >= max_retries:
-                    continue
-                age = (now - util.parse_iso(task["last_activity_at"])).total_seconds()
-                if age < cooldown:
-                    continue
-                self.tasks.increment_retry(task["id"])
-                self.runtime.retry_paused_task(task)
-                report["retried"].append(task["id"])
+            # 5. Retry paused model failures with exponential backoff, bounded.
+            report["retried"] = self._retry_paused(now)
             # 6. Expiries.
             self.app.approvals.expire_stale()
             self.app.memory.expire_stale()
@@ -428,9 +447,83 @@ class Scheduler:
             # 9. Occurrences left pending by a crash between record/submit.
             self._recover_pending_occurrences(now)
             self.db.meta_set("scheduler.last_tick", util.iso())
+            self.db.meta_set("scheduler.last_report", util.dumps(report))
         finally:
             self._tick_lock.release()
         return report
+
+    def _retry_paused(self, now: dt.datetime) -> list[str]:
+        """Retry paused model failures after their backoff, at most N/tick."""
+        max_retries = int(self.config.get("scheduler.max_task_retries", 3))
+        per_tick = max(
+            0, int(self.config.get("scheduler.max_retries_per_tick", 1))
+        )
+        retry_permanent = bool(
+            self.config.get("scheduler.retry_permanent", False)
+        )
+        cooldown = float(self.config.get("scheduler.retry_cooldown_s", 300))
+        base = float(self.config.get("scheduler.retry_backoff_base_s", 300))
+        cap = float(self.config.get("scheduler.retry_backoff_max_s", 3600))
+        grace = float(self.config.get("scheduler.user_activity_grace_s", 60))
+        retried: list[str] = []
+        for task in self.tasks.list_by_status(("paused",)):
+            if per_tick and len(retried) >= per_tick:
+                break
+            reason = task.get("status_reason") or ""
+            permanent = reason.startswith("model protocol failure")
+            if not permanent and not reason.startswith("model failure"):
+                continue
+            if permanent and not retry_permanent:
+                continue
+            count = int(task.get("retry_count") or 0)
+            if count >= max_retries:
+                continue
+            if self._user_active_since(task, grace, now):
+                continue
+            due_text = task.get("next_retry_at")
+            if not due_text:
+                delay = cooldown if count == 0 else min(
+                    base * (2 ** max(0, count - 1)), cap
+                )
+                due = now + dt.timedelta(seconds=max(0.0, delay))
+                self.tasks.set_retry(task["id"], util.iso(due))
+                if delay > 0:
+                    continue
+                due_text = util.iso(due)
+            if util.parse_iso(due_text) > now:
+                continue
+            self.tasks.increment_retry(task["id"])
+            self.tasks.set_retry(task["id"], None)
+            try:
+                self.runtime.retry_paused_task(task)
+            except Exception as exc:  # one stuck task must not kill the tick
+                self.events.record(
+                    "retry.failed", level="error", task_id=task["id"],
+                    data={"error": f"{type(exc).__name__}: {exc}"},
+                )
+                continue
+            retried.append(task["id"])
+        return retried
+
+    def _user_active_since(
+        self, task: dict[str, Any], grace: float, now: dt.datetime
+    ) -> bool:
+        """True when the user has messaged since this task failed.
+
+        Activity *before* the failure is what caused it; only newer activity
+        means the user is actively working and a background retry should wait.
+        """
+        if grace <= 0:
+            return False
+        recent = self.app.messages.recent(limit=1)
+        if not recent:
+            return False
+        newest = recent[-1]
+        if newest.get("role") != "user":
+            return False
+        last = util.parse_iso(newest["ts"])
+        failure = util.parse_iso(task.get("last_activity_at") or "")
+        return last > failure and (now - last).total_seconds() < grace
 
     def _recover_pending_occurrences(self, now: dt.datetime) -> None:
         grace = float(self.config.get("scheduler.missed_grace_s", 900))

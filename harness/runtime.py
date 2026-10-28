@@ -20,11 +20,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import util
+from . import transcript as transcript_mod
 from .config import Config
 from .db import Database, rows_to_dicts
 from .model import (
     ASK_USER_TAG,
     Model,
+    ModelContextError,
+    ModelEmptyReply,
     ModelResponseError,
     ModelUnavailable,
     ToolCall,
@@ -102,15 +105,45 @@ class AgentRuntime:
         )
         return rows_to_dicts([row])[0] if row else None
 
+    def _prompt_budget_tokens(self) -> int:
+        """Messages + tool schemas must fit this many tokens."""
+        window = int(self.config.get("model.context_window", 0) or 0)
+        if window > 0:
+            reserved = int(
+                self.config.get("context.reserved_output_tokens", 2048)
+            )
+            return max(1000, window - reserved)
+        return int(self.config.get("context.total_budget_tokens", 20000))
+
+    def _prepare_prompt(
+        self,
+        transcript: list[dict[str, Any]],
+        tools_schema: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+        """Repair protocol shape, then compact to the model's window.
+
+        Repairs are persisted by the caller (they fix invalid transcripts);
+        compaction is per-call and never rewrites stored history.
+        """
+        repaired, repairs = transcript_mod.repair(transcript)
+        prompt, compacted = transcript_mod.compact(
+            repaired, self._prompt_budget_tokens(), tools_schema
+        )
+        return prompt, repairs + compacted, repaired
+
     # ------------------------------------------------------------------
     # Entry: user message from any interface
     # ------------------------------------------------------------------
 
-    def submit_user_message(self, text: str, source: str = "web") -> RunResult:
+    def submit_user_message(
+        self, text: str, source: str = "web", domain_id: str | None = None
+    ) -> RunResult:
         """The single entry point for a human message (web or CLI)."""
         text = (text or "").strip()
         if not text:
             raise ValueError("empty message")
+        if domain_id and self.domains.get(domain_id) is None:
+            raise ValueError(f"no such domain: {domain_id}")
         with self._lock:
             # 1. Quick confirmation on a pending approval.
             pending = self.approvals.pending()
@@ -120,17 +153,85 @@ class AgentRuntime:
                     return self._apply_quick_decision(
                         text, source, quick, pending
                     )
+                if (
+                    quick
+                    and quick["kind"] in ("ambiguous", "ambiguous_multiple")
+                    and not self._looks_like_question(text)
+                ):
+                    return self._ask_which_approval(text, source, quick)
 
             # 2. Record the message, then route.
             message_id = self.messages.record(
                 "user", text, source=source, visible=True
             )
-            result = self._route_and_run(text, source, message_id)
+            result = self._route_and_run(text, source, message_id, domain_id)
             self.db.execute(
                 "UPDATE messages SET task_id=?, domain_id=? WHERE id=?",
                 (result.task_id, self._task_domain(result.task_id), message_id),
             )
             return result
+
+    def _looks_like_question(self, text: str) -> bool:
+        stripped = (text or "").strip().lower()
+        if "?" in stripped:
+            return True
+        words = stripped.split()
+        first = words[0] if words else ""
+        return first in {
+            "what", "why", "how", "when", "where", "who", "which", "whose",
+            "does", "do", "did", "can", "could", "will", "would", "should",
+            "is", "are", "was", "were", "explain", "tell",
+        }
+
+    def _ask_which_approval(
+        self, text: str, source: str, quick: dict[str, Any]
+    ) -> RunResult:
+        """A reply was not a clear decision: ask, never guess.
+
+        This is a visible, deterministic note — no model call, no execution,
+        and every pending approval stays exactly as it was.
+        """
+        message_id = self.messages.record("user", text, source=source)
+        pending = quick.get("pending") or []
+        first = pending[0] if pending else None
+        if quick["kind"] == "ambiguous_multiple":
+            lines = ["I have more than one action waiting for your decision:"]
+            for approval in pending:
+                lines.append(f"- {self.approvals.describe(approval)}")
+            lines.append(
+                "Reply with `approve` or `reject` and name the action (for "
+                "example `approve Logs`), or use the Approvals panel."
+            )
+        else:
+            summary = quick.get("summary") or (
+                self.approvals.describe(pending[0]) if pending else "the action"
+            )
+            lines = [
+                "I did not apply that reply: it is not a clear yes or no for "
+                f"{summary}.",
+                "Reply `approve` or `reject` (or use the Approvals panel). "
+                "Nothing was executed.",
+            ]
+        note = "\n".join(lines)
+        task_id = first["task_id"] if first else None
+        run_id = first["run_id"] if first else ""
+        self.messages.record(
+            "note", note, source="system", task_id=task_id,
+            run_id=run_id or None,
+            domain_id=self._task_domain(task_id) if task_id else None,
+        )
+        if task_id:
+            self.db.execute(
+                "UPDATE messages SET task_id=?, domain_id=? WHERE id=?",
+                (task_id, self._task_domain(task_id), message_id),
+            )
+        self.events.record(
+            "approval.ambiguous", task_id=task_id,
+            data={"kind": quick["kind"], "text": text[:200]},
+        )
+        return RunResult(
+            "waiting_approval", run_id, task_id or "", message=note,
+        )
 
     def _task_domain(self, task_id: str) -> str | None:
         task = self.tasks.get(task_id)
@@ -178,14 +279,29 @@ class AgentRuntime:
     # Routing: domain, task resume, new task
     # ------------------------------------------------------------------
 
-    def _route_and_run(self, text: str, source: str, message_id: int) -> RunResult:
-        candidate = self.tasks.find_resume_candidate(text, domain_id=None)
+    def _route_and_run(
+        self, text: str, source: str, message_id: int,
+        domain_override: str | None = None,
+    ) -> RunResult:
+        # Route first: the routed domain is evidence for which open task this
+        # message continues. Doing it the other way around let a resume
+        # candidate from an unrelated domain win.
+        if domain_override:
+            domain_id = domain_override
+            self.events.record(
+                "domain.routed", domain_id=domain_id,
+                data={"reason": "explicit domain from the user",
+                      "candidates": []},
+            )
+        else:
+            domain_id = self._route_domain(text)
+        candidate = self.tasks.find_resume_candidate(text, domain_id=domain_id)
 
         if candidate.get("ambiguous"):
             # Competing candidates are materially ambiguous: create a new
             # task that asks the user which one to continue.
             task = self.tasks.create(
-                objective=text, domain_id=self._route_domain(text),
+                objective=text, domain_id=domain_id,
                 origin="user", origin_ref=str(message_id),
                 meta={"notes": "", "ambiguous_candidates": candidate["ambiguous"]},
             )
@@ -204,7 +320,6 @@ class AgentRuntime:
                 return self.resume_with_user_answer(existing, text, message_id)
             return self.resume_task(existing, text, message_id)
 
-        domain_id = self._route_domain(text)
         task = self.tasks.create(
             objective=text, domain_id=domain_id, origin="user",
             origin_ref=str(message_id), meta={"notes": ""},
@@ -240,7 +355,7 @@ class AgentRuntime:
     ) -> RunResult:
         """Create a run for a task and execute it to a pause or completion."""
         run_id = util.new_id("run")
-        pending = self.approvals.pending(task["id"])
+        pending = self.approvals.pending()
         built = self.context.build(
             task=task, domain=self.domains.get(task["domain_id"])
             if task.get("domain_id") else None,
@@ -286,6 +401,7 @@ class AgentRuntime:
             )
         if run["status"] == "waiting_approval":
             return self._ask_while_approval_pending(task, text, message_id)
+        self.tasks.clear_retry(task["id"])
         self._append_transcript(
             run["id"], {"role": "user", "content": text}
         )
@@ -303,6 +419,7 @@ class AgentRuntime:
         run = self._latest_run(task["id"])
         if run is None or run["status"] not in ("waiting_user", "interrupted"):
             return self.resume_task(task, text, message_id)
+        self.tasks.clear_retry(task["id"])
         self._append_transcript(run["id"], {"role": "user", "content": text})
         self._save_run(run["id"], status="running", ended_at=None)
         self.tasks.set_status(task["id"], "active", reason="user answered")
@@ -470,12 +587,61 @@ class AgentRuntime:
     # -- recovery resumes -------------------------------------------------
 
     @_serialized
+    def cancel_task(self, task_id: str) -> RunResult:
+        """Cancel a task, its pending approvals, and any open run.
+
+        Serialized on the run lock: an active run finishes first, so this can
+        never interleave with a tool execution or an approval decision.
+        """
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise ValueError(f"no such task: {task_id}")
+        if task["status"] in ("completed", "failed", "cancelled"):
+            return RunResult(
+                "skipped", "", task_id, message="task is already terminal",
+            )
+        cancelled = 0
+        for approval in self.approvals.pending(task_id):
+            if self.approvals.cancel(
+                approval["id"], reason="task cancelled by user"
+            ):
+                cancelled += 1
+        for run in rows_to_dicts(self.db.query(
+            "SELECT * FROM runs WHERE task_id=? AND status IN"
+            " ('running','interrupted','waiting_user','waiting_approval')",
+            (task_id,),
+        )):
+            self._finish_run(
+                run["id"], "failed", "cancelled by user",
+                error="task cancelled by user",
+            )
+        self.tasks.set_status(task_id, "cancelled", reason="cancelled by user")
+        self.events.record(
+            "task.cancelled", task_id=task_id,
+            data={"approvals_cancelled": cancelled},
+        )
+        return RunResult(
+            "cancelled", "", task_id,
+            message="Task cancelled; pending approvals were cancelled too.",
+        )
+
+    @_serialized
     def resume_interrupted_run(self, run_id: str) -> RunResult:
         run = self._run_row(run_id)
         if run is None or run["status"] != "interrupted":
             task_id = run["task_id"] if run else ""
             return RunResult("skipped", run_id, task_id)
         task = self.tasks.get(run["task_id"])
+        if task is None or task["status"] in ("completed", "failed", "cancelled"):
+            # Never revive work the user (or a terminal outcome) ended.
+            self._finish_run(
+                run["id"], "failed", "not resumed",
+                error=f"task is {task['status'] if task else 'missing'}",
+            )
+            return RunResult(
+                "skipped", run["id"], run["task_id"],
+                message="interrupted run belongs to a terminal task",
+            )
         self._save_run(run["id"], status="running", ended_at=None)
         self.tasks.set_status(task["id"], "active", reason="recovered")
         self.events.record(
@@ -489,6 +655,13 @@ class AgentRuntime:
     def retry_paused_task(self, task: dict[str, Any]) -> RunResult:
         """Auto-retry a task paused by a transient model failure. The run's
         transcript is intact, so completed actions are never repeated."""
+        current = self.tasks.get(task["id"])
+        if current is None or current["status"] not in ("paused", "failed"):
+            return RunResult(
+                "skipped", "", task["id"],
+                message="only paused or failed tasks can be retried",
+            )
+        task = current
         run = self._latest_run(task["id"])
         if run is None:
             return self.start_run(task, {"kind": "resume"})
@@ -522,10 +695,13 @@ class AgentRuntime:
         max_iterations = int(self.config.get("limits.max_iterations", 16))
         max_tool_calls = int(self.config.get("limits.max_tool_calls", 24))
         max_seconds = float(self.config.get("limits.max_run_seconds", 600))
-        malformed_budget = 3
         started_monotonic = time.monotonic()
         run_id = run["id"]
         task = self.tasks.get(run["task_id"])
+        self.tasks.clear_retry(task["id"], reset_count=False)
+        # One controlled recovery is allowed for an over-long prompt; the
+        # model client owns empty-reply recovery. Nothing else is retried here.
+        context_retry_used = False
 
         while True:
             run = self._run_row(run_id)
@@ -550,24 +726,50 @@ class AgentRuntime:
             # --- model call --------------------------------------------
             transcript = self._transcript(run)
             tools_schema = self.tools.schemas()
-            try:
-                reply = self.model.chat(transcript, tools_schema)
-                malformed_budget = 3
-            except ModelUnavailable as exc:
-                return self._model_failed(run, task, str(exc))
-            except ModelResponseError as exc:
-                malformed_budget -= 1
-                if malformed_budget <= 0:
-                    return self._model_failed(
-                        run, task, f"malformed model output: {exc}"
-                    )
+            prompt, repairs, repaired = self._prepare_prompt(
+                transcript, tools_schema
+            )
+            if repairs:
+                self._save_run(run_id, transcript=util.dumps(repaired))
                 self.events.record(
-                    "model.malformed", level="warn", task_id=task["id"],
-                    run_id=run_id, data={"error": str(exc), "budget_left":
-                    malformed_budget},
+                    "transcript.repaired", level="warn", task_id=task["id"],
+                    run_id=run_id, data={"repairs": repairs[:8]},
                 )
-                time.sleep(0.5)
-                continue
+            try:
+                reply = self.model.chat(prompt, tools_schema)
+            except ModelContextError as exc:
+                if context_retry_used:
+                    return self._model_failed(
+                        run, task,
+                        f"prompt still exceeds the model context window: {exc}",
+                        retryable=False,
+                    )
+                context_retry_used = True
+                tighter = max(1000, self._prompt_budget_tokens() // 2)
+                prompt, extra = transcript_mod.compact(
+                    prompt, tighter, tools_schema
+                )
+                self.events.record(
+                    "model.context_retry", level="warn", task_id=task["id"],
+                    run_id=run_id,
+                    data={"budget_tokens": tighter, "repairs": extra[:8]},
+                )
+                try:
+                    reply = self.model.chat(prompt, tools_schema)
+                except (ModelUnavailable, ModelResponseError) as retry_exc:
+                    return self._model_failed(
+                        run, task, str(retry_exc),
+                        retryable=isinstance(retry_exc, ModelUnavailable),
+                    )
+            except ModelEmptyReply as exc:
+                # The client already made its one bounded recovery attempt.
+                return self._model_failed(run, task, str(exc), retryable=False)
+            except ModelUnavailable as exc:
+                return self._model_failed(run, task, str(exc), retryable=True)
+            except ModelResponseError as exc:
+                return self._model_failed(
+                    run, task, f"model protocol error: {exc}", retryable=False
+                )
             self.events.record(
                 "model.call", task_id=task["id"], run_id=run_id,
                 data={
@@ -628,21 +830,14 @@ class AgentRuntime:
             # --- final reply --------------------------------------------
             content = (reply.content or "").strip()
             if not content and not reply.tool_calls:
-                # Some adapters can still produce empty final replies; treat
-                # them as malformed and retry within the budget.
-                malformed_budget -= 1
-                if malformed_budget <= 0:
-                    return self._model_failed(
-                        run, task, "malformed model output: empty final reply"
-                    )
-                self.events.record(
-                    "model.malformed", level="warn", task_id=task["id"],
-                    run_id=run_id,
-                    data={"error": "empty final reply",
-                          "budget_left": malformed_budget},
+                # The client converts empty wire replies into ModelEmptyReply;
+                # a test/alternate model can still hand back an empty string.
+                # One bounded recovery already happened, so stop and let the
+                # user decide rather than looping on identical requests.
+                return self._model_failed(
+                    run, task, "empty final reply after one recovery attempt",
+                    retryable=False,
                 )
-                time.sleep(0.5)
-                continue
             asks_user = ASK_USER_TAG in content
             content = content.replace(ASK_USER_TAG, "").strip()
             self._append_transcript(
@@ -697,6 +892,36 @@ class AgentRuntime:
             )
             return {"status": "denied", "error": str(exc)}
 
+        # create_domain is a virtual action: if the domain already exists, or
+        # an identical proposal is already pending, do not ask again.
+        if call.name == "create_domain":
+            name = str((call.arguments or {}).get("name") or "").strip()
+            existing = self.domains.by_name(name) if name else None
+            if existing is not None:
+                return {
+                    "status": "ok",
+                    "result": {
+                        "already_exists": existing["name"],
+                        "domain_id": existing["id"],
+                        "note": "the domain already exists; nothing was created",
+                    },
+                }
+            for approval in self.approvals.pending():
+                if (approval.get("meta") or {}).get("action") != "create_domain":
+                    continue
+                pending_name = str(
+                    (approval.get("arguments") or {}).get("name") or ""
+                ).strip().lower()
+                if name and pending_name == name.lower():
+                    return {
+                        "status": "denied",
+                        "error": (
+                            f"A create_domain approval for '{name}' is already "
+                            f"pending (approval {approval['id']}). Wait for "
+                            "that decision; do not propose it again."
+                        ),
+                    }
+
         if spec.risk == "confirm":
             pending = self.approvals.pending_for_run(run_id)
             if pending is not None:
@@ -711,8 +936,9 @@ class AgentRuntime:
                 arguments = self.tools.validate(call)
             except Exception as exc:
                 return {"status": "denied", "error": str(exc)}
+            action = "create_domain" if call.name == "create_domain" else "tool"
             approval = self.approvals.create(
-                task_id=task_id, run_id=run_id, action="tool",
+                task_id=task_id, run_id=run_id, action=action,
                 tool=call.name, arguments=arguments,
                 risk=spec.risk, tool_call_id=call.id,
                 reason=f"confirm-risk tool: {call.name}",
@@ -728,6 +954,14 @@ class AgentRuntime:
                     approval["id"],
                 ),
             )
+            # Keep the transcript protocol-valid while the decision is
+            # pending: a tool call must always have a result. The real result
+            # replaces this placeholder when the approval is executed.
+            self._append_tool_result(run_id, call.id, {
+                "status": "awaiting_approval",
+                "approval_id": approval["id"],
+                "note": "waiting for the user's decision; no result yet",
+            })
             self._finish_run(run_id, "waiting_approval", "action needs approval")
             self.tasks.set_status(
                 task_id, "waiting_approval",
@@ -748,8 +982,6 @@ class AgentRuntime:
                 "message": note,
             }
 
-        # Confirm-risk tools (e.g. create_domain, MCP actions) go through
-        # the approval path below; everything else executes directly.
         ctx = self.app.tool_context(run_id, task_id, task.get("domain_id"))
         return self.tools.execute(call, ctx, run_id=run_id, task_id=task_id)
 
@@ -757,20 +989,40 @@ class AgentRuntime:
         self, run_id: str, call_id: str, outcome: dict[str, Any],
         approval_id: str | None = None,
     ) -> None:
-        if outcome.get("status") == "awaiting_approval":
-            return
+        """Record one tool result, replacing an awaiting-approval placeholder.
+
+        Exactly one result per tool call keeps the transcript valid for strict
+        chat templates; a later real result must not be appended beside the
+        placeholder.
+        """
         body = outcome.get("result", outcome)
         text = util.clip(util.dumps(body), int(
             self.config.get("limits.max_tool_result_chars", 6000)
         ))
-        self._append_transcript(
-            run_id,
-            {
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": text if isinstance(text, str) else str(text),
-            },
-        )
+        run = self._run_row(run_id)
+        transcript = self._transcript(run)
+        for index in range(len(transcript) - 1, -1, -1):
+            message = transcript[index]
+            if (
+                message.get("role") != "tool"
+                or message.get("tool_call_id") != call_id
+            ):
+                continue
+            existing = util.loads(message.get("content") or "", {})
+            placeholder = (
+                isinstance(existing, dict)
+                and existing.get("status") in ("awaiting_approval", "unknown")
+            )
+            if placeholder:
+                transcript[index] = {
+                    "role": "tool", "tool_call_id": call_id, "content": text,
+                }
+                self._save_run(run_id, transcript=util.dumps(transcript))
+            return
+        transcript.append({
+            "role": "tool", "tool_call_id": call_id, "content": text,
+        })
+        self._save_run(run_id, transcript=util.dumps(transcript))
 
     # ------------------------------------------------------------------
     # Terminal states
@@ -851,7 +1103,8 @@ class AgentRuntime:
         )
 
     def _model_failed(
-        self, run: dict[str, Any], task: dict[str, Any], error: str
+        self, run: dict[str, Any], task: dict[str, Any], error: str,
+        *, retryable: bool = True,
     ) -> RunResult:
         live = self.app.approvals.live_for_run(run["id"])
         if live is not None:
@@ -867,19 +1120,32 @@ class AgentRuntime:
                     "was kept; approve or reject it to continue."
                 ),
             )
-        self._finish_run(run["id"], "failed", "model unavailable", error=error)
-        self.tasks.set_status(
-            task["id"], "paused", reason=f"model failure: {util.clip(error, 200)}"
-        )
+        category = "model unavailable" if retryable else "model protocol error"
+        self._finish_run(run["id"], "failed", category, error=error)
+        if retryable:
+            reason = f"model failure: {util.clip(error, 200)}"
+            self.tasks.set_retry(task["id"], None)
+            note_text = (
+                "I could not reach the model endpoint; the work is paused and "
+                "will be retried automatically with backoff. "
+                f"Error: {util.clip(error, 200)}"
+            )
+        else:
+            reason = f"model protocol failure: {util.clip(error, 200)}"
+            self.tasks.set_retry(task["id"], None)
+            note_text = (
+                "The model returned a reply I cannot use safely, so the work "
+                "is paused instead of being retried in a loop. Send "
+                "`continue` (or a new instruction) when you want to try "
+                f"again. Error: {util.clip(error, 200)}"
+            )
+        self.tasks.set_status(task["id"], "paused", reason=reason)
         self.events.record(
             "run.failed", level="error", task_id=task["id"], run_id=run["id"],
-            data={"error": util.clip(error, 300)},
+            data={"error": util.clip(error, 300), "retryable": retryable},
         )
         note_id = self.messages.record(
-            "note",
-            "I could not reach the model endpoint; the work is paused and "
-            "will be retried automatically. "
-            f"Error: {util.clip(error, 200)}",
+            "note", note_text,
             source="system", task_id=task["id"], run_id=run["id"],
             domain_id=task.get("domain_id"),
         )

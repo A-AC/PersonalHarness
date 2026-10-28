@@ -21,7 +21,7 @@ from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   last_activity_at TEXT NOT NULL,
   status_reason TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0,
+  next_retry_at TEXT,
   meta TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_domain ON tasks(domain_id);
@@ -283,7 +284,25 @@ class Database:
                     f"database schema v{row['value']} is newer than this "
                     f"build (v{SCHEMA_VERSION}); upgrade the application"
                 )
-            # Additive migrations for future versions go here.
+            else:
+                self._migrate_to(int(row["value"]))
+
+    def _migrate_to(self, version: int) -> None:
+        """Apply additive migrations from ``version`` to SCHEMA_VERSION."""
+        if version < 2:
+            columns = {
+                row["name"] for row in self._conn.execute(
+                    "PRAGMA table_info(tasks)"
+                )
+            }
+            if "next_retry_at" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN next_retry_at TEXT"
+                )
+            self._conn.execute(
+                "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
 
     def close(self) -> None:
         with self._lock:

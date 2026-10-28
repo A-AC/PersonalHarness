@@ -46,6 +46,25 @@ class ModelResponseError(RuntimeError):
     """Permanent protocol problem (malformed/invalid response, 4xx)."""
 
 
+class ModelEmptyReply(ModelResponseError):
+    """The endpoint answered with neither content nor tool calls.
+
+    Thinking models do this when the token budget is consumed by reasoning
+    (``finish_reason='length'``) or when the template closes early
+    (``finish_reason='stop'``). It is a response problem, not a transport
+    problem: retrying the identical request is pointless, but one recovery
+    attempt with thinking disabled and a larger budget can succeed.
+    """
+
+
+class ModelContextError(ModelResponseError):
+    """The prompt did not fit the model's context window (HTTP 400).
+
+    Distinct from other 4xx errors because the runtime can fix it by
+    compacting the transcript and retrying once.
+    """
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -123,6 +142,8 @@ class Model(Protocol):
         tools: list[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        thinking: bool | None = None,
+        recovery: bool = True,
     ) -> ModelReply: ...
 
     def probe(self) -> dict[str, Any]: ...
@@ -168,6 +189,7 @@ class ModelClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         max_tokens: int | None,
+        thinking: bool | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.config.get("model.name", ""),
@@ -179,9 +201,13 @@ class ModelClient:
         temperature = self.config.get("model.temperature")
         if temperature is not None:
             payload["temperature"] = float(temperature)
-        if not bool(self.config.get("model.enable_thinking", True)):
-            # Qwen3.x chat templates expose thinking through this kwarg.
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if thinking is None:
+            thinking = bool(self.config.get("model.enable_thinking", True))
+        # Qwen3.x chat templates expose thinking through this kwarg. Send it
+        # explicitly when the template is known to accept it; when disabled,
+        # always send it so a template default cannot re-enable reasoning.
+        if bool(self.config.get("model.thinking_kwargs", True)) or not thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": bool(thinking)}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -195,9 +221,44 @@ class ModelClient:
         tools: list[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        thinking: bool | None = None,
+        recovery: bool = True,
+    ) -> ModelReply:
+        """One completion, with a single controlled recovery for empty replies.
+
+        An empty reply is retried at most once, with thinking disabled and a
+        larger output budget. Repeating the identical request cannot help and
+        would just burn context and time.
+        """
+        effective_thinking = (
+            bool(self.config.get("model.enable_thinking", True))
+            if thinking is None else bool(thinking)
+        )
+        try:
+            return self._chat_once(
+                messages, tools, max_tokens=max_tokens, thinking=thinking
+            )
+        except ModelEmptyReply:
+            if not recovery or not effective_thinking:
+                raise
+        retry_tokens = max(
+            int(max_tokens or 0),
+            int(self.config.get("model.empty_retry_max_tokens", 4096)),
+        )
+        return self._chat_once(
+            messages, tools, max_tokens=retry_tokens, thinking=False
+        )
+
+    def _chat_once(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        thinking: bool | None = None,
     ) -> ModelReply:
         url = self._chat_url()
-        payload = self._payload(messages, tools, max_tokens)
+        payload = self._payload(messages, tools, max_tokens, thinking)
         retries = max(0, int(self.config.get("model.connect_retries", 2)))
         backoff = float(self.config.get("model.retry_backoff_s", 2.0))
         last_error: Exception | None = None
@@ -214,11 +275,24 @@ class ModelClient:
                         f"{response.text[:200]}"
                     )
                 if response.status_code >= 400:
-                    # Client errors (bad model name, malformed request) are
-                    # permanent; do not retry them.
+                    detail = response.text[:300]
+                    lowered = detail.lower()
+                    if response.status_code in (400, 413, 422) and any(
+                        marker in lowered
+                        for marker in (
+                            "exceed_context_size", "context size",
+                            "context length", "too many tokens",
+                            "maximum context", "prompt is too long",
+                        )
+                    ):
+                        raise ModelContextError(
+                            f"endpoint rejected the prompt as too long "
+                            f"({response.status_code}): {detail}"
+                        )
+                    # Other client errors (bad model name, malformed request)
+                    # are permanent; do not retry them.
                     raise ModelResponseError(
-                        f"endpoint returned {response.status_code}: "
-                        f"{response.text[:300]}"
+                        f"endpoint returned {response.status_code}: {detail}"
                     )
                 return self._parse(response.json(), duration_ms)
             except ModelResponseError:
@@ -263,7 +337,7 @@ class ModelClient:
         if not content.strip() and not calls:
             # Empty or whitespace-only replies (thinking models sometimes
             # close without content) are malformed, not answers.
-            raise ModelResponseError(
+            raise ModelEmptyReply(
                 "model returned neither content nor tool calls "
                 f"(finish_reason={finish_reason!r})"
             )
@@ -376,8 +450,15 @@ class ScriptedModel:
         tools: list[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        thinking: bool | None = None,
+        recovery: bool = True,
     ) -> ModelReply:
-        self.calls.append({"messages": messages, "tools": tools})
+        self.calls.append({
+            "messages": messages,
+            "tools": tools,
+            "max_tokens": max_tokens,
+            "thinking": thinking,
+        })
         script = self._next()
         if isinstance(script, str):
             script = {"content": script}

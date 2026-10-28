@@ -21,7 +21,7 @@ from starlette.routing import Route
 
 from . import util
 from .app import App
-from .config import save_config
+from .config import EDITABLE_KEYS, ConfigError, save_config, validate_group_update
 from .web_page import PAGE
 
 
@@ -85,16 +85,28 @@ class Server:
 
     def _state_payload(self) -> dict[str, Any]:
         app = self.app
-        tasks = app.tasks.list_recent(limit=40)
-        open_tasks = [t for t in tasks if t["status"] in
-                      ("active", "waiting_user", "waiting_approval", "paused")]
+        # Open work must never fall out of the UI because history is long:
+        # show every open task first, then the most recent history.
+        open_tasks = app.tasks.list_open()
+        seen = {task["id"] for task in open_tasks}
+        tasks = open_tasks + [
+            task for task in app.tasks.list_recent(limit=60)
+            if task["id"] not in seen
+        ]
+        approvals = app.approvals.pending()
+        for approval in approvals:
+            approval["summary"] = app.approvals.describe(approval)
+        domains = app.domains.list_all()
+        report = util.loads(
+            app.db.meta_get("scheduler.last_report") or "", {}
+        )
         return {
             "messages": app.messages.list_visible(limit=300),
             "tasks": tasks,
             "open_tasks": open_tasks,
-            "approvals": app.approvals.pending(),
+            "approvals": approvals,
             "schedules": app.scheduler.list_schedules(),
-            "domains": app.domains.list_active(),
+            "domains": domains,
             "memories": app.memory.list(limit=50),
             "tools": [
                 {"name": name,
@@ -104,7 +116,19 @@ class Server:
             ],
             "events": app.events.list(limit=120),
             "config": app.config.redacted(),
+            "persona": app.config.get("persona", {}),
             "consolidations": app.consolidation.list_runs(limit=5),
+            "counts": {
+                "open_tasks": len(open_tasks),
+                "pending_approvals": len(approvals),
+                "domains": len(domains),
+                "paused": len([t for t in tasks if t["status"] == "paused"]),
+            },
+            "scheduler": {
+                "last_tick": app.db.meta_get("scheduler.last_tick"),
+                "last_report": report,
+                "enabled": bool(app.config.get("scheduler.enabled", True)),
+            },
             "now": util.iso(),
         }
 
@@ -124,9 +148,13 @@ class Server:
         if not text:
             return _err("empty message")
         source = str(body.get("source", "web"))
+        domain_id = body.get("domain_id") or None
+        if domain_id and self.app.domains.get(str(domain_id)) is None:
+            return _err("no such domain", 404)
         try:
             result = await run_in_threadpool(
-                self.app.runtime.submit_user_message, text, source=source
+                self.app.runtime.submit_user_message, text, source=source,
+                domain_id=domain_id,
             )
         except Exception as exc:
             return _err(f"{type(exc).__name__}: {exc}", 500)
@@ -160,8 +188,13 @@ class Server:
         )
         return _json({
             "task": task,
+            "domain": self.app.domains.get(task.get("domain_id"))
+            if task.get("domain_id") else None,
             "runs": [dict(r) for r in runs],
             "executions": [dict(r) for r in executions],
+            "approvals": [
+                a for a in self.app.approvals.pending(task_id)
+            ],
             "messages": self.app.messages.for_task(task_id),
             "context_sources": util.loads(
                 (self.app.db.query_one(
@@ -171,6 +204,41 @@ class Server:
                 [],
             ),
         })
+
+    async def task_action(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        task_id = request.path_params["task_id"]
+        action = request.path_params["action"]
+        task = self.app.tasks.get(task_id)
+        if task is None:
+            return _err("no such task", 404)
+        body = await self._body(request)
+        if action == "cancel":
+            try:
+                result = await run_in_threadpool(
+                    self.app.runtime.cancel_task, task_id
+                )
+            except ValueError as exc:
+                return _err(str(exc), 404)
+            return _json({"task": self.app.tasks.get(task_id),
+                          "status": result.status, "message": result.message})
+        if action == "domain":
+            domain_id = str(body.get("domain_id", "")).strip()
+            if self.app.domains.get(domain_id) is None:
+                return _err("no such domain", 404)
+            updated = self.app.tasks.set_domain(task_id, domain_id)
+            return _json({"task": updated})
+        if action == "resume":
+            try:
+                result = await run_in_threadpool(
+                    self.app.runtime.retry_paused_task, task
+                )
+            except Exception as exc:
+                return _err(f"{type(exc).__name__}: {exc}", 500)
+            return _json({"status": result.status, "task_id": result.task_id,
+                          "message": result.message})
+        return _err("invalid action")
 
     # -- approvals --------------------------------------------------------------
 
@@ -311,6 +379,41 @@ class Server:
         )
         return _json({"domain": domain})
 
+    async def domain_update(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        domain_id = request.path_params["domain_id"]
+        if self.app.domains.get(domain_id) is None:
+            return _err("no such domain", 404)
+        body = await self._body(request)
+        name = body.get("name")
+        if name is not None:
+            name = str(name).strip()
+            if not name:
+                return _err("name cannot be empty")
+            existing = self.app.domains.by_name(name)
+            if existing and existing["id"] != domain_id:
+                return _err("a domain with that name exists", 409)
+        try:
+            domain = self.app.domains.update(
+                domain_id,
+                name=name,
+                description=(
+                    str(body["description"])
+                    if "description" in body else None
+                ),
+                status=body.get("status"),
+            )
+        except (KeyError, ValueError) as exc:
+            return _err(str(exc), 400)
+        return _json({"domain": domain})
+
+    async def heartbeat(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        report = await run_in_threadpool(self.app.scheduler.heartbeat)
+        return _json({"report": report})
+
     # -- consolidation -----------------------------------------------------------
 
     async def consolidate(self, request: Request) -> Response:
@@ -344,40 +447,35 @@ class Server:
     async def config_get(self, request: Request) -> Response:
         if not self._authorized(request):
             return _err("unauthorized", 401)
-        return _json({"config": self.app.config.redacted(),
-                      "editable_groups": sorted(
-                          ["persona", "limits", "context", "domains", "memory",
-                           "tools", "scheduler", "consolidation", "timezone"]),
-
-                      })
+        return _json({
+            "config": self.app.config.redacted(),
+            "editable_groups": sorted(EDITABLE_KEYS),
+            "config_path": str(self.app.config.path or ""),
+        })
 
     async def config_update(self, request: Request) -> Response:
         if not self._authorized(request):
             return _err("unauthorized", 401)
         body = await self._body(request)
         group = str(body.get("group", ""))
-        if group not in ("persona", "limits", "context", "domains", "memory",
-                         "tools", "scheduler", "consolidation", "timezone"):
-            return _err("group not editable")
         value = body.get("value")
-        if not isinstance(value, dict):
-            return _err("value must be a mapping")
-        from .config import ConfigError
         try:
             await run_in_threadpool(
                 self._apply_config_update, group, value
             )
-        except (ConfigError, OSError, ValueError) as exc:
+        except (ConfigError, OSError, ValueError, TypeError) as exc:
             return _err(f"rejected: {exc}", 400)
-        return _json({"status": "saved", "group": group})
+        return _json({"status": "saved", "group": group,
+                      "value": self.app.config.get(group)})
 
-    def _apply_config_update(self, group: str, value: dict[str, Any]) -> None:
-        merged = dict(self.app.config.get(group) or {})
-        merged.update(value)
+    def _apply_config_update(self, group: str, value: Any) -> None:
+        merged = validate_group_update(self.app.config, group, value)
         self.app.config.set(group, merged)
         save_config(self.app.config)
         self.app.events.record(
-            "config.updated", data={"group": group, "keys": sorted(value)}
+            "config.updated", data={"group": group,
+                                    "keys": sorted(value) if isinstance(value, dict)
+                                    else []},
         )
 
     async def backup(self, request: Request) -> Response:
@@ -412,6 +510,8 @@ class Server:
             Route("/api/events", self.events, methods=["GET"]),
             Route("/api/message", self.message, methods=["POST"]),
             Route("/api/tasks/{task_id}", self.task_detail, methods=["GET"]),
+            Route("/api/tasks/{task_id}/{action}", self.task_action,
+                  methods=["POST"]),
             Route("/api/approvals/{approval_id}/{decision}",
                   self.approval_decide, methods=["POST"]),
             Route("/api/schedules", self.schedules_list, methods=["GET"]),
@@ -424,6 +524,9 @@ class Server:
                   methods=["GET"]),
             Route("/api/domains", self.domains_list, methods=["GET"]),
             Route("/api/domains", self.domains_create, methods=["POST"]),
+            Route("/api/domains/{domain_id}", self.domain_update,
+                  methods=["PATCH"]),
+            Route("/api/heartbeat", self.heartbeat, methods=["POST"]),
             Route("/api/consolidate", self.consolidate, methods=["POST"]),
             Route("/api/tools", self.tools_list, methods=["GET"]),
             Route("/api/endpoint-probe", self.endpoint_probe, methods=["GET"]),

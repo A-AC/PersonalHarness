@@ -16,6 +16,8 @@ records the real outcome against the approval.
 
 from __future__ import annotations
 
+import datetime as dt
+import re
 from typing import Any
 
 from . import util
@@ -25,16 +27,62 @@ from .store import Events
 
 APPROVAL_ACTIONS = ("tool", "create_domain")
 
-_AFFIRMATIVE = (
-    "yes", "y", "yeah", "yep", "approve", "approved", "ok", "okay", "confirm",
-    "confirmed", "do it", "go ahead", "proceed", "sure", "please do",
-    "that's fine", "fine", "accepted", "allow it", "permit", "grant",
-)
-_NEGATIVE = (
-    "no", "n", "nope", "reject", "rejected", "deny", "denied", "cancel",
-    "cancelled", "canceled", "stop", "don't", "dont", "do not", "absolutely not",
-    "never", "refuse", "block it",
-)
+# Deterministic, conservative phrase lists. These are *exact* normalized
+# phrases, never substrings: "not affirmative" must not read as approval.
+_AFFIRMATIVE = {
+    "yes", "y", "yeah", "yep", "yup", "ok", "okay", "k", "sure", "approve",
+    "approved", "confirm", "confirmed", "accept", "accepted", "allow",
+    "allowed", "permit", "permitted", "grant", "granted", "do it", "go",
+    "go ahead", "proceed", "continue", "affirmative", "please do",
+    "please proceed", "please approve", "please confirm", "i approve",
+    "i confirm", "approve it", "do that", "that's fine", "that is fine",
+    "fine", "sounds good", "yes please", "yes do it", "yes go ahead",
+    "ok do it", "okay do it", "sure do it", "no problem", "no worries",
+}
+_NEGATIVE = {
+    "no", "n", "nope", "nah", "negative", "reject", "rejected", "deny",
+    "denied", "cancel", "cancelled", "canceled", "stop", "don't", "dont",
+    "do not", "never", "refuse", "refused", "block", "block it",
+    "absolutely not", "no thanks", "no thank you", "don't do it",
+    "dont do it", "do not do it", "no way", "not now", "leave it",
+}
+
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"',
+                              "\u201d": '"'})
+
+
+def normalize_reply(text: str) -> str:
+    """Lowercase, unify quotes, drop punctuation, collapse whitespace."""
+    lowered = (text or "").translate(_APOSTROPHES).strip().lower()
+    lowered = re.sub(r"[^a-z0-9'\s]+", " ", lowered)
+    return " ".join(lowered.split())
+
+
+_APPROVE_WORDS = {
+    "approve", "approved", "yes", "y", "ok", "okay", "confirm", "confirmed",
+    "accept", "allow", "permit", "proceed", "sure",
+}
+_REJECT_WORDS = {
+    "reject", "rejected", "deny", "denied", "no", "n", "cancel", "cancelled",
+    "canceled", "stop", "never", "refuse", "refused",
+}
+
+
+def _leading_decision(normalized: str) -> str | None:
+    """Classify a decision from the first word, for multi-approval replies.
+
+    Used only when the reply also names exactly one pending action; the
+    deterministic single-approval path still requires an exact phrase.
+    """
+    words = normalized.split()
+    if not words:
+        return None
+    if words[0] in _APPROVE_WORDS:
+        return "approve"
+    if words[0] in _REJECT_WORDS:
+        return "reject"
+    return None
+
 
 
 class ApprovalError(ValueError):
@@ -65,6 +113,10 @@ class Approvals:
     ) -> dict[str, Any]:
         if action not in APPROVAL_ACTIONS:
             raise ApprovalError(f"unknown approval action: {action}")
+        if expires_at is None:
+            ttl = float(self.config.get("approvals.expires_after_s", 0) or 0)
+            if ttl > 0:
+                expires_at = util.iso(util.now_utc() + dt.timedelta(seconds=ttl))
         approval_id = util.new_id("apr")
         ts = util.iso()
         with self.db.transaction() as conn:
@@ -301,6 +353,48 @@ class Approvals:
         )
         return self.get(row["id"]) if row else None
 
+    def describe(self, approval: dict[str, Any]) -> str:
+        """One-line human description used in questions and the UI."""
+        action = (approval.get("meta") or {}).get("action", "tool")
+        arguments = approval.get("arguments") or {}
+        if action == "create_domain":
+            name = arguments.get("name") or "a new domain"
+            return f"create the domain '{name}'"
+        detail = util.dumps(arguments)
+        if len(detail) > 120:
+            detail = detail[:117] + "…"
+        return f"run {approval.get('tool')} with {detail}"
+
+    def dedupe_pending(
+        self, actions: tuple[str, ...] = ("create_domain",)
+    ) -> int:
+        """Cancel duplicate pending approvals for the same action+arguments.
+
+        Newest wins (``pending`` is ordered newest first) so the approval a
+        user is most likely looking at stays actionable. Only the listed
+        virtual actions are deduped by default; external tool approvals can
+        legitimately repeat with identical arguments.
+        """
+        seen: dict[tuple[str, str, str], str] = {}
+        cancelled = 0
+        for approval in self.pending():
+            action = (approval.get("meta") or {}).get("action", "tool")
+            if action not in actions:
+                continue
+            key = (action, str(approval.get("tool")), util.dumps(
+                approval.get("arguments") or {}
+            ))
+            keeper = seen.get(key)
+            if keeper is None:
+                seen[key] = approval["id"]
+                continue
+            if self.cancel(
+                approval["id"],
+                reason=f"duplicate of {keeper}",
+            ):
+                cancelled += 1
+        return cancelled
+
     # -- quick confirmation -----------------------------------------------
 
     def maybe_quick_confirm(
@@ -309,24 +403,25 @@ class Approvals:
         """Try to interpret a short user reply as a decision on one pending
         approval. Returns a decision dict or None (normal message flow).
 
-        Only ever classifies; it cannot execute anything. With more than one
-        pending approval the reply is not auto-applied — the assistant asks
-        which action is meant.
+        Only ever classifies; it cannot execute anything. A reply is applied
+        only when the target is unambiguous: one pending approval, or a reply
+        that names exactly one of several pending actions. Everything else
+        returns a question, never a decision.
         """
         stripped = (text or "").strip()
-        if not pending or len(stripped) > 80 or "\n" in stripped:
+        if not pending or len(stripped) > 120 or "\n" in stripped:
             return None
-        lowered = stripped.lower().strip(" .!?")
-        if len(lowered.split()) > 10:
+        normalized = normalize_reply(stripped)
+        if not normalized or len(normalized.split()) > 12:
             return None
         if len(pending) > 1:
-            return {"kind": "ambiguous_multiple", "pending": pending}
+            return self._disambiguate(stripped, normalized, pending)
         approval = pending[0]
-        # Deterministic fast path for unambiguous keywords.
-        if lowered in _AFFIRMATIVE:
+        # Deterministic fast path for unambiguous phrases.
+        if normalized in _AFFIRMATIVE:
             return {"kind": "decision", "decision": "approve",
                     "approval_id": approval["id"], "via": "keyword"}
-        if lowered in _NEGATIVE:
+        if normalized in _NEGATIVE:
             return {"kind": "decision", "decision": "reject",
                     "approval_id": approval["id"], "via": "keyword"}
         # Model classification for short, non-obvious replies. Constrained:
@@ -341,7 +436,33 @@ class Approvals:
         if label == "negative":
             return {"kind": "decision", "decision": "reject",
                     "approval_id": approval["id"], "via": "model"}
-        return {"kind": "ambiguous", "approval_id": approval["id"]}
+        return {"kind": "ambiguous", "approval_id": approval["id"],
+                "summary": self.describe(approval)}
+
+    def _disambiguate(
+        self, text: str, normalized: str, pending: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Resolve a decision only if the reply names exactly one action."""
+        words = set(normalized.split())
+        named: list[dict[str, Any]] = []
+        for approval in pending:
+            tool = normalize_reply(str(approval.get("tool") or ""))
+            name = normalize_reply(
+                str((approval.get("arguments") or {}).get("name") or "")
+            )
+            tokens = set(tool.split()) | set(name.split())
+            if tokens and tokens & words:
+                named.append(approval)
+        decision = _leading_decision(normalized)
+        if decision and len(named) == 1:
+            return {"kind": "decision", "decision": decision,
+                    "approval_id": named[0]["id"], "via": "keyword"}
+        return {
+            "kind": "ambiguous_multiple",
+            "pending": pending,
+            "named": [a["id"] for a in named],
+            "summaries": [self.describe(a) for a in pending],
+        }
 
     def _classify(self, text: str, approval: dict[str, Any]) -> str:
         """Tiny constrained model call: affirmative | negative | ambiguous."""
@@ -357,10 +478,22 @@ class Approvals:
             "refuses this specific request."
         )
         reply = self.model.chat(
-            [{"role": "user", "content": prompt}], tools=[], max_tokens=200
+            [{"role": "user", "content": prompt}],
+            tools=[],
+            max_tokens=int(
+                self.config.get("approvals.classifier_max_tokens", 16)
+            ),
+            thinking=bool(
+                self.config.get("approvals.classifier_thinking", False)
+            ),
+            recovery=False,
         )
-        label = (reply.content or "").strip().lower()
-        for candidate in ("affirmative", "negative", "ambiguous"):
-            if candidate in label:
-                return candidate
+        # Parse exactly one leading label. Substring matching would read
+        # "not affirmative" as approval.
+        words = re.findall(r"[a-z]+", (reply.content or "").lower())
+        first = words[0] if words else ""
+        if first in ("affirmative", "yes", "approve", "approved"):
+            return "affirmative"
+        if first in ("negative", "no", "reject", "rejected"):
+            return "negative"
         return "ambiguous"

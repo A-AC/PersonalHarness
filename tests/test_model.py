@@ -149,3 +149,67 @@ def test_thinking_disabled_sends_template_kwarg(tmp_path):
     client.chat([{"role": "user", "content": "x"}], tools=[])
     assert seen["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
     client.close()
+
+
+def test_empty_reply_gets_one_recovery_with_thinking_off(tmp_path):
+    seen = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        seen.append(payload)
+        if len(seen) == 1:
+            return httpx.Response(200, json={
+                "choices": [{
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "length",
+                }],
+            })
+        return httpx.Response(200, json=_ok_body(content="recovered"))
+
+    client = _client(tmp_path, handler)
+    reply = client.chat([{"role": "user", "content": "x"}], tools=[])
+    assert reply.content == "recovered"
+    assert len(seen) == 2
+    assert seen[1]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert seen[1]["max_tokens"] == client.config.get("model.empty_retry_max_tokens")
+    client.close()
+
+
+def test_empty_reply_does_not_loop_when_thinking_already_off(tmp_path):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json={
+            "choices": [{
+                "message": {"role": "assistant", "content": ""},
+                "finish_reason": "stop",
+            }],
+        })
+
+    client = _client(tmp_path, handler)
+    from harness.model import ModelEmptyReply
+
+    with pytest.raises(ModelEmptyReply):
+        client.chat([{"role": "user", "content": "x"}], tools=[],
+                    thinking=False)
+    assert calls["n"] == 1
+    client.close()
+
+
+def test_context_window_error_is_classified(tmp_path):
+    def handler(request):
+        return httpx.Response(400, json={
+            "error": {
+                "code": 400,
+                "message": "the request exceeds the available context size",
+                "type": "exceed_context_size_error",
+            }
+        })
+
+    client = _client(tmp_path, handler)
+    from harness.model import ModelContextError
+
+    with pytest.raises(ModelContextError):
+        client.chat([{"role": "user", "content": "x"}], tools=[])
+    client.close()

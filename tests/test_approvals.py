@@ -434,3 +434,102 @@ def test_risk_overrides_are_validated(make_app):
     except Exception:
         raised = True
     assert raised
+
+
+def test_polite_affirmatives_are_deterministic_approvals(make_app):
+    app = _make_confirm_tool_app(make_app, scripts=[
+        {"tool_calls": [{"name": "mcp_test_send",
+                         "arguments": {"text": "report"}}]},
+    ])
+    app.runtime.submit_user_message("send the report")
+    approval = app.approvals.pending()[0]
+    for phrase in ("yes please", "Yes, please.", "approve", "ok do it"):
+        outcome = app.approvals.maybe_quick_confirm(
+            phrase, app.approvals.pending()
+        )
+        assert outcome["kind"] == "decision", phrase
+        assert outcome["decision"] == "approve"
+        assert outcome["via"] == "keyword"
+        assert outcome["approval_id"] == approval["id"]
+
+
+def test_negation_inside_a_sentence_never_approves(make_app):
+    app = _make_confirm_tool_app(make_app, scripts=[
+        {"tool_calls": [{"name": "mcp_test_send",
+                         "arguments": {"text": "x"}}]},
+    ])
+    app.runtime.submit_user_message("send x")
+    app.model.scripts.append({"content": "not affirmative"})
+    outcome = app.approvals.maybe_quick_confirm(
+        "hmm perhaps", app.approvals.pending()
+    )
+    # The classifier replied "not affirmative": exact parsing must not read
+    # the substring "affirmative" as approval.
+    assert outcome is None or outcome["kind"] == "ambiguous"
+
+
+def test_identical_pending_domain_approvals_are_deduped(make_app):
+    app = make_app.build(default="ok")
+    task = app.tasks.create(objective="domains", origin="user")
+    run_id = util.new_id("run")
+    app.db.execute(
+        "INSERT INTO runs(id, task_id, trigger, status, started_at,"
+        " transcript) VALUES (?,?,?,?,?,?)",
+        (run_id, task["id"], "user", "waiting_approval", util.iso(), "[]"),
+    )
+    for _ in range(3):
+        app.approvals.create(
+            task_id=task["id"], run_id=run_id, action="create_domain",
+            tool="create_domain",
+            arguments={"name": "Finance", "description": "money"},
+            risk="confirm",
+        )
+    assert len(app.approvals.pending()) == 3
+    assert app.approvals.dedupe_pending() == 2
+    pending = app.approvals.pending()
+    assert len(pending) == 1
+    assert pending[0]["arguments"]["name"] == "Finance"
+
+
+def test_multiple_pending_approvals_require_naming_the_action(make_app):
+    app = make_app.build(default="ok")
+    task = app.tasks.create(objective="two approvals", origin="user")
+    run_id = util.new_id("run")
+    app.db.execute(
+        "INSERT INTO runs(id, task_id, trigger, status, started_at,"
+        " transcript) VALUES (?,?,?,?,?,?)",
+        (run_id, task["id"], "user", "waiting_approval", util.iso(), "[]"),
+    )
+    first = app.approvals.create(
+        task_id=task["id"], run_id=run_id, action="tool",
+        tool="mcp_mail_send", arguments={"text": "a"}, risk="confirm",
+    )
+    app.approvals.create(
+        task_id=task["id"], run_id=run_id, action="tool",
+        tool="mcp_notes_write", arguments={"text": "b"}, risk="confirm",
+    )
+    bare = app.approvals.maybe_quick_confirm("yes", app.approvals.pending())
+    assert bare["kind"] == "ambiguous_multiple"
+    named = app.approvals.maybe_quick_confirm(
+        "approve mail send", app.approvals.pending()
+    )
+    assert named["kind"] == "decision"
+    assert named["approval_id"] == first["id"]
+
+
+def test_approval_expires_by_default(make_app):
+    app = make_app.build(default="ok")
+    app.config.set("approvals.expires_after_s", 60.0)
+    task = app.tasks.create(objective="expiry", origin="user")
+    run_id = util.new_id("run")
+    app.db.execute(
+        "INSERT INTO runs(id, task_id, trigger, status, started_at,"
+        " transcript) VALUES (?,?,?,?,?,?)",
+        (run_id, task["id"], "user", "waiting_approval", util.iso(), "[]"),
+    )
+    approval = app.approvals.create(
+        task_id=task["id"], run_id=run_id, action="tool",
+        tool="mcp_test_send", arguments={"text": "x"}, risk="confirm",
+    )
+    assert approval["expires_at"]
+    assert util.parse_iso(approval["expires_at"]) > util.now_utc()

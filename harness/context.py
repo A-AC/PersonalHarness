@@ -86,12 +86,20 @@ class ContextBuilder:
         sections.append(("skills", self._skills_block(objective, sources), 3)
         )
 
-        total_budget = int(self.config.get("context.total_budget_tokens", 20000)) * 4
+        total_budget = self._total_budget_chars()
+        section_budgets = self.config.get("context.section_budgets", {}) or {}
         content_parts: list[str] = []
         used = 0
         for name, text, drop_priority in sections:
             if not text:
                 continue
+            limit = int(section_budgets.get(name, 0) or 0) * 4
+            if limit > 0 and len(text) > limit:
+                text = util.clip(text, limit)
+                sources.append({
+                    "section": name, "ref": None,
+                    "reason": f"clipped to its {limit // 4}-token budget",
+                })
             if used + len(text) > total_budget and drop_priority >= 0:
                 sources.append({
                     "section": name, "ref": None,
@@ -105,6 +113,18 @@ class ContextBuilder:
             "system": "\n\n".join(content_parts),
             "sources": sources,
         }
+
+    def _total_budget_chars(self) -> int:
+        """Prompt budget: configured total, capped by the model's window."""
+        configured = int(self.config.get("context.total_budget_tokens", 20000))
+        window = int(self.config.get("model.context_window", 0) or 0)
+        if window > 0:
+            reserved = int(
+                self.config.get("context.reserved_output_tokens", 2048)
+            )
+            schema = int(self.config.get("context.tool_schema_tokens", 1600))
+            configured = min(configured, max(1000, window - reserved - schema))
+        return configured * 4
 
     # -- sections ---------------------------------------------------------
 
@@ -142,14 +162,24 @@ class ContextBuilder:
             "line; everything before it is your question to the user.\n"
             "- Without that marker your reply is the final answer and the task "
             "completes.\n"
+            "- Propose one action at a time. Wait for its result before "
+            "proposing the next.\n"
             "- Durable facts, preferences, and decisions the user states belong "
             "in memory (the remember tool), not in the hope that chat history "
             "keeps them.\n"
             "- Prefer search_knowledge when a relevant fact may exist but is "
             "not visible in your context.\n"
+            "- Route work to an existing domain with use_domain when the "
+            "current domain is wrong; never create a domain that already "
+            "exists in the domain list.\n"
+            "- create_domain is only for genuinely new, recurring work the user "
+            "asked for; it always needs approval. A message that merely "
+            "mentions a new topic does not justify a new domain.\n"
             "- When an action needs user approval, say exactly what you want "
             "to do and its effect, then wait; never re-propose it with "
-            "different arguments while it is pending."
+            "different arguments while it is pending.\n"
+            "- If a tool result says the action is deferred or denied, do not "
+            "silently repeat it. Explain the state and ask, or stop."
         )
 
     def _state_block(
@@ -165,6 +195,16 @@ class ContextBuilder:
         now = util.iso()
         lines.append(f"Time: {now} (timezone {tz_name})")
         lines.append(f"Active domain: {domain['name'] if domain else 'General'}")
+        domains = self.domains.list_active()
+        if domains:
+            lines.append(
+                "Available domains: "
+                + ", ".join(
+                    f"{item['name']} ({item['id']})"
+                    for item in domains[:12]
+                )
+                + ". Do not create a domain that already appears here."
+            )
         lines.append(f"Task objective: {task['objective']}")
         lines.append(f"Task status: {task['status']}")
         meta = util.loads(task.get("meta") or "{}", {})
@@ -202,11 +242,27 @@ class ContextBuilder:
                 f"needing attention: {trigger.get('reason', '')}"
             )
         if pending_approvals:
-            lines.append("Pending approvals on this task:")
+            lines.append(
+                "Pending approvals (the user must decide each one; a decision "
+                "applies only to the action named):"
+            )
             for approval in pending_approvals:
+                action = (approval.get("meta") or {}).get("action", "tool")
+                if action == "create_domain":
+                    described = (
+                        "create domain "
+                        f"{util.dumps(approval.get('arguments') or {})}"
+                    )
+                else:
+                    described = (
+                        f"{approval['tool']} with "
+                        f"{util.clip(util.dumps(approval['arguments']), 300)}"
+                    )
+                mine = approval.get("task_id") == task["id"]
                 lines.append(
-                    f"- {approval['tool']} with {util.clip(util.dumps(approval['arguments']), 300)}"
-                    f" (approval {approval['id']})"
+                    f"- {described} (approval {approval['id']}"
+                    + (", this task" if mine else ", another task")
+                    + ")"
                 )
         sources.append({"section": "state", "ref": f"task:{task['id']}",
                         "reason": "task and trigger state"})

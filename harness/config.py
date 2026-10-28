@@ -31,11 +31,25 @@ DEFAULTS: dict[str, Any] = {
         "chat_path": "/v1/chat/completions",
         "models_path": "/v1/models",
         "timeout_s": 180.0,
-        "connect_retries": 2,       # retries for connect/5xx/malformed responses
+        "connect_retries": 2,       # retries for connect/5xx
         "retry_backoff_s": 2.0,
         "max_tokens": 2048,
         "temperature": None,
         "enable_thinking": True,
+        # Send chat_template_kwargs explicitly. Qwen3.x templates support
+        # enable_thinking; disable this for templates that reject the kwarg.
+        "thinking_kwargs": True,
+        # The endpoint's real context window. Prompt + max_tokens must fit.
+        "context_window": 32768,
+        # One recovery attempt for an empty/thinking-only reply uses this.
+        "empty_retry_max_tokens": 4096,
+    },
+    "approvals": {
+        # 0 = never expire. A week is long enough to survive a vacation while
+        # keeping abandoned actions from accumulating forever.
+        "expires_after_s": 604800.0,
+        "classifier_max_tokens": 16,
+        "classifier_thinking": False,
     },
     "limits": {
         "max_iterations": 16,        # model turns per run
@@ -45,6 +59,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "context": {
         "total_budget_tokens": 20000,
+        "reserved_output_tokens": 2048,  # headroom for the model's reply
+        "tool_schema_tokens": 1600,      # tool definitions are part of the prompt
         "recent_messages": 24,        # recent visible messages included
         "memory_results": 6,          # retrieved memories per query
         "history_results": 4,         # FTS hits from old messages
@@ -78,12 +94,18 @@ DEFAULTS: dict[str, Any] = {
     },
     "scheduler": {
         "enabled": True,
-        "tick_interval_s": 30.0,
+        "tick_interval_s": 60.0,
+        "max_runs_per_tick": 1,        # bound background model work per tick
+        "max_retries_per_tick": 1,
         "missed_policy": "run_once",   # run_once | skip
         "missed_grace_s": 900.0,       # occurrences older than this coalesce/skip
         "resume_interrupted": True,
         "retry_cooldown_s": 300.0,
+        "retry_backoff_base_s": 300.0,
+        "retry_backoff_max_s": 3600.0,
         "max_task_retries": 3,
+        "retry_permanent": False,      # malformed/protocol failures wait for a human
+        "user_activity_grace_s": 60.0, # don't retry behind an active user
         "approval_notify_s": 3600.0,
         "paused_notify_s": 3600.0,
     },
@@ -128,7 +150,7 @@ ENV_OVERRIDES = {
 # Keys a user may edit through the UI/CLI without a restart hazard.
 EDITABLE_KEYS = {
     "persona", "limits", "context", "domains", "memory", "tools",
-    "scheduler", "consolidation", "timezone",
+    "scheduler", "consolidation", "approvals", "timezone",
 }
 
 
@@ -162,6 +184,63 @@ def _merge(defaults: dict, overlay: dict, path: str = "") -> dict:
         else:  # pragma: no cover - defaults are fully typed
             out[key] = value
     return out
+
+
+def validate_group_update(
+    config: "Config", group: str, value: Any
+) -> Any:
+    """Validate one editable config group without applying it.
+
+    Raises ConfigError for unknown keys, wrong types, or read-only groups.
+    Returns the value that should be stored (a merged mapping for dict groups).
+    """
+    if group not in EDITABLE_KEYS:
+        raise ConfigError(f"group not editable: {group}")
+    if group == "timezone":
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError("timezone must be a non-empty string")
+        return value.strip()
+    if not isinstance(value, dict):
+        raise ConfigError(f"configuration key {group} must be a mapping")
+    current = config.get(group)
+    if not isinstance(current, dict):
+        raise ConfigError(f"configuration key {group} is not a mapping")
+    return _merge(current, value, group)
+
+
+def _legacy_settings_overlay(path: Path) -> dict[str, Any]:
+    """Map the old ``settings.yaml`` onto the current config shape.
+
+    Only unambiguous operational values are imported. The old model name is
+    deliberately ignored: it was a llama-swap alias, not a stable model id.
+    """
+    try:
+        legacy = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(legacy, dict):
+        return {}
+    overlay: dict[str, Any] = {}
+    models = legacy.get("models") or {}
+    interactive = models.get("interactive") or {}
+    background = models.get("background") or {}
+    model: dict[str, Any] = {}
+    endpoint = interactive.get("endpoint") or background.get("endpoint")
+    if isinstance(endpoint, str) and endpoint.strip():
+        model["base_url"] = endpoint.split("/v1/")[0].rstrip("/")
+    max_tokens = background.get("max_tokens") or interactive.get("max_tokens")
+    if isinstance(max_tokens, (int, float)) and int(max_tokens) > 0:
+        model["max_tokens"] = int(max_tokens)
+    if "temperature" in interactive:
+        model["temperature"] = interactive.get("temperature")
+    if "enable_thinking" in interactive:
+        model["enable_thinking"] = bool(interactive.get("enable_thinking"))
+    if model:
+        overlay["model"] = model
+    timezone = legacy.get("timezone")
+    if isinstance(timezone, str) and timezone.strip():
+        overlay["timezone"] = timezone.strip()
+    return overlay
 
 
 def _apply_env(cfg: dict, environ: dict[str, str] | None) -> None:
@@ -222,7 +301,9 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
     editable. Unknown keys raise ConfigError so typos never run silently.
     """
     file = data_dir / "config.yaml"
+    legacy = data_dir / "settings.yaml"
     overlay: dict[str, Any] = {}
+    migrated = False
     if file.exists():
         try:
             loaded = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
@@ -231,6 +312,9 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
         if not isinstance(loaded, dict):
             raise ConfigError(f"{file} must contain a mapping")
         overlay = loaded
+    elif legacy.exists():
+        overlay = _legacy_settings_overlay(legacy)
+        migrated = True
     merged = _merge(DEFAULTS, overlay)
     _apply_env(merged, environ)
     config = Config(merged, file)
@@ -242,6 +326,9 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
             + yaml.safe_dump(merged, sort_keys=False, allow_unicode=True),
             encoding="utf-8",
         )
+        if migrated and legacy.exists():
+            # Keep the old file inspectable but stop treating it as config.
+            legacy.rename(legacy.with_name("settings.yaml.migrated"))
     return config
 
 
