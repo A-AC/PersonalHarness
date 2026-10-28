@@ -9,3 +9,4 @@ experiments/data/
 .env
 coverage.xml
 htmlcov/
+.ruff_cache/

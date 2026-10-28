@@ -5,9 +5,8 @@ __pycache__
 *.pyc
 *.pyo
 data
-tmp_smoke
-prototype
 tests
-eval
 .venv
 venv
+.env
+TASK.md

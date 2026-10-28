@@ -1,22 +1,19 @@
 [project]
 name = "personal-harness"
-version = "1.0.0"
-description = "Personal assistant harness v1"
+version = "2.0.0"
+description = "Personal assistant harness: one model endpoint, one runtime, one durable history"
 requires-python = ">=3.12"
 dependencies = [
-    "httpx==0.28.1",
-    "jinja2==3.1.6",
-    "mcp==1.13.1",
-    "pydantic==2.11.7",
-    "pyyaml==6.0.2",
-    "starlette==0.46.2",
-    "tzdata==2025.2",
-    "uvicorn==0.34.3",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest==8.3.5",
+    "pytest>=8.0",
 ]
 
 [project.scripts]
@@ -34,5 +31,5 @@ testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["."]
 markers = [
-    "live: tests that call a real inference endpoint",
+    "live: tests that call the real model endpoint (skipped by default)",
 ]

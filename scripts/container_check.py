@@ -1,92 +1,90 @@
-#!/usr/bin/env python3
-"""Build and smoke-check the container.
+"""Container smoke check: build the image, start the stack, verify health,
+auth, and the API, then tear it down. Needs Docker and a local Python.
 
-Usage:
-    python scripts/container_check.py
-    python scripts/container_check.py --keep
-
-The check waits for /health, verifies the UI rejects a missing token, and
-verifies a request carrying HARNESS_UI_TOKEN is accepted. It never calls the
-inference backend.
+    HARNESS_TOKEN=check-token HARNESS_PORT=18080 python scripts/container_check.py
 """
 
 from __future__ import annotations
 
-import argparse
+import json
 import os
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
 
-TOKEN = os.environ.get("HARNESS_UI_TOKEN", "check-token")
-PORT = os.environ.get("HARNESS_PORT", "8080")
+TOKEN = os.environ.get("HARNESS_TOKEN", "check-token")
+PORT = os.environ.get("HARNESS_PORT", "18080")
 BASE = f"http://127.0.0.1:{PORT}"
 
 
-def run(*args: str) -> None:
-    print("+", " ".join(args))
-    subprocess.run(args, check=True)
+def sh(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args, capture_output=True,
+        encoding="utf-8", errors="replace",
+    )
 
 
-def request(path: str, *, token: str | None = None) -> int:
-    req = urllib.request.Request(BASE + path)
-    if token is not None:
-        req.add_header("Authorization", f"Bearer {token}")
+def check(name: str, ok: bool, detail: str = "") -> None:
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {name}" + (f" - {detail}" if detail and not ok else ""))
+    if not ok:
+        raise SystemExit(f"container check failed at: {name}")
+
+
+def http(method: str, path: str, token: str | None = None):
+    request = urllib.request.Request(BASE + path, method=method)
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=5) as response:
-            return response.status
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.read().decode()
     except urllib.error.HTTPError as exc:
-        return exc.code
+        return exc.code, exc.read().decode(errors="replace")
 
 
-def wait_for_health(timeout: float) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            if request("/health") == 200:
-                return
-        except OSError:
-            pass
-        time.sleep(2)
-    raise RuntimeError(f"container did not become healthy within {timeout:.0f}s")
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--keep", action="store_true", help="leave the container running")
-    parser.add_argument("--timeout", type=float, default=90.0)
-    args = parser.parse_args()
-
-    env = dict(os.environ)
-    env["HARNESS_UI_TOKEN"] = TOKEN
-    env.setdefault("HARNESS_PORT", PORT)
-
-    def compose(*command: str) -> None:
-        subprocess.run(["docker", "compose", *command], check=True, env=env)
-
-    started = False
+def main() -> None:
+    env = dict(os.environ, HARNESS_TOKEN=TOKEN, HARNESS_PORT=PORT)
+    for command in (["docker", "compose", "down", "-v"], ["docker", "compose", "build"]):
+        result = subprocess.run(
+            command, capture_output=True, encoding="utf-8", errors="replace",
+            env=env,
+        )
+        if result.returncode != 0:
+            raise SystemExit(
+                f"'{' '.join(command)}' failed:\n{result.stdout}\n{result.stderr}"
+            )
+    subprocess.run(["docker", "compose", "up", "-d"], capture_output=True,
+                   encoding="utf-8", errors="replace", text=False, env=env)
     try:
-        compose("build")
-        compose("up", "-d")
-        started = True
-        wait_for_health(args.timeout)
-        assert request("/health") == 200, "health endpoint failed"
-        assert request("/") == 401, "UI accepted a request without a token"
-        assert request("/", token=TOKEN) == 200, "UI rejected the configured token"
-        print("container check passed")
-        return 0
-    except (subprocess.CalledProcessError, RuntimeError, AssertionError) as exc:
-        print(f"container check failed: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        if started and not args.keep:
+        healthy = False
+        for _ in range(30):
             try:
-                compose("down")
-            except subprocess.CalledProcessError as exc:
-                print(f"warning: docker compose down failed: {exc}", file=sys.stderr)
+                status, body = http("GET", "/health")
+                if status == 200:
+                    healthy = True
+                    break
+            except (urllib.error.URLError, OSError):
+                pass
+            time.sleep(2)
+        check("health endpoint", healthy)
+        status, _ = http("GET", "/api/state")
+        check("unauthenticated API rejected", status == 401)
+        status, body = http("GET", "/api/state", token=TOKEN)
+        check("authenticated API accepted", status == 200)
+        state = json.loads(body)
+        check("state shape", "messages" in state and "schedules" in state)
+        status, body = http("GET", "/api/endpoint-probe", token=TOKEN)
+        probe = json.loads(body)
+        print(f"[info] model endpoint probe: reachable={probe.get('reachable')} "
+              f"model_listed={probe.get('model_listed')} "
+              f"chat_ok={probe.get('chat_ok')} (external service; "
+              "failures here are environment, not the container)")
+    finally:
+        subprocess.run(["docker", "compose", "down", "-v"],
+                       capture_output=True, text=True, env=env)
+    print("container check complete")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

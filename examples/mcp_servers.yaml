@@ -1,16 +1,14 @@
 # Optional stdio MCP servers.
 #
-# Set capabilities.mcp_servers_file to an absolute path containing this file
-# (or point it at your own copy). Manifests are loaded at harness start; a
+# Point tools.mcp_servers_file in data/config.yaml at a copy of this file
+# (absolute path recommended). Tools are discovered at harness start; a
 # server that fails to start is shown as unavailable and never blocks turns.
 #
-# Permission values: read, write, destructive. The harness still applies its
-# global policy and the per-domain enablement list before a call is dispatched.
+# autoapprove: true  -> the server's tools run without per-call approval
+# (default)          -> every call needs an explicit approval
 servers:
   - name: example_echo
     command: python
     args:
       - examples/mcp/echo_server.py
-    default_permission: read
-    permissions:
-      echo: read
+    autoapprove: true

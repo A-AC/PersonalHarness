@@ -1,17 +1,16 @@
 services:
   harness:
     build: .
-    image: personal-harness:1.0.0
+    image: personal-harness:2.0.0
     ports:
       - "${HARNESS_PORT:-8080}:8080"
     environment:
       HARNESS_DATA_DIR: /data
-      HARNESS_BIND_HOST: 0.0.0.0
-      HARNESS_BIND_PORT: "8080"
-      HARNESS_UI_TOKEN: "${HARNESS_UI_TOKEN:-change-this-token}"
-      HARNESS_INTERACTIVE_ENDPOINT: "${HARNESS_INTERACTIVE_ENDPOINT:-http://host.docker.internal:8181/v1/chat/completions}"
-      HARNESS_BACKGROUND_ENDPOINT: "${HARNESS_BACKGROUND_ENDPOINT:-http://host.docker.internal:8181/v1/chat/completions}"
-      HARNESS_INTERACTIVE_MODEL: "${HARNESS_INTERACTIVE_MODEL:-local-main}"
+      HARNESS_HOST: 0.0.0.0
+      HARNESS_PORT: "8080"
+      HARNESS_TOKEN: "${HARNESS_TOKEN:-change-this-token}"
+      HARNESS_MODEL_BASE_URL: "${HARNESS_MODEL_BASE_URL:-http://192.168.50.40:8181}"
+      HARNESS_MODEL_NAME: "${HARNESS_MODEL_NAME:-qwen3.5-9b}"
     volumes:
       - harness-data:/data
     restart: unless-stopped

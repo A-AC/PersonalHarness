@@ -1,420 +1,591 @@
+"""Composition root: build, wire, recover, lock, back up, shut down.
+
+Everything is constructed here and nowhere else. ``App`` is the single
+object the server, CLI-client-facing API, and tests drive. Startup recovery
+converts crash debris (running runs, in-flight executions, orphan approvals)
+into explicit, inspectable state; the heartbeat then resumes what should
+resume. One process may write a data directory: ``serve`` mode holds a
+process lock (pid + heartbeat timestamp) and refuses to start beside a live
+writer.
+"""
+
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+import shutil
+import threading
+import zipfile
 from pathlib import Path
+from typing import Any
 
-from harness.capabilities.executor import FileCapabilityExecutor
-from harness.consolidation.service import FileConsolidationService
-from harness.context.builder import DefaultContextBuilder
-from harness.contracts.capabilities import ExecuteRequest
-from harness.contracts.control import ControlPlane
-from harness.contracts.decisions import DecisionResolver, DecisionStore
-from harness.contracts.domains import StructureDraft
-from harness.contracts.settings import SettingsService
-from harness.control.decisions import FileDecisionStore
-from harness.control.plane import DefaultControlPlane
-from harness.control.resolver import DefaultDecisionResolver
-from harness.domains.inference import DefaultDomainInference
-from harness.domains.inspect import inspect_domain as _inspect_domain
-from harness.domains.registry import FileDomainRegistry
-from harness.events.log import FileEventLog
-from harness.history.service import FileHistoryService
-from harness.learning.journal import FileLearningJournal
-from harness.learning.pipeline import EvidenceLearningPipeline
-from harness.learning.review import LearningReview
-from harness.learning.skills import FileSkillLibrary
-from harness.learning.strategy import check_persona_draft
-from harness.maintenance.reset import FileResetService
-from harness.memory.capture import ExecutionOutcomeCapture
-from harness.memory.classifier import KeywordMemoryClassifier
-from harness.memory.file_manager import FileMemoryManager
-from harness.memory.inmemory import InMemoryMemoryManager
-from harness.memory.semantic import LexicalSemanticScorer
-from harness.model.openai_http import OpenAICompatAdapter
-from harness.model.scripted import ScriptedAdapter
-from harness.orchestrator.loop import DefaultInteractionLoop
-from harness.profile.provider import FileSelfProfile
-from harness.scheduler.service import WorkScheduler
-from harness.session.manager import FileSessionManager
-from harness.session.turns import DefaultTurnService
-from harness.settings.service import FileSettingsService
-from harness.sources import CompositeSourceResolver
-from harness.tasks.manager import FileTaskManager
-from harness.text import match_by_name, name_overlap, normalize_name
-from harness.traces.store import FileTraceStore
+from . import util
+from .approvals import Approvals
+from .config import Config, load_config
+from .consolidation import Consolidation
+from .context import ContextBuilder
+from .db import Database, rows_to_dicts
+from .logging import get_logger, setup_logging
+from .memory import MemoryManager
+from .model import Model, ModelClient, ScriptedModel
+from .runtime import AgentRuntime
+from .scheduler import Scheduler
+from .store import Domains, Events, Messages, Tasks
+from .tools import ToolContext, ToolRegistry, McpTools
+
+log = get_logger("app")
+
+LOCK_REFRESH_S = 5.0
+LOCK_STALE_S = 25.0
 
 
-@dataclass
-class Harness:
-    data_dir: Path
-    settings: FileSettingsService
-    events: FileEventLog
-    traces: FileTraceStore
-    sessions: FileSessionManager
-    domains: FileDomainRegistry
-    tasks: FileTaskManager
-    decisions: DecisionStore
-    decision_resolver: DecisionResolver
-    control: ControlPlane
-    profile: FileSelfProfile
-    capabilities: FileCapabilityExecutor
-    memory: FileMemoryManager | InMemoryMemoryManager
-    history: FileHistoryService
-    context: DefaultContextBuilder
-    model: object
-    consolidation: FileConsolidationService
-    loop: DefaultInteractionLoop
-    chat: DefaultTurnService
-    scheduler: WorkScheduler
-    reset: FileResetService
-    learning_journal: FileLearningJournal
-    skill_library: FileSkillLibrary
-    learning_pipeline: EvidenceLearningPipeline
-    learning_review: LearningReview
+def _pid_alive(pid: int) -> bool:
+    try:
+        if os.name == "nt":
+            import ctypes
 
-    def inspect_domain(self, domain_id: str, *, event_limit: int = 200) -> dict:
-        return _inspect_domain(self, domain_id, event_limit=event_limit)
-
-    def on_start(self) -> None:
-        self.tasks.on_process_start()
-        self.control.on_start()
-        # Deterministic recovery runs even when the heartbeat is disabled:
-        # interrupted and unknown-outcome work must never look runnable.
-        self.scheduler.reconcile()
-
-
-def build_settings_service(
-    path: str | Path, *, env: dict[str, str] | None = None
-) -> FileSettingsService:
-    """Create the persisted settings service used by a harness or probe."""
-
-    return FileSettingsService(Path(path), env=env)
-
-
-def build_scripted_model() -> ScriptedAdapter:
-    """Create an empty scripted adapter for deterministic evaluation."""
-
-    return ScriptedAdapter([])
-
-
-def build_configured_model(settings: SettingsService) -> OpenAICompatAdapter:
-    """Create the configured live model adapter without substituting a fake."""
-
-    return OpenAICompatAdapter(settings)
-
-
-def is_scripted_model(model: object) -> bool:
-    return isinstance(model, ScriptedAdapter)
-
-
-def build_harness(
-    data_dir: str | Path,
-    *,
-    env: dict[str, str] | None = None,
-    model: object | None = None,
-) -> Harness:
-    root = Path(data_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    environ = env if env is not None else dict(os.environ)
-    settings = FileSettingsService(root / "settings.yaml", env=environ)
-    events = FileEventLog(root / "events", settings)
-    settings.attach_events(events)
-    traces = FileTraceStore(root / "traces", settings)
-    sessions = FileSessionManager(root / "sessions", settings, events)
-    domains = FileDomainRegistry(root / "registry", settings, events)
-    tasks = FileTaskManager(root / "tasks", settings, events)
-    decisions = FileDecisionStore(root / "decisions", settings, events)
-    profile = FileSelfProfile(root / "persona", settings, events, approve_guard=check_persona_draft)
-    # Approved learned skills install into <data>/skills/active, which the
-    # executor discovers by default when no external skills dir is set.
-    skill_library = FileSkillLibrary(
-        root / "skills",
-        settings,
-        events,
-        on_change=None,  # refreshed below once the executor exists
-    )
-    configured_skills_dir = str(settings.get("capabilities.skills_dir") or "")
-    skills_dir = Path(configured_skills_dir) if configured_skills_dir else skill_library.active_dir
-    capabilities = FileCapabilityExecutor(root / "capabilities", settings, events, domains, skills_dir=skills_dir)
-    skill_library.attach_on_change(capabilities.reload_skills)
-    decision_resolver = DefaultDecisionResolver()
-    control = DefaultControlPlane(
-        settings=settings,
-        sessions=sessions,
-        tasks=tasks,
-        domains=domains,
-        capabilities=capabilities,
-        decisions=decisions,
-        resolver=decision_resolver,
-        events=events,
-    )
-    domains.attach_suggestion_listener(decisions.sync_suggestion)
-
-    def same_name(left: str, right: str) -> bool:
-        if normalize_name(left) == normalize_name(right):
-            return True
-        threshold = float(settings.get("domain.match_overlap"))
-        return name_overlap(left, right) >= threshold
-
-    def pending_suggestion(name: str):
-        for item in domains.list_suggestions():
-            if (
-                item.status == "pending"
-                and same_name(item.draft.name, name)
-            ):
-                return item
-        return None
-
-    def available_domains() -> list[str]:
-        return [item.name for item in domains.list_domains()]
-
-    def resolve_domain_failure(name: str, candidates: list[str]) -> dict:
-        if candidates:
-            return {
-                "status": "failed",
-                "data": {"candidates": candidates},
-                "message": f"ambiguous domain '{name}'; candidates: {', '.join(candidates)}",
-                "error_category": "ambiguous",
-            }
-        available = available_domains()
-        return {
-            "status": "failed",
-            "data": {"available": available},
-            "message": f"no existing domain named '{name}'; available: {', '.join(available)}",
-            "error_category": "not_found",
-        }
-
-    def structure_hook(operation: str, arguments: dict, req: ExecuteRequest) -> dict:
-        if operation == "enter_domain":
-            name = str(arguments.get("name") or "").strip()
-            domain, candidates = match_by_name(domains.list_domains(), name)
-            if domain is None:
-                return resolve_domain_failure(name, candidates)
-            sessions.set_active_domain(domain.id)
-            if req.task_id:
-                try:
-                    tasks.assign_domain(req.task_id, domain.id)
-                except KeyError:
-                    # The task may already be gone; the session switch still
-                    # applies to the next turn.
-                    pass
-            return {
-                "status": "succeeded",
-                "data": {"domain_id": domain.id, "name": domain.name},
-                "message": f"entered domain '{domain.name}'",
-            }
-        if operation == "leave_domain":
-            sessions.set_active_domain(None)
-            if req.task_id:
-                try:
-                    tasks.assign_domain(req.task_id, None)
-                except KeyError:
-                    pass
-            return {"status": "succeeded", "data": {}, "message": "left the active domain"}
-        if operation == "suggest_domain":
-            name = str(arguments.get("name") or "").strip()
-            existing, _ = match_by_name(domains.list_domains(), name)
-            if existing is not None:
-                return {
-                    "status": "failed",
-                    "data": {"existing_domain": {"id": existing.id, "name": existing.name}},
-                    "message": f"domain '{existing.name}' already exists",
-                    "error_category": "duplicate",
-                }
-            if domains.suggestion_on_cooldown(name):
-                return {
-                    "status": "failed",
-                    "data": {"cooldown": True},
-                    "message": f"domain '{name}' is on suggestion cooldown",
-                    "error_category": "cooldown",
-                }
-            pending = pending_suggestion(name)
-            if pending is not None:
-                return {
-                    "status": "failed",
-                    "data": {"duplicate": True, "suggestion_id": pending.id},
-                    "message": f"a pending suggestion for '{pending.draft.name}' already exists",
-                    "error_category": "duplicate",
-                }
-            draft = StructureDraft(
-                name=name,
-                reason=str(arguments.get("reason") or "assistant suggestion"),
-                evidence="model proposal",
-            )
-            suggestion = domains.record_suggestion(draft)
-            return {"status": "succeeded", "data": {"suggestion_id": suggestion.id}, "message": "suggestion recorded"}
-        return {
-            "status": "failed",
-            "data": {},
-            "message": "structure creation requires explicit user confirmation",
-            "error_category": "unconfirmed",
-        }
-
-    capabilities.attach_structure(structure_hook)
-    sources = CompositeSourceResolver(sessions, events, capabilities, settings)
-
-    def scope_exists(scope: str) -> bool:
-        if scope in {"global", "self"}:
-            return True
-        if scope.startswith("domain:"):
-            try:
-                domains.get_domain(scope.split(":", 1)[1])
+            handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
                 return True
-            except KeyError:
-                return False
+            return False
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
         return False
 
-    impl = str(settings.get("implementations.memory"))
-    classifier_name = str(settings.get("implementations.memory_classifier"))
-    classifier = KeywordMemoryClassifier(settings)
-    if classifier_name != "keyword":
-        classifier = KeywordMemoryClassifier(settings)
-    retriever = str(settings.get("implementations.retriever"))
-    semantic = LexicalSemanticScorer(settings) if retriever == "hybrid" else None
-    if impl == "inmemory":
-        memory: FileMemoryManager | InMemoryMemoryManager = InMemoryMemoryManager(
-            settings, events, sources, scope_exists, classifier, semantic
+
+class ProcessLock:
+    """Best-effort single-writer guard for serve mode."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def acquire(self) -> None:
+        info = {"pid": os.getpid(), "ts": util.iso()}
+        if self.path.exists():
+            try:
+                old = json.loads(self.path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                old = None
+            if old and isinstance(old, dict):
+                age = (util.now_utc() - util.parse_iso(old.get("ts", ""))).total_seconds()
+                if age < LOCK_STALE_S and _pid_alive(int(old.get("pid", 0))):
+                    raise RuntimeError(
+                        f"another harness process (pid {old.get('pid')}) is "
+                        "writing this data directory; refusing to start"
+                    )
+        self._write(info)
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._refresh_loop, name="process-lock", daemon=True
         )
-    else:
-        memory = FileMemoryManager(
-            root / "memory", settings, events, sources, scope_exists, classifier, semantic
+        self._thread.start()
+
+    def _write(self, info: dict[str, Any]) -> None:
+        self.path.write_text(json.dumps(info), encoding="utf-8")
+
+    def _refresh_loop(self) -> None:
+        while not self._stop.wait(LOCK_REFRESH_S):
+            try:
+                self._write({"pid": os.getpid(), "ts": util.iso()})
+            except OSError:
+                pass
+
+    def release(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+            self._thread = None
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+
+
+class App:
+    def __init__(
+        self,
+        data_dir: Path,
+        config: Config | None = None,
+        model: Model | None = None,
+    ):
+        self.data_dir = data_dir
+        data_dir.mkdir(parents=True, exist_ok=True)
+        self.config = config or load_config(data_dir)
+        setup_logging(
+            data_dir,
+            level=str(self.config.get("logging.level", "info")),
         )
-    capabilities.attach_memory(memory)
-    if model is None:
-        adapter_name = str(settings.get("implementations.model"))
-        if adapter_name == "scripted":
-            model = ScriptedAdapter()
+        self.db = Database(data_dir / "harness.db")
+        self.artifacts_dir = data_dir / "artifacts"
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        self.events = Events(self.db)
+        self.messages = Messages(self.db)
+        self.domains = Domains(self.db, self.events)
+        self.tasks = Tasks(self.db, self.events)
+        self.memory = MemoryManager(
+            self.db, self.events, self.artifacts_dir, self.config
+        )
+        self.model = model or ModelClient(self.config)
+        self.tools = ToolRegistry(
+            self.db, self.events, self.config, self.artifacts_dir
+        )
+        self.mcp = McpTools(self.tools, self.config, self.events)
+        self.mcp.load()
+        self.approvals = Approvals(self.db, self.events, self.config, self.model)
+        self.context = ContextBuilder(
+            self.config, self.domains, self.tasks, self.messages,
+            self.memory, self.artifacts_dir,
+        )
+        self.runtime = AgentRuntime(self)
+        self.scheduler = Scheduler(self)
+        self.consolidation = Consolidation(self)
+        self._lock: ProcessLock | None = None
+        self.domains.ensure_defaults()
+
+    # ------------------------------------------------------------------
+    # Startup / shutdown
+    # ------------------------------------------------------------------
+
+    def startup(self, *, serve: bool = False) -> None:
+        """Recover crash debris, optionally take the writer lock."""
+        if serve:
+            self._lock = ProcessLock(self.data_dir / "process.lock")
+            self._lock.acquire()
+        self.recover()
+        self.events.record("system.start", data={"serve": serve})
+
+    def shutdown(self) -> None:
+        """Graceful shutdown: stop ticking, finish current work, persist."""
+        try:
+            self.scheduler.stop()
+        except Exception:
+            pass
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
+        try:
+            self.events.record("system.shutdown")
+            self.db.close()
+        except Exception:
+            pass  # already closed (e.g. after a restore)
+
+    def recover(self) -> dict[str, Any]:
+        """Convert crash debris into explicit state. Deterministic, no model.
+
+        - in-flight tool executions become ``unknown`` and are appended to the
+          run transcript, so a resumed model cannot mistake them for success;
+        - approvals are reconciled: approved-but-unclaimed approvals stay for
+          the heartbeat, approved-and-finished ones are consumed, and approvals
+          attached to terminal runs are cancelled instead of orphaned;
+        - a run with a live approval waits for a decision; other running runs
+          are ``interrupted`` and their task paused.
+        """
+        report = {"unknown_executions": 0, "interrupted_runs": [],
+                  "recovered_approvals": 0, "cancelled_approvals": 0}
+
+        # 1. Tool attempts that were mid-flight when the process died.
+        for row in rows_to_dicts(self.db.query(
+            "SELECT * FROM tool_executions WHERE status='in_flight'"
+        )):
+            error = "interrupted: outcome unknown (crash or restart)"
+            self.db.execute(
+                "UPDATE tool_executions SET status='unknown', ended_at=?,"
+                " error=? WHERE id=?",
+                (util.iso(), error, row["id"]),
+            )
+            self._append_execution_observation(row, "unknown", error)
+            if row.get("approval_id"):
+                self.approvals.mark_executed(row["approval_id"])
+            report["unknown_executions"] += 1
+            self._interrupt_execution_run(row, report)
+
+        # 1b. A final execution can be committed before its tool result is
+        # appended to the transcript (crash between record and append). Put
+        # the real result back in front of the model so a resume cannot repeat
+        # an action whose row already says it happened.
+        for row in rows_to_dicts(self.db.query(
+            "SELECT e.* FROM tool_executions e JOIN runs r ON r.id=e.run_id"
+            " WHERE r.status IN ('running','waiting_approval','interrupted')"
+            " AND e.status IN ('succeeded','failed','denied','unknown')"
+            " AND e.tool_call_id IS NOT NULL"
+        )):
+            self._append_execution_observation(
+                row, row["status"], row.get("error")
+            )
+
+        # 1c. A rejection/cancellation/expiry may have committed just before
+        # the process died, before the runtime could deny the awaiting row.
+        # Make that outcome explicit before the run can resume.
+        for approval in rows_to_dicts(self.db.query(
+            "SELECT * FROM approvals WHERE status IN"
+            " ('rejected','cancelled','expired')"
+        )):
+            self._deny_awaiting_execution(
+                approval["id"], f"approval {approval['status']}"
+            )
+
+        # 2. Approved approvals whose execution already finished, or whose
+        # execution record vanished. Awaiting executions are left for the
+        # heartbeat to claim and run.
+        for approval in rows_to_dicts(self.db.query(
+            "SELECT * FROM approvals WHERE status='approved'"
+        )):
+            execution = rows_to_dicts(self.db.query(
+                "SELECT * FROM tool_executions WHERE approval_id=?"
+                " ORDER BY started_at DESC LIMIT 1", (approval["id"],)
+            ))
+            row = execution[0] if execution else None
+            if row is None:
+                self.approvals.cancel(
+                    approval["id"],
+                    reason="approved without a matching execution record",
+                )
+                self._append_missing_approval_observation(
+                    approval, "no execution record"
+                )
+                report["cancelled_approvals"] += 1
+                continue
+            if row["status"] == "awaiting_approval":
+                run = self.db.query_one(
+                    "SELECT status FROM runs WHERE id=?",
+                    (approval["run_id"],),
+                )
+                if run is None or run["status"] in (
+                    "completed", "failed", "limit_reached", "cancelled",
+                ):
+                    reason = (
+                        "run no longer exists" if run is None
+                        else f"run ended as {run['status']}"
+                    )
+                    self.approvals.cancel(approval["id"], reason=reason)
+                    self._deny_awaiting_execution(approval["id"], reason)
+                    report["cancelled_approvals"] += 1
+                continue  # heartbeat will claim and execute it
+            self.approvals.mark_executed(approval["id"])
+            self._append_execution_observation(
+                row, row["status"], row.get("error")
+            )
+            run = self.db.query_one(
+                "SELECT status FROM runs WHERE id=?", (approval["run_id"],)
+            )
+            if run and run["status"] in ("running", "waiting_approval"):
+                self._mark_interrupted(
+                    approval["run_id"], approval["task_id"],
+                    "approval execution finished before crash", report,
+                )
+
+        # 3. Pending approvals whose run already ended can never execute.
+        for approval in rows_to_dicts(self.db.query(
+            "SELECT * FROM approvals WHERE status='pending'"
+        )):
+            execution = self.db.query_one(
+                "SELECT id FROM tool_executions WHERE approval_id=? LIMIT 1",
+                (approval["id"],),
+            )
+            if execution is None:
+                # The approval row committed but the matching execution row
+                # did not (crash between the two inserts). There is nothing to
+                # execute later, so cancel it explicitly.
+                reason = "pending approval has no execution record"
+                self.approvals.cancel(approval["id"], reason=reason)
+                self._append_missing_approval_observation(approval, reason)
+                report["cancelled_approvals"] += 1
+                continue
+            run = self.db.query_one(
+                "SELECT status FROM runs WHERE id=?", (approval["run_id"],)
+            )
+            if run is None or run["status"] in (
+                "completed", "failed", "limit_reached", "cancelled",
+            ):
+                reason = (
+                    "run no longer exists" if run is None
+                    else f"run ended as {run['status']}"
+                )
+                self.approvals.cancel(approval["id"], reason=reason)
+                self._deny_awaiting_execution(approval["id"], reason)
+                report["cancelled_approvals"] += 1
+
+        # 4. Runs left in ``running``.
+        for run in rows_to_dicts(self.db.query(
+            "SELECT * FROM runs WHERE status='running'"
+        )):
+            live = self.approvals.live_for_run(run["id"])
+            if live is not None:
+                self.db.execute(
+                    "UPDATE runs SET status='waiting_approval' WHERE id=?",
+                    (run["id"],),
+                )
+                self.tasks.set_status(
+                    run["task_id"], "waiting_approval",
+                    reason="recovered: awaiting approval",
+                )
+                report["recovered_approvals"] += 1
+                continue
+            self._mark_interrupted(
+                run["id"], run["task_id"], "interrupted by restart", report
+            )
+
+        # 5. A run waiting on an approval that no longer exists is stuck.
+        for run in rows_to_dicts(self.db.query(
+            "SELECT * FROM runs WHERE status='waiting_approval'"
+        )):
+            if self.approvals.live_for_run(run["id"]) is not None:
+                continue
+            self._mark_interrupted(
+                run["id"], run["task_id"],
+                "approval disappeared before execution", report,
+            )
+
+        # 5b. A run parked on a user question can still have a live approval
+        # (older state or a hand-written row). Move it to the approval state so
+        # deciding the action is not permanently stale.
+        for run in rows_to_dicts(self.db.query(
+            "SELECT * FROM runs WHERE status='waiting_user'"
+        )):
+            live = self.approvals.live_for_run(run["id"])
+            if live is None:
+                continue
+            self.db.execute(
+                "UPDATE runs SET status='waiting_approval', decision=NULL,"
+                " ended_at=NULL WHERE id=?",
+                (run["id"],),
+            )
+            self.tasks.set_status(
+                run["task_id"], "waiting_approval",
+                reason="recovered: awaiting approval",
+            )
+            report["recovered_approvals"] += 1
+
+        # 6. An interrupted run with a live approval can still be decided.
+        for run in rows_to_dicts(self.db.query(
+            "SELECT * FROM runs WHERE status='interrupted'"
+        )):
+            live = self.approvals.live_for_run(run["id"])
+            if live is None:
+                continue
+            self.db.execute(
+                "UPDATE runs SET status='waiting_approval', decision=NULL,"
+                " ended_at=NULL WHERE id=?",
+                (run["id"],),
+            )
+            self.tasks.set_status(
+                run["task_id"], "waiting_approval",
+                reason="recovered: awaiting approval",
+            )
+            report["recovered_approvals"] += 1
+
+        if any(report.values()):
+            self.events.record("recovery.run", data=report)
+        return report
+
+    def _mark_interrupted(
+        self, run_id: str, task_id: str, reason: str,
+        report: dict[str, Any],
+    ) -> None:
+        self.db.execute(
+            "UPDATE runs SET status='interrupted', decision=?, ended_at=?"
+            " WHERE id=?",
+            (reason, util.iso(), run_id),
+        )
+        self.tasks.set_status(task_id, "paused", reason="interrupted")
+        self.events.record(
+            "recovery.interrupted_run", level="warn",
+            run_id=run_id, task_id=task_id, data={"reason": reason},
+        )
+        if run_id not in report["interrupted_runs"]:
+            report["interrupted_runs"].append(run_id)
+
+    def _interrupt_execution_run(
+        self, execution: dict[str, Any], report: dict[str, Any]
+    ) -> None:
+        run = self.db.query_one(
+            "SELECT status FROM runs WHERE id=?", (execution["run_id"],)
+        )
+        if run and run["status"] in ("running", "waiting_approval"):
+            self._mark_interrupted(
+                execution["run_id"], execution["task_id"],
+                "interrupted during tool execution", report,
+            )
+
+    def _append_execution_observation(
+        self, execution: dict[str, Any], status: str,
+        error: str | None = None,
+    ) -> None:
+        """Put an explicit tool outcome into the run transcript.
+
+        Recovery runs before any model call, so the next resume sees the
+        unknown/finished result instead of repeating an irreversible action.
+        """
+        row = self.db.query_one(
+            "SELECT transcript FROM runs WHERE id=?", (execution["run_id"],)
+        )
+        if row is None:
+            return
+        transcript = util.loads(row["transcript"] or "[]", [])
+        call_id = execution.get("tool_call_id")
+        if call_id and any(
+            message.get("tool_call_id") == call_id for message in transcript
+        ):
+            return
+        if status == "unknown":
+            body: Any = {
+                "status": "unknown",
+                "tool": execution.get("tool"),
+                "error": error or "outcome unknown",
+                "note": "The action may or may not have happened. Check "
+                        "before repeating it.",
+            }
+        elif status == "succeeded":
+            body = {
+                "status": "succeeded",
+                "result": util.loads(execution.get("result") or "null", None),
+            }
         else:
-            model = OpenAICompatAdapter(settings)
-    inference = DefaultDomainInference(settings, domains, tasks, memory, sessions)
-    history = FileHistoryService(root / "history", settings, sessions, model, events)
-    context = DefaultContextBuilder(
-        settings,
-        memory,
-        profile,
-        domains,
-        capabilities,
-        sessions,
-        history,
-        decisions=decisions,
-        inference=inference,
-    )
-    outcomes = ExecutionOutcomeCapture(settings=settings, events=events, memory=memory)
-    loop = DefaultInteractionLoop(
-        settings=settings,
-        model=model,
-        sessions=sessions,
-        tasks=tasks,
-        domains=domains,
-        context=context,
-        capabilities=capabilities,
-        traces=traces,
-        events=events,
-        history=history,
-        outcomes=outcomes,
-        control=control,
-        inference=inference,
-    )
-    consolidation = FileConsolidationService(
-        root / "consolidation",
-        settings,
-        model,
-        memory,
-        sessions,
-        events,
-        profile,
-        domains,
-        persona_guard=check_persona_draft,
-    )
-    # Learning pipeline: journal first (it is the traceability sink), then
-    # the pipeline that owns memory/procedure/strategy candidates, then the
-    # deterministic review the scheduler can run.
-    learning_journal = FileLearningJournal(root / "learning" / "journal", settings, events)
-    learning_pipeline = EvidenceLearningPipeline(
-        settings=settings,
-        events=events,
-        memory=memory,
-        skills=skill_library,
-        profile=profile,
-        journal=learning_journal,
-        sources=sources,
-    )
-    capabilities.attach_memory_observer(learning_pipeline.note_explicit_write)
-    learning_review = LearningReview(
-        settings=settings,
-        events=events,
-        tasks=tasks,
-        capabilities=capabilities,
-        memory=memory,
-        pipeline=learning_pipeline,
-        skills=skill_library,
-    )
-    chat = DefaultTurnService(
-        loop=loop,
-        traces=traces,
-        memory=memory,
-        settings=settings,
-    )
-    scheduler = WorkScheduler(
-        settings=settings,
-        tasks=tasks,
-        decisions=decisions,
-        capabilities=capabilities,
-        events=events,
-        consolidation=consolidation,
-        runner=lambda limit: chat.run_ready(limit=limit),
-        learning_review=learning_review,
-    )
+            body = {
+                "status": status,
+                "error": error or execution.get("error") or status,
+            }
+        has_call = False
+        if call_id:
+            for message in transcript:
+                for call in message.get("tool_calls") or []:
+                    if call.get("id") == call_id:
+                        has_call = True
+                        break
+        text = util.clip(util.dumps(body), int(
+            self.config.get("limits.max_tool_result_chars", 6000)
+        ))
+        if call_id and has_call:
+            transcript.append({
+                "role": "tool", "tool_call_id": call_id, "content": text,
+            })
+        else:
+            transcript.append({
+                "role": "system",
+                "content": f"[recovery] {execution.get('tool')} {status}: {text}",
+            })
+        self.db.execute(
+            "UPDATE runs SET transcript=? WHERE id=?",
+            (util.dumps(transcript), execution["run_id"]),
+        )
 
-    def after_reset(scope: str) -> None:
-        # A conversations wipe removes the attempts/interactions that pending
-        # skill candidates cite as evidence, so those unapproved candidates
-        # must not survive it; approved skills keep their self-contained text.
-        if scope == "conversations":
-            skill_library.drop_candidates()
-        capabilities.reload_skills()
+    def _append_missing_approval_observation(
+        self, approval: dict[str, Any], reason: str
+    ) -> None:
+        self._append_execution_observation(
+            {
+                "run_id": approval["run_id"],
+                "task_id": approval["task_id"],
+                "tool": approval["tool"],
+                "tool_call_id": approval.get("tool_call_id"),
+                "status": "denied",
+                "error": reason,
+            },
+            "denied", reason,
+        )
 
-    reset = FileResetService(
-        root,
-        settings=settings,
-        sessions=sessions,
-        profile=profile,
-        domains=domains,
-        memory=memory,
-        events=events,
-        # The scheduler is quiesced first: a tick holds this gate for its
-        # whole duration (its runner also takes the turn lock), so a reset
-        # can never interleave with background work.
-        gates=[scheduler.exclusive, chat.exclusive, history.exclusive, consolidation.exclusive],
-        on_reset=after_reset,
-    )
-    harness = Harness(
-        data_dir=root,
-        settings=settings,
-        events=events,
-        traces=traces,
-        sessions=sessions,
-        domains=domains,
-        tasks=tasks,
-        decisions=decisions,
-        decision_resolver=decision_resolver,
-        control=control,
-        profile=profile,
-        capabilities=capabilities,
-        memory=memory,
-        history=history,
-        context=context,
-        model=model,
-        consolidation=consolidation,
-        loop=loop,
-        chat=chat,
-        scheduler=scheduler,
-        reset=reset,
-        learning_journal=learning_journal,
-        skill_library=skill_library,
-        learning_pipeline=learning_pipeline,
-        learning_review=learning_review,
-    )
-    harness.on_start()
-    return harness
+    def _deny_awaiting_execution(
+        self, approval_id: str, reason: str
+    ) -> None:
+        row = self.db.query_one(
+            "SELECT * FROM tool_executions WHERE approval_id=? AND"
+            " status='awaiting_approval' ORDER BY started_at LIMIT 1",
+            (approval_id,),
+        )
+        if row is None:
+            return
+        execution = rows_to_dicts([row])[0]
+        self.db.execute(
+            "UPDATE tool_executions SET status='denied', ended_at=?,"
+            " error=? WHERE id=?",
+            (util.iso(), reason, execution["id"]),
+        )
+        self._append_execution_observation(execution, "denied", reason)
+
+    # ------------------------------------------------------------------
+    # Helpers used by runtime/scheduler/API
+    # ------------------------------------------------------------------
+
+    def tool_context(
+        self, run_id: str, task_id: str, domain_id: str | None
+    ) -> ToolContext:
+        return ToolContext(
+            run_id=run_id, task_id=task_id, domain_id=domain_id,
+            memory=self.memory, domains=self.domains, tasks=self.tasks,
+            messages=self.messages,
+        )
+
+    # ------------------------------------------------------------------
+    # Backup / restore
+    # ------------------------------------------------------------------
+
+    def backup(self, target: Path | None = None) -> Path:
+        """Consistent snapshot: DB via the online backup API + artifacts."""
+        stamp = util.iso().replace(":", "").replace("-", "")
+        target = target or self.data_dir / "backups" / f"harness-{stamp}.zip"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_db = target.with_suffix(".tmp.db")
+        self.db.backup_to(tmp_db)
+        try:
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(tmp_db, "harness.db")
+                config_path = self.data_dir / "config.yaml"
+                if config_path.is_file():
+                    zf.write(config_path, "config.yaml")
+                if self.artifacts_dir.is_dir():
+                    for path in sorted(self.artifacts_dir.rglob("*")):
+                        if path.is_file():
+                            zf.write(path, str(Path("artifacts") / path.relative_to(self.artifacts_dir)))
+        finally:
+            tmp_db.unlink(missing_ok=True)
+        self.events.record("backup.created", data={"path": str(target)})
+        return target
+
+    def restore(self, archive: Path) -> dict[str, Any]:
+        """Replace state from a backup. Requires exclusive access; the
+        process must restart afterwards so all handles reopen cleanly."""
+        if not archive.is_file():
+            raise FileNotFoundError(str(archive))
+        with zipfile.ZipFile(archive) as zf:
+            names = zf.namelist()
+            if "harness.db" not in names:
+                raise ValueError("not a harness backup (missing harness.db)")
+            db_path = self.db.path
+            self.db.close()
+            db_path.unlink(missing_ok=True)
+            for suffix in ("-wal", "-shm"):
+                Path(str(db_path) + suffix).unlink(missing_ok=True)
+            zf.extract("harness.db", self.data_dir)
+            if "config.yaml" in names:
+                zf.extract("config.yaml", self.data_dir)
+            if any(n.startswith("artifacts/") for n in names):
+                shutil.rmtree(self.artifacts_dir, ignore_errors=True)
+                self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+                for name in names:
+                    if name.startswith("artifacts/") and not name.endswith("/"):
+                        rel = name[len("artifacts/"):]
+                        dest = self.artifacts_dir / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(name) as src, open(dest, "wb") as out:
+                            shutil.copyfileobj(src, out)
+        log.info("state restored from %s", archive)
+        return {"restored": True, "restart_required": True}
+
+
+def build_app(
+    data_dir: str | Path,
+    *,
+    environ: dict[str, str] | None = None,
+    model: Model | None = None,
+) -> App:
+    """Test/CLI helper: build an App (recovery NOT run; call startup())."""
+    path = Path(data_dir)
+    config = load_config(path, environ=environ)
+    return App(path, config=config, model=model or ScriptedModel())

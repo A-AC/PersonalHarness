@@ -1,92 +1,93 @@
+"""Shared fixtures: isolated data dirs, scripted models, app builders.
+
+Tests never touch the repository or any production data directory: every
+test builds its App inside pytest's tmp_path. The scripted model keeps the
+suite deterministic and network-free; live-endpoint tests live separately
+under the ``live`` marker.
+"""
+
 from __future__ import annotations
 
-import json
+import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
-import yaml
 
-from harness.app import Harness, build_harness
-from harness.model.scripted import ScriptedAdapter
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-
-def plan(*goals: str, domain: str | None = None) -> dict[str, Any]:
-    return {
-        "tasks": [
-            {
-                "goal": goal,
-                "domain_name": domain,
-                "depends_on": [],
-            }
-            for goal in goals
-        ]
-    }
+from harness.app import App, build_app  # noqa: E402
+from harness.model import ScriptedModel  # noqa: E402
 
 
-def act(capability: str, operation: str, **arguments: Any) -> dict[str, Any]:
-    return {"kind": "act", "capability": capability, "operation": operation, "arguments": arguments}
+@pytest.fixture()
+def data_dir(tmp_path: Path) -> Path:
+    return tmp_path / "data"
 
 
-def respond(message: str) -> dict[str, Any]:
-    return {"kind": "respond", "message": message}
+class AppFactory:
+    """Builds apps on one data dir; supports in-place restarts."""
+
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+        self.apps: list[App] = []
+
+    def build(
+        self,
+        scripts: list | None = None,
+        default: str = "",
+        model: ScriptedModel | None = None,
+        serve: bool = False,
+    ) -> App:
+        model = model or ScriptedModel(scripts=list(scripts or []), default=default)
+        app = build_app(self.data_dir, model=model)
+        app.startup(serve=serve)
+        self.apps.append(app)
+        return app
+
+    def restart(
+        self,
+        scripts: list | None = None,
+        default: str = "",
+        model: ScriptedModel | None = None,
+    ) -> App:
+        """Close every open app on this dir and start a fresh one on the
+        same persistent state (the restart-under-test)."""
+        self.close_all()
+        return self.build(scripts=scripts, default=default, model=model)
+
+    def close_all(self) -> None:
+        for app in self.apps:
+            try:
+                app.shutdown()
+            except Exception:
+                pass
+        self.apps.clear()
+
+    def newest(self) -> App:
+        return self.apps[-1]
 
 
-def ask(question: str, missing: str) -> dict[str, Any]:
-    return {"kind": "ask", "question": question, "missing": missing}
+@pytest.fixture()
+def make_app(data_dir: Path):
+    factory = AppFactory(data_dir)
+    yield factory
+    factory.close_all()
 
 
-def end(status: str = "cancelled", summary: str = "") -> dict[str, Any]:
-    return {"kind": "end", "status": status, "summary": summary}
+@pytest.fixture()
+def client():
+    """Test HTTP client factory against a live in-process server. Requests
+    carry the app's token by default."""
 
+    def _make(app: App):
+        from starlette.testclient import TestClient
 
-def write_settings(root: Path, payload: dict[str, Any]) -> None:
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "settings.yaml").write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8", newline="\n")
+        from harness.server import Server
 
-
-# Behavior tests script an explicit task plan, so they pin the planner to the
-# LLM path and pin the failure policy they were written against. The catalog
-# defaults (heuristic planning, retry cap) are covered by tests that override
-# these keys on purpose. This keeps test intent independent of default tuning.
-TEST_BASELINE: dict[str, Any] = {
-    "tasks": {"planning_mode": "llm"},
-    "loop": {"stop_after_nonretryable_failure": False},
-}
-
-
-def _deep_merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
-    for key, value in source.items():
-        if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _deep_merge(target[key], value)
-        else:
-            target[key] = value
-    return target
-
-
-@pytest.fixture
-def make_harness(tmp_path: Path):
-    def factory(script: list[Any] | None = None, settings: dict[str, Any] | None = None) -> Harness:
-        payload = _deep_merge(
-            {key: dict(value) for key, value in TEST_BASELINE.items()},
-            settings or {},
+        token = str(app.config.get("server.token", ""))
+        return TestClient(
+            Server(app).routes(),
+            headers={"Authorization": f"Bearer {token}"},
         )
-        write_settings(tmp_path, payload)
-        model = ScriptedAdapter(script or [])
-        return build_harness(tmp_path, model=model)
 
-    return factory
-
-
-@pytest.fixture
-def harness(make_harness) -> Harness:
-    return make_harness(
-        [
-            plan("hello"),
-            respond("Hello."),
-        ]
-    )
-
-
-def dump(value: Any) -> str:
-    return json.dumps(value, default=str, ensure_ascii=False)
+    return _make
