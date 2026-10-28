@@ -11,11 +11,12 @@ inspectable without exposing private chain-of-thought.
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 from typing import Any
 
 from . import util
-from .config import Config
+from .config import Config, is_system_timezone_name, local_tz, tz_label
 from .model import ASK_USER_TAG
 from .store import Domains, Messages, Tasks
 
@@ -191,9 +192,17 @@ class ContextBuilder:
         sources: list[dict[str, Any]],
     ) -> str:
         lines = ["# Current situation"]
-        tz_name = str(self.config.get("timezone", "UTC"))
-        now = util.iso()
-        lines.append(f"Time: {now} (timezone {tz_name})")
+        zone = local_tz(self.config)
+        now = dt.datetime.now(zone)
+        source = (
+            "system local"
+            if is_system_timezone_name(self.config.get("timezone"))
+            else "configured timezone"
+        )
+        lines.append(
+            f"Time: {now.strftime('%Y-%m-%d %H:%M:%S %z')} "
+            f"({tz_label(self.config)}, {source})"
+        )
         lines.append(f"Active domain: {domain['name'] if domain else 'General'}")
         domains = self.domains.list_active()
         if domains:

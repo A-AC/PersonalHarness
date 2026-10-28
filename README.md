@@ -49,7 +49,8 @@ terminal CLI that are two views of the same runtime.
   retrieved by relevance. Every inclusion and exclusion is recorded on the
   run as a source with its reason.
 - **Durable scheduled prompts.** One-time, interval, daily, and weekly
-  schedules with explicit timezones. Occurrences are recorded before
+  schedules in the host's system timezone (or an explicit IANA zone).
+  Occurrences are recorded before
   submission, so restarts and duplicate ticks never re-run a completed
   occurrence. Missed runs follow a documented policy (run_once coalesces,
   skip discards).
@@ -353,10 +354,12 @@ refused as stale.
 ### Scheduling and heartbeat
 
 Schedules: `once` (at a time), `interval` (every N seconds), `daily`, and
-`weekly` (time-of-day and weekday), each with an explicit timezone.
-Occurrence rows keyed by (schedule id, due time) are recorded before
-submission, making submission idempotent across restarts and duplicate
-ticks. Missed slots while the process was down are coalesced (policy
+`weekly` (time-of-day and weekday). Times use the host's **system timezone**
+by default; each schedule stores either `system` or an explicit IANA zone.
+An `at_ts` without an offset is interpreted in that schedule's zone, and all
+stored timestamps remain UTC. Occurrence rows keyed by (schedule id, due
+time) are recorded before submission, making submission idempotent across
+restarts and duplicate ticks. Missed slots while the process was down are coalesced (policy
 `run_once`: the most recent missed slot runs once, older ones are recorded
 skipped) or discarded (`skip`). Once-schedules disable themselves after
 their run. Scheduled prompts are submitted as ordinary tasks to the
@@ -432,6 +435,12 @@ overrides: `HARNESS_DATA_DIR`, `HARNESS_HOST`, `HARNESS_PORT`,
 `HARNESS_TOKEN`, `HARNESS_MODEL_BASE_URL`, `HARNESS_MODEL_NAME`,
 `HARNESS_MODEL_API_KEY`, `HARNESS_TIMEZONE`.
 
+Timestamps are stored in UTC and shown in the host's local time. The
+`timezone` setting defaults to `system`; set an IANA name only to override
+it. In Docker, set `TZ` (or `HARNESS_TIMEZONE`) so the container's system
+clock matches your zone. Configs still carrying the old hard-coded default
+(`America/Mexico_City`) are migrated to `system` on the next start.
+
 Main groups:
 
 - `model.*`: endpoint, model name, api key, paths, timeout, retries,
@@ -453,7 +462,8 @@ Main groups:
 - `consolidation.*`: schedule interval, bounds
 - `persona.*`: name, speaker labels, purpose, principles, style, response
   preferences — the entire visible personality is here, not in code
-- `timezone`, `logging.*`
+- `timezone`: `system` (default; use the host clock) or an IANA name to
+  override; `logging.*`
 
 Changing the persona or budgets takes effect on the next run; endpoint and
 server changes need a restart. The web UI shows the redacted configuration

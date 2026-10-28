@@ -11,6 +11,8 @@ services:
       HARNESS_TOKEN: "${HARNESS_TOKEN:-change-this-token}"
       HARNESS_MODEL_BASE_URL: "${HARNESS_MODEL_BASE_URL:-http://192.168.50.40:8181}"
       HARNESS_MODEL_NAME: "${HARNESS_MODEL_NAME:-qwen3.5-9b}"
+      # Empty means "use the container's system clock".
+      HARNESS_TIMEZONE: "${HARNESS_TIMEZONE:-}"
     volumes:
       - harness-data:/data
     restart: unless-stopped

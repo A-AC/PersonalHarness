@@ -16,7 +16,16 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import __version__
+from . import __version__, util
+
+
+def _local_time(value: str | None) -> str:
+    """Render a stored UTC timestamp in this computer's local time."""
+    if not value:
+        return "-"
+    return util.parse_iso(value).astimezone(util.system_tz()).strftime(
+        "%Y-%m-%d %H:%M"
+    )
 
 
 def _data_dir_default() -> Path:
@@ -137,7 +146,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(
             f"  {'on ' if schedule['enabled'] else 'off'} "
             f"{schedule['kind']:<8} {schedule['name'][:30]:<32}"
-            f" next={schedule['next_due_at'] or '-'} tz={schedule['tz']}"
+            f" next={_local_time(schedule['next_due_at'])} tz={schedule['tz']}"
         )
 
 
@@ -206,7 +215,8 @@ def cmd_schedules(args: argparse.Namespace) -> None:
         )
         print(f"    prompt: {schedule['prompt'][:90]}")
         print(
-            f"    next={schedule['next_due_at'] or '-'} tz={schedule['tz']}"
+            f"    next={_local_time(schedule['next_due_at'])}"
+            f" tz={schedule['tz']}"
             f" at={schedule['at_ts'] or schedule['time_of_day'] or schedule['interval_s']}"
         )
 
@@ -219,7 +229,8 @@ def cmd_memories(args: argparse.Namespace) -> None:
             print(f"[{item['kind']}] ({item['scope']}) {item['content']}")
             print(f"    id={item['id']} score={item.get('score')}")
         for item in out.get("history", []):
-            print(f"[history {item['ts'][:10]}] {item['content'][:100]}")
+            print(f"[history {_local_time(item['ts'])[:10]}]"
+                  f" {item['content'][:100]}")
         return
     out = client.call("GET", "/api/memories")
     for item in out.get("memories", []):

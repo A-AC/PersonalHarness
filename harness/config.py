@@ -132,9 +132,17 @@ DEFAULTS: dict[str, Any] = {
         "style": "Clear, concise, direct. Plain language over jargon.",
         "response_preferences": "",
     },
-    "timezone": "America/Mexico_City",
+    # "system" means the host clock. Set an IANA name only to override it.
+    "timezone": "system",
     "logging": {"level": "info", "file": "logs/harness.log"},
 }
+
+# Values that mean "use the machine's own timezone".
+SYSTEM_TZ_ALIASES = {"", "system", "local", "host", "auto"}
+
+# The old hard-coded default. It was never a real user choice, so a config
+# still carrying it is migrated to the system clock on load.
+LEGACY_DEFAULT_TIMEZONE = "America/Mexico_City"
 
 # Environment overrides applied after the file (deployment-friendly).
 ENV_OVERRIDES = {
@@ -197,9 +205,17 @@ def validate_group_update(
     if group not in EDITABLE_KEYS:
         raise ConfigError(f"group not editable: {group}")
     if group == "timezone":
-        if not isinstance(value, str) or not value.strip():
-            raise ConfigError("timezone must be a non-empty string")
-        return value.strip()
+        if not isinstance(value, str):
+            raise ConfigError("timezone must be a string")
+        name = value.strip() or "system"
+        if not is_system_timezone_name(name):
+            import zoneinfo
+
+            try:
+                zoneinfo.ZoneInfo(name)
+            except Exception as exc:
+                raise ConfigError(f"unknown timezone: {name}") from exc
+        return name
     if not isinstance(value, dict):
         raise ConfigError(f"configuration key {group} must be a mapping")
     current = config.get(group)
@@ -304,6 +320,7 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
     legacy = data_dir / "settings.yaml"
     overlay: dict[str, Any] = {}
     migrated = False
+    timezone_migrated = False
     if file.exists():
         try:
             loaded = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
@@ -312,6 +329,9 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
         if not isinstance(loaded, dict):
             raise ConfigError(f"{file} must contain a mapping")
         overlay = loaded
+        if overlay.get("timezone") == LEGACY_DEFAULT_TIMEZONE:
+            overlay["timezone"] = "system"
+            timezone_migrated = True
     elif legacy.exists():
         overlay = _legacy_settings_overlay(legacy)
         migrated = True
@@ -329,6 +349,13 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
         if migrated and legacy.exists():
             # Keep the old file inspectable but stop treating it as config.
             legacy.rename(legacy.with_name("settings.yaml.migrated"))
+    elif timezone_migrated:
+        # Persist the system-time migration so the file reflects reality.
+        # Only the file's own values are written back; env stays runtime-only.
+        try:
+            save_config(Config(copy.deepcopy(overlay), file))
+        except OSError:
+            pass
     return config
 
 
@@ -343,25 +370,40 @@ def save_config(config: Config) -> None:
     )
 
 
-def local_tz(config: Config) -> dt.timezone:  # noqa: F821 - datetime imported below
-    import datetime as _dt
+def is_system_timezone_name(name: str | None) -> bool:
+    return str(name or "").strip().lower() in SYSTEM_TZ_ALIASES
+
+
+def resolve_zone(name: str | None):
+    """Resolve a stored timezone name to a tzinfo.
+
+    ``system``/``local``/empty mean the host clock. An unknown IANA name also
+    falls back to the host clock rather than silently switching to UTC.
+    """
     import zoneinfo
 
-    name = str(config.get("timezone", "UTC"))
+    key = str(name or "").strip()
+    if is_system_timezone_name(key):
+        return util.system_tz()
     try:
-        return zoneinfo.ZoneInfo(name)
+        return zoneinfo.ZoneInfo(key)
     except Exception:
-        return _dt.timezone.utc
+        return util.system_tz()
 
 
-def format_local(ts_utc: str, config: Config) -> str:
-    """Render a stored UTC timestamp in the configured local timezone."""
-    import zoneinfo
+def local_tz(config: Config):
+    return resolve_zone(str(config.get("timezone", "system")))
 
-    parsed = util.parse_iso(ts_utc)
-    name = str(config.get("timezone", "UTC"))
-    try:
-        local = parsed.astimezone(zoneinfo.ZoneInfo(name))
-    except Exception:
-        local = parsed
-    return local.strftime("%Y-%m-%d %H:%M")
+
+def tz_label(config: Config) -> str:
+    """Name of the zone actually in use (never just 'system')."""
+    zone = local_tz(config)
+    key = getattr(zone, "key", None)
+    if key:
+        return str(key)
+    return str(zone.tzname(None) or zone)
+
+
+def format_local(ts_utc: str, config: Config, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """Render a stored UTC timestamp in the effective local timezone."""
+    return util.parse_iso(ts_utc).astimezone(local_tz(config)).strftime(fmt)

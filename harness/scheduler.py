@@ -22,7 +22,7 @@ import threading
 from typing import Any
 
 from . import util
-from .config import Config
+from .config import Config, resolve_zone
 from .db import Database, rows_to_dicts
 from .store import Events, Tasks
 
@@ -46,12 +46,24 @@ class Scheduler:
     # ------------------------------------------------------------------
 
     def _zone(self, tz_name: str):
-        import zoneinfo
+        # "system" (and an unknown name) follows the host clock, not UTC.
+        return resolve_zone(tz_name)
 
+    @staticmethod
+    def _parse_at_ts(value: str, zone) -> dt.datetime:
+        """Parse a user-supplied instant; a naive value means local time."""
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
         try:
-            return zoneinfo.ZoneInfo(tz_name)
-        except Exception:
-            return dt.timezone.utc
+            parsed = dt.datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"at_ts must be an ISO date/time, got: {value}"
+            ) from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=zone)
+        return parsed.astimezone(dt.timezone.utc)
 
     def compute_next_due(
         self, schedule: dict[str, Any], after_utc: dt.datetime
@@ -120,7 +132,11 @@ class Scheduler:
             raise ValueError("schedule needs a name and a prompt")
         schedule_id = util.new_id("sch")
         ts = util.iso()
-        tz = tz or str(self.config.get("timezone", "UTC"))
+        tz = (
+            str(tz or "").strip()
+            or str(self.config.get("timezone", "system")).strip()
+            or "system"
+        )
         now = util.now_utc()
         schedule = {
             "id": schedule_id, "name": name.strip(), "prompt": prompt.strip(),
@@ -132,7 +148,9 @@ class Scheduler:
         if kind == "once":
             if not at_ts:
                 raise ValueError("once schedule needs at_ts")
-            schedule["next_due_at"] = util.iso(util.parse_iso(at_ts))
+            schedule["next_due_at"] = util.iso(
+                self._parse_at_ts(str(at_ts), self._zone(tz))
+            )
         else:
             schedule["next_due_at"] = self.compute_next_due(schedule, now)
         self.db.execute(

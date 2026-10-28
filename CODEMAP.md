@@ -21,7 +21,7 @@ tests under the `live` marker.
 | `harness/tools.py` | `ToolRegistry` (builtin tools, JSON-schema-lite validation, risk classes, banned-name refusal, execution records), minimal MCP stdio JSON-RPC client and loader |
 | `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired), expiry sweep, quick-confirm classification (keyword + tiny model call) |
 | `harness/runtime.py` | `AgentRuntime`: the single bounded loop; routing/resume entry point for user messages; approval/question/interrupt/limit pause and resume; transcript persistence |
-| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly with timezones), idempotent occurrence submission, missed-run policy, heartbeat checks, scheduler thread |
+| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, heartbeat checks, scheduler thread |
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract; applied via `MemoryManager` with revisions; markdown change log per run |
 | `harness/app.py` | `App` composition root, startup recovery, `ProcessLock` (single writer), backup/restore, graceful shutdown; `build_app` test helper |
 | `harness/server.py` | Starlette JSON API + auth; thin delegation to `App` |
@@ -97,6 +97,7 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | `tests/test_domains_tasks.py` | Routing to existing domains, no domain per topic, no cross-domain leakage, restart resumption, ambiguity clarification, follow-up preference, domain creation via approval |
 | `tests/test_memory_context.py` | Explicit capture, old-memory recall, scopes, context sources, budgets, supersession/revisions, temp expiry, consolidation, artifact consistency |
 | `tests/test_scheduler.py` | Due times + timezones, restart survival, missed-run policies, occurrence idempotency, approval pause/resume, heartbeat overlap/notify/retry |
+| `tests/test_time.py` | System-time default, local rendering, naive `at_ts` semantics, explicit-zone override, timezone validation, UI local timestamps |
 | `tests/test_approvals.py` | Exact action binding, quick confirm (keyword/model/ambiguous), rejection/cancellation/expiry/staleness, untrusted-output immunity, no shell tools, risk override validation |
 | `tests/test_recovery.py` | Restart preservation, interrupted-run resume without repeats, unknown outcomes, graceful shutdown, backup/restore round trip, writer lock, concurrent web+CLI with one scheduler |
 | `tests/test_tools_mcp.py` | MCP discovery/autoapprove/round trip/bounded results/unavailable servers, skill disclosure by preconditions |

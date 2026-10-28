@@ -209,7 +209,15 @@ function pill(status) {
 
 function short(ts) {
   if (!ts) return '-';
-  return String(ts).replace('T', ' ').slice(0, 19);
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) {
+    return String(ts).replace('T', ' ').slice(0, 19);
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  // Stored timestamps are UTC; show them in this computer's local time.
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+    ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' +
+    pad(d.getSeconds());
 }
 
 function domainName(id) {
@@ -732,13 +740,19 @@ function settingsCard(group, values) {
 function timezoneCard() {
   const card = el('div', 'card');
   card.appendChild(el('h3', null, 'timezone'));
+  card.appendChild(el('div', 'small',
+    'Use "system" to follow this computer\'s clock. Set an IANA name only ' +
+    'to override it for schedules and the assistant\'s clock.'));
   const row = el('div', 'field');
-  row.appendChild(el('label', null, 'IANA timezone'));
+  row.appendChild(el('label', null, 'System or IANA timezone'));
   const input = el('input');
   input.type = 'text';
-  input.value = state.config.timezone || '';
+  input.value = state.config.timezone || 'system';
+  input.placeholder = 'system';
   row.appendChild(input);
   card.appendChild(row);
+  card.appendChild(el('div', 'small',
+    'Detected system timezone: ' + (state.system_timezone || 'local')));
   const btns = el('div', 'btns');
   const save = el('button', 'ok', 'Save timezone');
   save.onclick = async () => {
@@ -763,13 +777,14 @@ function renderSchedules(side) {
   for (const k of ['daily', 'interval', 'weekly', 'once']) {
     const o = el('option', null, k); o.value = k; kind.appendChild(o);
   }
-  const time = el('input'); time.placeholder = 'HH:MM';
+  const time = el('input'); time.placeholder = 'HH:MM (local)';
   const interval = el('input'); interval.placeholder = 'seconds';
   interval.type = 'number';
   const weekday = el('input'); weekday.placeholder = 'monday';
-  const at = el('input'); at.placeholder = 'ISO time';
-  const tz = el('input'); tz.value = state.config.timezone || '';
-  tz.placeholder = 'IANA timezone';
+  const at = el('input');
+  at.placeholder = 'local ISO, e.g. 2026-10-27 23:30';
+  const tz = el('input'); tz.value = state.config.timezone || 'system';
+  tz.placeholder = 'system or IANA timezone';
   const domain = el('select');
   const auto = el('option', null, 'Auto-route'); auto.value = '';
   domain.appendChild(auto);
@@ -788,6 +803,9 @@ function renderSchedules(side) {
     row.appendChild(node);
     form.appendChild(row);
   }
+  form.appendChild(el('div', 'small',
+    'Times without an explicit offset use the schedule timezone; "system" ' +
+    'means this computer\'s local time.'));
   form.appendChild(el('div', 'small', 'Prompt'));
   form.appendChild(prompt_);
   const btns = el('div', 'btns');
@@ -818,9 +836,11 @@ function renderSchedules(side) {
     const card = el('div', 'card');
     card.appendChild(el('h3', null, s.name + ' [' + s.kind + ']'));
     card.appendChild(el('div', 'small', s.prompt));
+    const tzShown = (s.tz === 'system' || !s.tz)
+      ? 'system (' + (state.system_timezone || 'local') + ')' : s.tz;
     card.appendChild(el('div', 'small',
       (s.enabled ? 'enabled' : 'disabled') + '  |  next ' +
-      short(s.next_due_at) + '  |  tz ' + s.tz +
+      short(s.next_due_at) + '  |  tz ' + tzShown +
       (s.domain_id ? '  |  ' + domainName(s.domain_id) : '')));
     const btns = el('div', 'btns');
     const toggle = el('button', null, s.enabled ? 'Disable' : 'Enable');
@@ -930,6 +950,9 @@ function renderSystem(side) {
     grid.appendChild(stat);
   }
   head.appendChild(grid);
+  head.appendChild(el('div', 'small',
+    'System time ' + short(state.now) + '  |  timezone ' +
+    (state.system_timezone || 'local')));
   head.appendChild(el('div', 'small',
     'Scheduler ' + (sched.enabled ? 'enabled' : 'disabled') +
     ' | last tick ' + short(sched.last_tick)));

@@ -130,6 +130,7 @@ class Server:
                 "enabled": bool(app.config.get("scheduler.enabled", True)),
             },
             "now": util.iso(),
+            "system_timezone": util.system_tz_name(),
         }
 
     async def events(self, request: Request) -> Response:

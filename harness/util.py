@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 import secrets
 from typing import Any
@@ -13,6 +14,51 @@ UTC = dt.timezone.utc
 
 def now_utc() -> dt.datetime:
     return dt.datetime.now(UTC)
+
+
+def _system_zone_name() -> str | None:
+    """Best-effort IANA name for the host's local timezone."""
+    env = os.environ.get("TZ", "").strip()
+    if env:
+        return env
+    # Linux/macOS expose the chosen zone as a symlink into the tz database.
+    try:
+        target = os.path.realpath("/etc/localtime")
+        marker = "zoneinfo/"
+        if marker in target:
+            return target.split(marker, 1)[1]
+    except OSError:
+        pass
+    tz = dt.datetime.now().astimezone().tzinfo
+    key = getattr(tz, "key", None)
+    return str(key) if key else None
+
+
+def system_tz() -> dt.tzinfo:
+    """The host's current local timezone.
+
+    Prefers a real IANA zone when the OS exposes one (so future daylight
+    transitions are handled); otherwise falls back to the fixed offset the
+    system clock reports right now.
+    """
+    import zoneinfo
+
+    name = _system_zone_name()
+    if name:
+        try:
+            return zoneinfo.ZoneInfo(name)
+        except Exception:
+            pass
+    return dt.datetime.now().astimezone().tzinfo or UTC
+
+
+def system_tz_name() -> str:
+    """Human-readable name for the host timezone."""
+    name = _system_zone_name()
+    if name:
+        return name
+    zone = system_tz()
+    return str(zone.tzname(None) or zone)
 
 
 def iso(ts: dt.datetime | None = None) -> str:
