@@ -103,7 +103,7 @@ web UI / CLI / schedule / heartbeat / approval decision
 | Schedules + heartbeat | `harness/scheduler.py` |
 | Consolidation | `harness/consolidation.py` |
 | SQLite schema | `harness/db.py` |
-| Web server / JSON API | `harness/server.py`, `harness/web_page.py` |
+| Web server / JSON API | `harness/server.py`, `harness/web/` |
 | CLI client | `harness/__main__.py` |
 | Configuration | `harness/config.py`, `data/config.yaml` |
 
@@ -220,8 +220,8 @@ container back after a restore-induced restart.
 ### Backup and restore
 
 Backups are consistent snapshots: the database via SQLite's online backup
-API plus `config.yaml` and the artifacts directory, zipped into
-`<data>/backups/harness-<timestamp>.zip`.
+API plus `config.yaml`, the artifacts directory, and `data/modules/`, zipped
+into `<data>/backups/harness-<timestamp>.zip`.
 
 ```bash
 python -m harness backup                      # via the running server
@@ -457,6 +457,9 @@ Main groups:
 - `domains.*`: routing threshold, ambiguity margins
 - `memory.*`: result limits, temp expiry
 - `tools.*`: MCP servers file, skills dir, default MCP risk, risk overrides
+- `modules.*`: enabled, module directory, health interval, tool-schema
+  budget (Phase 0 wires the directory and budget; module loading becomes
+  authoritative in Phase 1)
 - `scheduler.*`: enabled, tick interval, missed policy and grace,
   interrupted-run resume, per-tick run/retry caps, retry cooldown and
   exponential backoff, permanent-failure policy, user-activity grace,

@@ -21,7 +21,48 @@ from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+MODULE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS modules (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('skill','mcp','web')),
+  name TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL CHECK(status IN ('draft','active','disabled','error')),
+  scope TEXT NOT NULL DEFAULT 'global'
+    CHECK(scope IN ('global','domain','adaptive')),
+  manifest TEXT NOT NULL,
+  content_path TEXT,
+  origin TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_loaded_at TEXT,
+  last_error TEXT,
+  usage_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS module_bindings (
+  module_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  risk_override TEXT,
+  PRIMARY KEY (module_id, domain_id)
+);
+
+CREATE TABLE IF NOT EXISTS module_tools (
+  module_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  schema TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  side_effects INTEGER NOT NULL DEFAULT 1,
+  read_only INTEGER NOT NULL DEFAULT 0,
+  last_seen TEXT NOT NULL,
+  PRIMARY KEY (module_id, tool_name)
+);
+"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -243,7 +284,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_toolx_run ON tool_executions(run_id);
 CREATE INDEX IF NOT EXISTS idx_toolx_status ON tool_executions(status);
-"""
+""" + MODULE_SCHEMA
 
 
 class Database:
@@ -299,6 +340,12 @@ class Database:
                 self._conn.execute(
                     "ALTER TABLE tasks ADD COLUMN next_retry_at TEXT"
                 )
+        if version < 3:
+            # Additive: capabilities become module rows. The base migration
+            # above already created them; rerunning here keeps the migration
+            # self-contained for databases that predate this script.
+            self._conn.executescript(MODULE_SCHEMA)
+        if version < SCHEMA_VERSION:
             self._conn.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),

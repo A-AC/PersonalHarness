@@ -2,7 +2,7 @@
 
 Every mutating endpoint delegates to the same App the CLI talks to over
 HTTP, so the web UI and the terminal are two views of one runtime and one
-state store. The UI page is a small polling client (see web_page.PAGE);
+state store. The UI shell is static (see ``harness/web/``) and polls the API;
 there is no second source of truth in the browser.
 """
 
@@ -22,7 +22,14 @@ from starlette.routing import Route
 from . import util
 from .app import App
 from .config import EDITABLE_KEYS, ConfigError, save_config, validate_group_update
-from .web_page import PAGE
+
+WEB_DIR = Path(__file__).resolve().parent / "web"
+# Assets are served through the same authenticated handler as the page. No
+# StaticFiles mount exists, so an unauthenticated browser cannot read them.
+ASSETS = {
+    "app.js": ("app.js", "application/javascript; charset=utf-8"),
+    "style.css": ("style.css", "text/css; charset=utf-8"),
+}
 
 
 def _json(data: Any, status: int = 200) -> Response:
@@ -73,7 +80,22 @@ class Server:
     async def page(self, request: Request) -> Response:
         if not self._authorized(request):
             return Response("unauthorized", status_code=401)
-        response = Response(PAGE, media_type="text/html")
+        html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+        response = Response(html, media_type="text/html")
+        return self._set_cookie(request, response)
+
+    async def asset(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return Response("unauthorized", status_code=401)
+        entry = ASSETS.get(request.path_params["name"])
+        if entry is None:
+            return Response("not found", status_code=404)
+        filename, media_type = entry
+        path = WEB_DIR / filename
+        if not path.is_file():
+            return Response("not found", status_code=404)
+        response = Response(path.read_text(encoding="utf-8"), media_type=media_type)
+        response.headers["Cache-Control"] = "no-cache"
         return self._set_cookie(request, response)
 
     # -- state --------------------------------------------------------------
@@ -109,10 +131,10 @@ class Server:
             "domains": domains,
             "memories": app.memory.list(limit=50),
             "tools": [
-                {"name": name,
-                 "risk": app.tools._tools[name].risk,
-                 "description": app.tools._tools[name].description[:160]}
-                for name in app.tools.names()
+                {"name": spec.name, "risk": spec.risk,
+                 "module": spec.module,
+                 "description": spec.description[:160]}
+                for spec in app.tools.specs()
             ],
             "events": app.events.list(limit=120),
             "config": app.config.redacted(),
@@ -432,8 +454,9 @@ class Server:
             return _err("unauthorized", 401)
         return _json({
             "tools": [
-                {"name": name, "risk": self.app.tools._tools[name].risk}
-                for name in self.app.tools.names()
+                {"name": spec.name, "risk": spec.risk,
+                 "module": spec.module}
+                for spec in self.app.tools.specs()
             ],
             "mcp_status": self.app.mcp.status,
         })
@@ -507,6 +530,7 @@ class Server:
         routes = [
             Route("/health", self.health, methods=["GET"]),
             Route("/", self.page, methods=["GET"]),
+            Route("/assets/{name}", self.asset, methods=["GET"]),
             Route("/api/state", self.state, methods=["GET"]),
             Route("/api/events", self.events, methods=["GET"]),
             Route("/api/message", self.message, methods=["POST"]),

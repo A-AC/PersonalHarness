@@ -18,14 +18,15 @@ tests under the `live` marker.
 | `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + deterministic routing), `Tasks` (statuses, resume-candidate scoring) |
 | `harness/memory.py` | `MemoryManager`: capture with conflict supersession, scopes/kinds, revisions + provenance, FTS retrieval with scope priority and recency, expiry, merge, bounded artifact reads, artifact consistency checks |
 | `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules, state, memories, recent + retrieved history, precondition-gated skills), inclusion/exclusion sources |
-| `harness/tools.py` | `ToolRegistry` (builtin tools, JSON-schema-lite validation, risk classes, banned-name refusal, execution records), minimal MCP stdio JSON-RPC client and loader |
+| `harness/tools.py` | `ToolRegistry` (builtin tools, JSON-schema-lite validation, risk classes, banned-name refusal, execution records, budgeted per-run schema selection), minimal MCP stdio JSON-RPC client and loader |
 | `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired), expiry sweep, quick-confirm classification (keyword + tiny model call) |
 | `harness/runtime.py` | `AgentRuntime`: the single bounded loop; routing/resume entry point for user messages; approval/question/interrupt/limit pause and resume; transcript persistence |
 | `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, heartbeat checks, scheduler thread |
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract; applied via `MemoryManager` with revisions; markdown change log per run |
+| `harness/modules/` | Capability module records (`types.py`) and registry (`registry.py`); Phase 0 keeps skills/MCP loaders authoritative and `load_all()` empty |
 | `harness/app.py` | `App` composition root, startup recovery, `ProcessLock` (single writer), backup/restore, graceful shutdown; `build_app` test helper |
-| `harness/server.py` | Starlette JSON API + auth; thin delegation to `App` |
-| `harness/web_page.py` | The single polling web page served at `/` |
+| `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; authenticated static UI assets |
+| `harness/web/` | Zero-build UI: `index.html`, `app.js`, `style.css` (served only through the authenticated handler) |
 | `harness/__main__.py` | CLI: `serve`, `endpoint-check`, `msg`, `status`, `tasks`, `approvals`, `schedules`, `memories`, `domains`, `consolidate`, `events`, `tools`, `backup`, `restore`, `config` |
 | `scripts/container_check.py` | Build + start the compose stack, verify health/auth/API/endpoint, tear down |
 | `examples/mcp/echo_server.py` | Dependency-free stdio MCP echo/add server (also the test fixture) |
@@ -65,10 +66,11 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | Path under data dir | Contents |
 | --- | --- |
 | `config.yaml` | Materialized configuration (created with defaults) |
-| `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks`, `runs`, `memories` (+FTS5), `memory_revisions`, `schedules`, `schedule_occurrences`, `approvals`, `tool_executions`, `schema_meta` |
+| `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks`, `runs`, `memories` (+FTS5), `memory_revisions`, `schedules`, `schedule_occurrences`, `approvals`, `tool_executions`, `modules`, `module_bindings`, `module_tools`, `schema_meta` |
 | `artifacts/memories/<id>.md` | Long memory notes referenced from rows |
 | `artifacts/consolidation/<run>.md` | Per-run change logs |
 | `artifacts/domains/…` | Reserved for future domain notes |
+| `modules/skills/<id>/v<n>.md` | Versioned skill bodies owned by module rows (Phase 2; import source until then) |
 | `backups/harness-<ts>.zip` | DB snapshot + config + artifacts |
 | `logs/harness.log` | Rotating structured log |
 | `process.lock` | Writer lock held by `serve` (pid + heartbeat timestamp) |
@@ -100,6 +102,7 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | `tests/test_time.py` | System-time default, local rendering, naive `at_ts` semantics, explicit-zone override, timezone validation, UI local timestamps |
 | `tests/test_approvals.py` | Exact action binding, quick confirm (keyword/model/ambiguous), rejection/cancellation/expiry/staleness, untrusted-output immunity, no shell tools, risk override validation |
 | `tests/test_recovery.py` | Restart preservation, interrupted-run resume without repeats, unknown outcomes, graceful shutdown, backup/restore round trip, writer lock, concurrent web+CLI with one scheduler |
+| `tests/test_modules_foundations.py` | Phase 0 seams: UI shell/assets, module registry + v3 schema migration, backup/restore of `modules/`, tool-schema budget and run snapshots |
 | `tests/test_tools_mcp.py` | MCP discovery/autoapprove/round trip/bounded results/unavailable servers, skill disclosure by preconditions |
 | `tests/test_scenarios.py` | The ten end-to-end acceptance scenarios |
 | `tests/test_live_endpoint.py` | Real-endpoint integration (marked `live`): models list, plain completion, native tool-call protocol, multi-step round trip, one full live turn |

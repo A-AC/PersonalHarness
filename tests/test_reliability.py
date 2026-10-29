@@ -342,10 +342,18 @@ def test_web_page_exposes_every_panel(make_app, client):
     for tab in ("chat", "tasks", "approvals", "domains", "persona",
                 "settings", "schedules", "memory", "system"):
         assert f'data-tab="{tab}"' in page.text, tab
+    # The shell is static; the client code and styles are authenticated
+    # assets, not Python string literals.
+    script = http.get("/assets/app.js")
+    assert script.status_code == 200
+    assert "javascript" in script.headers["content-type"]
+    style = http.get("/assets/style.css")
+    assert style.status_code == 200
+    assert "text/css" in style.headers["content-type"]
     # The page must talk to the same API the CLI uses, not a second store.
-    assert "/api/state" in page.text
-    assert "/api/config" in page.text
-    assert "/api/domains" in page.text
+    assert "/api/state" in script.text
+    assert "/api/config" in script.text
+    assert "/api/domains" in script.text
 
 
 def test_cancel_task_cancels_approvals_and_stops_its_run(make_app, client):

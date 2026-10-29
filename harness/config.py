@@ -92,6 +92,15 @@ DEFAULTS: dict[str, Any] = {
         "risk_overrides": {},          # tool name -> "low" | "confirm"
         "disallowed_prefixes": [],     # extra name prefixes banned outright
     },
+    "modules": {
+        # Capability records (skills, MCP, web) become authoritative in Phase
+        # 1. In Phase 0 the directory is created, backed up, and the budget is
+        # measured, while the existing skills/MCP loaders stay in charge.
+        "enabled": True,
+        "dir": "modules",              # relative to the data dir
+        "health_interval_s": 300.0,
+        "tool_schema_budget_tokens": 2400,
+    },
     "scheduler": {
         "enabled": True,
         "tick_interval_s": 60.0,
@@ -158,7 +167,7 @@ ENV_OVERRIDES = {
 # Keys a user may edit through the UI/CLI without a restart hazard.
 EDITABLE_KEYS = {
     "persona", "limits", "context", "domains", "memory", "tools",
-    "scheduler", "consolidation", "approvals", "timezone",
+    "modules", "scheduler", "consolidation", "approvals", "timezone",
 }
 
 

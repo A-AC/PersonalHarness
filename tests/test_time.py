@@ -113,11 +113,15 @@ def test_timezone_validation_accepts_system_and_iana(tmp_path):
 
 def test_web_page_renders_timestamps_in_browser_local_time(make_app, client):
     app = make_app.build(default="ok")
-    page = client(app).get("/")
+    http = client(app)
+    page = http.get("/")
     assert page.status_code == 200
-    assert "new Date(ts)" in page.text
-    assert "getFullYear" in page.text
-    assert "system_timezone" in page.text
+    assert '<script src="/assets/app.js"></script>' in page.text
+    script = http.get("/assets/app.js")
+    assert script.status_code == 200
+    assert "new Date(ts)" in script.text
+    assert "getFullYear" in script.text
+    assert "system_timezone" in script.text
 
 
 def test_state_reports_the_detected_system_timezone(make_app, client):

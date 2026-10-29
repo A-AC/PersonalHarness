@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assistant</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<header>
+  <span class="title" id="who">Assistant</span>
+  <span class="meta" id="statusmeta">connecting...</span>
+  <nav id="nav">
+    <button data-tab="chat" class="active">Chat</button>
+    <button data-tab="tasks">Tasks</button>
+    <button data-tab="approvals">Approvals</button>
+    <button data-tab="domains">Domains</button>
+    <button data-tab="persona">Persona</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="schedules">Schedules</button>
+    <button data-tab="memory">Memory</button>
+    <button data-tab="system">System</button>
+  </nav>
+</header>
+<div id="banner"></div>
+<main>
+  <div id="chatwrap">
+    <div id="chat"></div>
+    <div id="composer">
+      <textarea id="input" rows="2"
+        placeholder="Message the assistant... (Enter sends, Shift+Enter adds a line)"></textarea>
+      <div class="sendcol">
+        <select id="domainpick" title="Route this message to a domain">
+          <option value="">Auto-route</option>
+        </select>
+        <button id="send">Send</button>
+      </div>
+    </div>
+  </div>
+  <div id="side"></div>
+</main>
+<div id="toast"></div>
+<script src="/assets/app.js"></script>
+</body>
+</html>

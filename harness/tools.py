@@ -52,6 +52,9 @@ class ToolSpec:
     parameters: dict[str, Any]
     risk: str
     handler: Callable[["ToolContext", dict[str, Any]], dict[str, Any]]
+    # Capability attribution. Builtins belong to the harness itself; module
+    # tools carry the owning module id (Phase 1 fills this from the registry).
+    module: str = "builtin"
 
 
 @dataclass
@@ -153,6 +156,7 @@ class ToolRegistry:
         self._tools[spec.name] = ToolSpec(
             name=spec.name, description=spec.description,
             parameters=spec.parameters, risk=effective, handler=spec.handler,
+            module=spec.module,
         )
 
     def resolve(self, name: str) -> ToolSpec:
@@ -167,18 +171,112 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return sorted(self._tools)
 
+    def specs(self) -> list[ToolSpec]:
+        """Every registered tool in deterministic declaration order."""
+        return list(self._tools.values())
+
+    @staticmethod
+    def _schema(spec: ToolSpec) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": spec.parameters,
+            },
+        }
+
     def schemas(self) -> list[dict[str, Any]]:
         """OpenAI function schemas for every registered tool."""
+        return [self._schema(spec) for spec in self._tools.values()]
+
+    def schemas_for(
+        self, domain_id: str | None, *, budget_tokens: int | None = None
+    ) -> dict[str, Any]:
+        """Select this run's tool schemas under a token budget.
+
+        Phase 0 has no module eligibility yet: every tool is global. The
+        budget is enforced by dropping whole tools, lowest priority and
+        latest-registered first, never by trimming a schema. The selection is
+        deterministic for a given registry and budget.
+
+        Returns a dict with the schemas plus the capability snapshot fields
+        persisted on the run: names, modules, exclusions, token totals.
+        """
+        budget = max(0, int(budget_tokens or 0))
+        entries = []
+        for index, spec in enumerate(self._tools.values()):
+            schema = self._schema(spec)
+            entries.append({
+                "spec": spec,
+                "index": index,
+                "schema": schema,
+                "tokens": util.token_len(util.dumps(schema)),
+            })
+        kept = list(entries)
+        exclusions: list[dict[str, Any]] = []
+        total = sum(entry["tokens"] for entry in kept)
+        if budget > 0:
+            # builtins first; then module tools. Within one priority the most
+            # recently registered tool is dropped first, which keeps the
+            # long-standing core tools stable.
+            order = sorted(
+                entries, key=lambda entry: (
+                    self._schema_priority(entry["spec"]),
+                    -entry["index"],
+                )
+            )
+            for entry in order:
+                if total <= budget:
+                    break
+                if entry not in kept:
+                    continue
+                kept.remove(entry)
+                total -= entry["tokens"]
+                spec = entry["spec"]
+                exclusions.append({
+                    "tool": spec.name,
+                    "module": spec.module,
+                    "risk": spec.risk,
+                    "tokens": entry["tokens"],
+                    "reason": "tool_schema_budget",
+                    "detail": (
+                        f"dropped to respect the {budget}-token tool "
+                        "schema budget"
+                    ),
+                })
+        kept.sort(key=lambda entry: entry["index"])
+        exclusions.sort(key=lambda item: item["tool"])
+        return {
+            "domain_id": domain_id,
+            "schemas": [entry["schema"] for entry in kept],
+            "names": [entry["spec"].name for entry in kept],
+            "modules": sorted({entry["spec"].module for entry in kept}),
+            "exclusions": exclusions,
+            "tokens": total,
+            "budget_tokens": budget,
+        }
+
+    @staticmethod
+    def _schema_priority(spec: ToolSpec) -> int:
+        """Lower is kept longer when the schema budget is tight."""
+        if spec.module == "builtin":
+            return 0
+        if spec.module.startswith("web"):
+            return 2
+        return 5
+
+    def schemas_for_names(self, names: list[str]) -> list[dict[str, Any]]:
+        """Rebuild the schemas for a persisted run snapshot.
+
+        Unknown names are ignored: a module may have been disabled since the
+        run began, and a snapshot must not resurrect it.
+        """
+        wanted = set(names)
         return [
-            {
-                "type": "function",
-                "function": {
-                    "name": spec.name,
-                    "description": spec.description,
-                    "parameters": spec.parameters,
-                },
-            }
+            self._schema(spec)
             for spec in self._tools.values()
+            if spec.name in wanted
         ]
 
     # -- execution --------------------------------------------------------
@@ -843,6 +941,7 @@ class McpTools:
                     or {"type": "object", "properties": {}},
                     risk=default_risk,
                     handler=self._make_handler(server, tool_name),
+                    module=f"mcp:{server.name}",
                 ))
                 count += 1
             except (ToolDenied, ToolError) as exc:

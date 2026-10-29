@@ -28,6 +28,7 @@ from .db import Database, rows_to_dicts
 from .logging import get_logger, setup_logging
 from .memory import MemoryManager
 from .model import Model, ModelClient, ScriptedModel
+from .modules.registry import ModuleRegistry
 from .runtime import AgentRuntime
 from .scheduler import Scheduler
 from .store import Domains, Events, Messages, Tasks
@@ -136,8 +137,14 @@ class App:
         self.tools = ToolRegistry(
             self.db, self.events, self.config, self.artifacts_dir
         )
+        self.modules = ModuleRegistry(
+            self.db, self.events, self.config, data_dir
+        )
         self.mcp = McpTools(self.tools, self.config, self.events)
         self.mcp.load()
+        # Phase 0 seam: the registry exists and is queried by the runtime,
+        # while skills/MCP keep loading through their existing paths.
+        self.modules.load_all()
         self.approvals = Approvals(self.db, self.events, self.config, self.model)
         self.context = ContextBuilder(
             self.config, self.domains, self.tasks, self.messages,
@@ -573,6 +580,11 @@ class App:
                     for path in sorted(self.artifacts_dir.rglob("*")):
                         if path.is_file():
                             zf.write(path, str(Path("artifacts") / path.relative_to(self.artifacts_dir)))
+                modules_dir = self.modules.root
+                if modules_dir.is_dir():
+                    for path in sorted(modules_dir.rglob("*")):
+                        if path.is_file():
+                            zf.write(path, str(Path("modules") / path.relative_to(modules_dir)))
         finally:
             tmp_db.unlink(missing_ok=True)
         self.events.record("backup.created", data={"path": str(target)})
@@ -602,6 +614,20 @@ class App:
                     if name.startswith("artifacts/") and not name.endswith("/"):
                         rel = name[len("artifacts/"):]
                         dest = self.artifacts_dir / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(name) as src, open(dest, "wb") as out:
+                            shutil.copyfileobj(src, out)
+            if any(n.startswith("modules/") for n in names):
+                modules_dir = (
+                    self.data_dir
+                    / str(self.config.get("modules.dir", "modules"))
+                )
+                shutil.rmtree(modules_dir, ignore_errors=True)
+                modules_dir.mkdir(parents=True, exist_ok=True)
+                for name in names:
+                    if name.startswith("modules/") and not name.endswith("/"):
+                        rel = name[len("modules/"):]
+                        dest = modules_dir / rel
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         with zf.open(name) as src, open(dest, "wb") as out:
                             shutil.copyfileobj(src, out)

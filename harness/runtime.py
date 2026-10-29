@@ -115,6 +115,54 @@ class AgentRuntime:
             return max(1000, window - reserved)
         return int(self.config.get("context.total_budget_tokens", 20000))
 
+    def _schema_budget(self) -> int:
+        return max(0, int(
+            self.config.get("modules.tool_schema_budget_tokens", 2400)
+        ))
+
+    @staticmethod
+    def _toolset_snapshot(selection: dict[str, Any]) -> dict[str, Any]:
+        """The durable part of a capability selection (never the schemas)."""
+        return {
+            key: selection[key]
+            for key in (
+                "domain_id", "names", "modules", "exclusions", "tokens",
+                "budget_tokens",
+            )
+        }
+
+    def _save_toolset(
+        self, run_id: str, selection: dict[str, Any]
+    ) -> None:
+        run = self._run_row(run_id)
+        meta = util.loads(run.get("meta") or "", {}) if run else {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["toolset"] = self._toolset_snapshot(selection)
+        self._save_run(run_id, meta=util.dumps(meta))
+
+    def _run_schemas(
+        self, run: dict[str, Any], task: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Schemas for this run: its snapshot, or one computed and saved now.
+
+        Older runs (and hand-built test runs) have no snapshot. They get one
+        on first use, so every later iteration stays on the same toolset.
+        """
+        meta = util.loads(run.get("meta") or "", {})
+        snapshot = meta.get("toolset") if isinstance(meta, dict) else None
+        if (
+            isinstance(snapshot, dict)
+            and isinstance(snapshot.get("names"), list)
+        ):
+            return self.tools.schemas_for_names(snapshot["names"])
+        selection = self.tools.schemas_for(
+            task.get("domain_id") if task else None,
+            budget_tokens=self._schema_budget(),
+        )
+        self._save_toolset(run["id"], selection)
+        return selection["schemas"]
+
     def _prepare_prompt(
         self,
         transcript: list[dict[str, Any]],
@@ -361,6 +409,16 @@ class AgentRuntime:
             if task.get("domain_id") else None,
             trigger=trigger, pending_approvals=pending,
         )
+        selection = self.tools.schemas_for(
+            task.get("domain_id"), budget_tokens=self._schema_budget()
+        )
+        sources = list(built["sources"])
+        for exclusion in selection["exclusions"]:
+            sources.append({
+                "section": "tools",
+                "ref": exclusion["tool"],
+                "reason": f"excluded: {exclusion['detail']}",
+            })
         user_text = trigger_text or (
             f"[{trigger['kind']}] {trigger.get('name') or ''}".strip()
             if trigger.get("kind") in ("schedule", "heartbeat")
@@ -372,13 +430,14 @@ class AgentRuntime:
         ]
         self.db.execute(
             "INSERT INTO runs(id, task_id, trigger, trigger_ref, status,"
-            " started_at, iterations, tool_calls, transcript, context_sources)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " started_at, iterations, tool_calls, transcript, context_sources,"
+            " meta) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 run_id, task["id"], trigger["kind"],
                 str(trigger_message_id) if trigger_message_id else None,
                 "running", util.iso(), 0, 0, util.dumps(transcript),
-                util.dumps(built["sources"]),
+                util.dumps(sources),
+                util.dumps({"toolset": self._toolset_snapshot(selection)}),
             ),
         )
         self.events.record(
@@ -725,7 +784,7 @@ class AgentRuntime:
 
             # --- model call --------------------------------------------
             transcript = self._transcript(run)
-            tools_schema = self.tools.schemas()
+            tools_schema = self._run_schemas(run, task)
             prompt, repairs, repaired = self._prepare_prompt(
                 transcript, tools_schema
             )
