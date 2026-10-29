@@ -229,6 +229,79 @@ def test_consolidation_merges_and_records_provenance(make_app):
     assert "merge" in log_text
 
 
+def test_merge_keeps_one_statement_instead_of_also_chain(make_app):
+    app = make_app.build(default="ok")
+    summary = app.memory.remember(
+        "User is 24 years old, 74kg, 170cm; primary goal is muscle "
+        "definition; likes pizza.",
+        kind="fact", scope="global", origin="user",
+    )
+    target_id = summary["memory"]["id"]
+    sources = [
+        app.memory.remember(text, kind="fact", scope="global", origin="user")
+        ["memory"]["id"]
+        for text in (
+            "User's age is 24 years old.",
+            "User likes pizza.",
+            "User's height is approximately 170cm.",
+            "User's weight is approximately 74kg.",
+        )
+    ]
+    # Default merges used to append ". Also: <duplicate>" every time, so the
+    # target grew into one long string of restated facts.
+    for source_id in sources:
+        app.memory.merge(source_id, target_id, changed_by="test")
+    target = app.memory.get(target_id)
+    assert "Also:" not in target["content"]
+    assert target["content"] == (
+        "User is 24 years old, 74kg, 170cm; primary goal is muscle "
+        "definition; likes pizza."
+    )
+    assert all(app.memory.get(i)["status"] == "retracted" for i in sources)
+
+
+def test_merge_default_keeps_the_fuller_statement(make_app):
+    app = make_app.build(default="ok")
+    short = app.memory.remember("The wiki is on proxmox.", kind="fact",
+                                scope="global", origin="user")
+    detailed = app.memory.remember(
+        "The wiki is on the proxmox node and served by Caddy.", kind="fact",
+        scope="global", origin="user",
+    )
+    app.memory.merge(detailed["memory"]["id"], short["memory"]["id"],
+                     changed_by="test")
+    merged = app.memory.get(short["memory"]["id"])
+    assert merged["content"] == (
+        "The wiki is on the proxmox node and served by Caddy."
+    )
+
+
+def test_consolidation_rejects_stitched_content(make_app):
+    app = make_app.build(default="ok")
+    a = app.memory.remember("The wiki is hosted on the proxmox node.",
+                            kind="fact", scope="global", origin="user")
+    b = app.memory.remember("Wiki hosting: the proxmox machine.",
+                            kind="fact", scope="global", origin="user")
+    app.model.scripts.append({"content": json.dumps({"changes": [
+        {"op": "merge", "source_id": b["memory"]["id"],
+         "target_id": a["memory"]["id"],
+         "content": "The wiki is on proxmox. Also: Wiki hosting: proxmox "
+                    "machine."},
+        {"op": "create", "content": "User is 24. Also: User likes pizza.",
+         "kind": "fact", "scope": "global"},
+    ]})})
+    report = app.consolidation.run(trigger="manual")
+    assert report["applied"] == []
+    assert len(report["rejected"]) == 2
+    assert all("one statement per memory" in item["result"]
+               for item in report["rejected"])
+    # Nothing was stored or folded.
+    assert app.memory.get(a["memory"]["id"])["content"] == (
+        "The wiki is hosted on the proxmox node."
+    )
+    assert app.memory.get(b["memory"]["id"])["status"] == "active"
+
+
 def test_consolidation_failure_changes_nothing(make_app):
     app = make_app.build(default="ok")
     app.memory.remember("stable fact", kind="fact", scope="global", origin="user")

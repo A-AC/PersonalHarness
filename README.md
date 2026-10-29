@@ -332,6 +332,9 @@ as strict JSON; the harness validates each change and applies it through
 the memory manager so every change carries provenance
 (`consolidation:<run_id>`), a revision, and a line in a markdown change
 log under `artifacts/consolidation/`. A failed pass changes nothing.
+A merge folds a duplicate into one statement (the fuller text, or the
+model's single-sentence replacement); it never concatenates both texts,
+and changes that glue facts together with `Also:` are rejected and logged.
 
 ### Approvals and quick confirmation
 

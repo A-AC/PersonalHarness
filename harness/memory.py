@@ -233,6 +233,17 @@ class MemoryManager:
                 return row
         return None
 
+    @staticmethod
+    def _fuller_statement(first: str, second: str) -> str:
+        """Default merge content: the more informative of two duplicates.
+
+        Duplicates state the same thing, so keeping one of them is enough;
+        the longer text is the better bet at preserving the details. Models
+        that want a blended wording pass ``content`` to ``merge``.
+        """
+        first, second = first.strip(), second.strip()
+        return second if len(second) > len(first) else first
+
     def _write_artifact(self, memory_id: str, body: str) -> str:
         rel = f"memories/{memory_id}.md"
         path = self.artifacts_dir / rel
@@ -318,16 +329,25 @@ class MemoryManager:
         changed_by: str = "consolidation",
         reason: str | None = "merged duplicate",
     ) -> dict[str, Any]:
-        """Fold source into target: combined content, source retracted."""
+        """Fold source into target: one statement, source retracted.
+
+        ``content`` may replace the target's text; without it the fuller of
+        the two statements is kept. Merging never stitches the two texts
+        together, so repeated merges cannot accumulate an "Also:" chain of
+        restated facts.
+        """
         source = self._row(source_id)
         target = self._row(target_id)
         if source is None or target is None:
             raise MemoryError("merge needs two existing memories")
+        if source_id == target_id:
+            raise MemoryError("cannot merge a memory into itself")
+        if source["status"] != "active" or target["status"] != "active":
+            raise MemoryError("merge needs two active memories")
         if source["scope"] != target["scope"] or source["kind"] != target["kind"]:
             raise MemoryError("merge requires the same scope and kind")
-        merged = content or (
-            target["content"].rstrip(".!?") + ". Also: "
-            + source["content"].rstrip(".!?") + "."
+        merged = (content or "").strip() or self._fuller_statement(
+            target["content"], source["content"]
         )
         return self.update(
             target_id, content=merged, changed_by=changed_by, reason=reason

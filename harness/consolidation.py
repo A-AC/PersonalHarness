@@ -13,6 +13,7 @@ nothing.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from . import util
@@ -20,21 +21,37 @@ from .db import Database
 from .model import Model, ModelResponseError, ModelUnavailable
 from .store import Events
 
+# Joins models use to staple separate facts into one memory; consolidation
+# refuses content that contains them so a single row never becomes a chain of
+# restatements.
+_STITCHED = re.compile(
+    r"(?:^|[\s.;])(?:also|additionally|moreover|furthermore|in addition)"
+    r"\s*[:,]",
+    re.IGNORECASE,
+)
+
 _PROMPT = """You are consolidating the memory of a personal assistant.
 
 Below are the assistant's active memories and a transcript of recent
 conversation. Propose a small set of memory changes as strict JSON.
 
 Allowed operations:
-- create: a durable fact/preference/decision worth keeping that is not stored yet
-- update: correct or refine an existing memory (memory_id + new content + reason)
-- merge: two memories are duplicates of the same subject (source_id folds into target_id)
+- create: one durable fact/preference/decision worth keeping that is not stored yet
+- update: correct or refine one existing memory (memory_id + new content + reason)
+- merge: two memories say the same thing (source_id folds into target_id); optional content replaces the target text with one clearer statement
 - retract: a memory is wrong, obsolete, or worthless (memory_id + reason)
 
 Rules:
+- One memory is one short, self-contained statement. Keep separate facts in
+  separate memories; never bundle several facts into one entry.
+- Never prefix content with "User:" and never stitch statements together with
+  "Also:", "Additionally:", "Moreover:", or similar joins.
 - Only durable information: no transient chatter, no restating what another
   memory already covers.
 - Resolve contradictions in favor of the newer statement in the transcript.
+- Merge only memories that state the same subject and fact. Omit content when
+  the target already says it best; otherwise give one concise statement that
+  absorbs the source. Never copy both texts into content.
 - At most {max_changes} changes. Empty list if nothing is worth changing.
 - Reply with ONLY a JSON object: {{"changes": [{{"op": "...", ...}}]}}
 
@@ -133,22 +150,21 @@ class Consolidation:
         op = change.get("op")
         try:
             if op == "create":
-                result = self.memory.remember(
-                    str(change.get("content", "")).strip(),
-                    kind=change.get("kind"),
-                    scope=change.get("scope"),
-                    origin="consolidation",
-                    provenance={"changed_by": changed_by},
-                    domains=self.app.domains,
-                )
-                return {"ok": True, "detail": f"created {result['memory']['id']}"}
+                content = str(change.get("content", "")).strip()
+                return self._apply_create(change, content, changed_by)
             if op == "update":
+                bad = self._stitched_content(change.get("content"))
+                if bad:
+                    return {"ok": False, "detail": bad}
                 self.memory.update(
                     str(change["memory_id"]), content=change.get("content"),
                     changed_by=changed_by, reason=change.get("reason"),
                 )
                 return {"ok": True, "detail": f"updated {change['memory_id']}"}
             if op == "merge":
+                bad = self._stitched_content(change.get("content"))
+                if bad:
+                    return {"ok": False, "detail": bad}
                 self.memory.merge(
                     str(change["source_id"]), str(change["target_id"]),
                     content=change.get("content"), changed_by=changed_by,
@@ -164,6 +180,37 @@ class Consolidation:
         except Exception as exc:
             return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
         return {"ok": False, "detail": f"unknown op {op}"}
+
+    def _apply_create(
+        self, change: dict[str, Any], content: str, changed_by: str
+    ) -> dict[str, Any]:
+        bad = self._stitched_content(content)
+        if bad:
+            return {"ok": False, "detail": bad}
+        result = self.memory.remember(
+            content,
+            kind=change.get("kind"),
+            scope=change.get("scope"),
+            origin="consolidation",
+            provenance={"changed_by": changed_by},
+            domains=self.app.domains,
+        )
+        return {"ok": True, "detail": f"created {result['memory']['id']}"}
+
+    @staticmethod
+    def _stitched_content(content: Any) -> str | None:
+        """Reject memories that glue separate facts together.
+
+        The model used to answer with entries like ``User is 24. Also: User
+        likes pizza.``; one memory must hold one statement, so such a change
+        is refused and reported in the run log instead of being stored.
+        """
+        if not content or not isinstance(content, str):
+            return None
+        if _STITCHED.search(content):
+            return ("content joins several facts with 'Also:'-style markers;"
+                    " store one statement per memory")
+        return None
 
     def _write_log(self, run_id: str, report: dict[str, Any]) -> str:
         rel = f"consolidation/{run_id}.md"
