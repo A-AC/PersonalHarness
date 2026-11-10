@@ -1,7 +1,7 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phase 0 complete)
-Last updated: 2026-10-28
+Status: in progress (Phase 1 complete)
+Last updated: 2026-11-09
 Scope: capability modules (skills + MCP + web), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture.
 
@@ -320,6 +320,8 @@ modules:
 ---
 
 ### Phase 1 - MCP modules, dynamic loading, web module, trust flags
+
+**Status:** complete (2026-11-09).
 
 **Goal:** MCP servers become domain-scoped modules that reload without a
 process restart, and the agent gets web search through SearXNG.
@@ -875,6 +877,11 @@ UI) and update this plan. Do not mix phases.
 | 2026-10-28 | Memory lifetime uses `archived_at`, not a new status | SQLite `CHECK` constraints cannot be altered in place |
 | 2026-10-28 | Phase 0 serves UI assets through the authenticated handler | Avoids a `StaticFiles` mount that would bypass the token |
 | 2026-10-28 | Phase 0 snapshots the toolset with a budget but changes no loader | Tests the seam and records exclusions before modules become authoritative |
+| 2026-11-09 | The registry is authoritative for MCP and web in Phase 1; skills stay directory-based until Phase 2 | Keeps the phase focused on dynamic loading and trust, and avoids a half-migrated skill path |
+| 2026-11-09 | Drop lowest-priority schemas first: rest, global, domain-bound, web, trusted low-risk, builtins | The Phase 0 ordering dropped builtins first, which made the core loop fail before optional modules |
+| 2026-11-09 | The web module starts lazily and reuses cached discovery | Avoids launching a subprocess for every app construction while still refreshing on demand |
+| 2026-11-09 | Taint escalation applies to any side-effecting, non-read-only tool, not only MCP tools | Phase 1 already exposes external content; the rule must hold for every future side-effecting capability |
+| 2026-11-09 | Approval reasons name the first recorded untrusted origin (URL, source, or tool) | The user needs the source in the prompt to authorize with context |
 
 ---
 

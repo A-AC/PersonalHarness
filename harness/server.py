@@ -447,7 +447,89 @@ class Server:
         )
         return _json(report)
 
-    # -- tools / endpoint diagnostics --------------------------------------------
+    # -- modules / tools / endpoint diagnostics -----------------------------------
+
+    async def modules_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json(await run_in_threadpool(self._modules_payload))
+
+    def _modules_payload(self) -> dict[str, Any]:
+        modules = []
+        for module in self.app.modules.all():
+            tools = self.app.modules.tools(module.id)
+            modules.append({
+                "id": module.id,
+                "kind": module.kind,
+                "name": module.name,
+                "version": module.version,
+                "status": module.status,
+                "scope": module.scope,
+                "origin": module.origin,
+                "manifest": module.manifest,
+                "last_loaded_at": module.last_loaded_at,
+                "last_error": module.last_error,
+                "usage_count": module.usage_count,
+                "bound_domains": [
+                    binding.domain_id
+                    for binding in self.app.modules.bindings(module.id)
+                    if binding.enabled
+                ],
+                "tools": [
+                    {"name": tool.tool_name, "risk": tool.risk,
+                     "side_effects": tool.side_effects,
+                     "read_only": tool.read_only}
+                    for tool in tools
+                ],
+                "health": self.app.modules.status.get(module.id, ""),
+            })
+        return {
+            "modules": modules,
+            "schema_budget_tokens": int(
+                self.app.config.get("modules.tool_schema_budget_tokens", 0)
+            ),
+        }
+
+    async def modules_reload(self, request: Request) -> Response:
+        """Reload every module without a restart."""
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        try:
+            report = await run_in_threadpool(self.app.modules.reload)
+        except Exception as exc:
+            return _err(f"{type(exc).__name__}: {exc}", 500)
+        return _json({"report": report})
+
+    async def module_action(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        module_id = request.path_params["module_id"]
+        action = request.path_params["action"]
+        module = self.app.modules.get(module_id)
+        if module is None:
+            return _err("no such module", 404)
+        try:
+            if action == "reload":
+                result = await run_in_threadpool(
+                    self.app.modules.reload, module_id
+                )
+                return _json({"module": result})
+            if action in ("enable", "disable"):
+                updated = await run_in_threadpool(
+                    self.app.modules.set_enabled, module_id,
+                    action == "enable",
+                )
+                return _json({
+                    "module": {
+                        "id": updated.id, "status": updated.status,
+                    },
+                    "health": self.app.modules.status.get(module_id, ""),
+                })
+        except ValueError as exc:
+            return _err(str(exc), 404)
+        except Exception as exc:
+            return _err(f"{type(exc).__name__}: {exc}", 500)
+        return _err("invalid action")
 
     async def tools_list(self, request: Request) -> Response:
         if not self._authorized(request):
@@ -455,10 +537,13 @@ class Server:
         return _json({
             "tools": [
                 {"name": spec.name, "risk": spec.risk,
-                 "module": spec.module}
+                 "module": spec.module,
+                 "side_effects": spec.side_effects,
+                 "read_only": spec.read_only,
+                 "untrusted_output": spec.untrusted_output}
                 for spec in self.app.tools.specs()
             ],
-            "mcp_status": self.app.mcp.status,
+            "mcp_status": self.app.modules.status,
         })
 
     async def endpoint_probe(self, request: Request) -> Response:
@@ -553,6 +638,10 @@ class Server:
                   methods=["PATCH"]),
             Route("/api/heartbeat", self.heartbeat, methods=["POST"]),
             Route("/api/consolidate", self.consolidate, methods=["POST"]),
+            Route("/api/modules", self.modules_list, methods=["GET"]),
+            Route("/api/modules/reload", self.modules_reload, methods=["POST"]),
+            Route("/api/modules/{module_id}/{action}", self.module_action,
+                  methods=["POST"]),
             Route("/api/tools", self.tools_list, methods=["GET"]),
             Route("/api/endpoint-probe", self.endpoint_probe, methods=["GET"]),
             Route("/api/config", self.config_get, methods=["GET"]),

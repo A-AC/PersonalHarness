@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -275,13 +276,63 @@ def cmd_events(args: argparse.Namespace) -> None:
               f"{event['type']} {data_text}")
 
 
+def _module_action_path(module_id: str, action: str) -> str:
+    """Quote a module id for a path segment (ids may contain spaces)."""
+    quoted = urllib.parse.quote(module_id, safe=":")
+    return f"/api/modules/{quoted}/{action}"
+
+
+def cmd_modules(args: argparse.Namespace) -> None:
+    client = Client(_base_url(args), _token(args))
+    if args.reload is not None:
+        path = (
+            _module_action_path(args.reload, "reload")
+            if args.reload else "/api/modules/reload"
+        )
+        out = client.call("POST", path, {})
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.enable:
+        out = client.call("POST", _module_action_path(args.enable, "enable"), {})
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.disable:
+        out = client.call(
+            "POST", _module_action_path(args.disable, "disable"), {}
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
+    out = client.call("GET", "/api/modules")
+    for module in out.get("modules", []):
+        print(
+            f"{module['id']}  [{module['kind']}/{module['scope']}] "
+            f"{module['status']}  {module['name']}"
+        )
+        domains = ", ".join(module.get("bound_domains") or []) or "-"
+        print(
+            f"    domains={domains} tools="
+            f"{len(module.get('tools') or [])} "
+            f"health={module.get('health') or '-'}"
+        )
+        if module.get("last_error"):
+            print(f"    last_error: {module['last_error']}")
+
+
 def cmd_tools(args: argparse.Namespace) -> None:
     client = Client(_base_url(args), _token(args))
     out = client.call("GET", "/api/tools")
     for tool in out.get("tools", []):
-        print(f"[{tool['risk']:>7}] {tool['name']}")
+        flags = []
+        if tool.get("untrusted_output"):
+            flags.append("untrusted")
+        if tool.get("read_only"):
+            flags.append("read-only")
+        elif tool.get("side_effects"):
+            flags.append("side-effects")
+        suffix = f"  ({', '.join(flags)})" if flags else ""
+        print(f"[{tool['risk']:>7}] {tool['name']}{suffix}")
     if out.get("mcp_status"):
-        print("mcp: " + json.dumps(out["mcp_status"]))
+        print("modules: " + json.dumps(out["mcp_status"]))
 
 
 def cmd_backup(args: argparse.Namespace) -> None:
@@ -394,6 +445,14 @@ def build_parser() -> argparse.ArgumentParser:
     common(p)
     p.add_argument("-N", "--limit", type=int, default=100)
     p.set_defaults(func=cmd_events)
+
+    p = sub.add_parser("modules", help="list, reload, enable, or disable modules")
+    common(p)
+    p.add_argument("--reload", nargs="?", const="", metavar="ID", default=None,
+                   help="reload one module, or every module when ID is omitted")
+    p.add_argument("--enable", metavar="ID", default=None)
+    p.add_argument("--disable", metavar="ID", default=None)
+    p.set_defaults(func=cmd_modules)
 
     p = sub.add_parser("tools", help="list registered tools")
     common(p); p.set_defaults(func=cmd_tools)

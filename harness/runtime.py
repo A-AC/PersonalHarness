@@ -131,37 +131,152 @@ class AgentRuntime:
             )
         }
 
+    def _run_meta(self, run_id: str) -> dict[str, Any]:
+        run = self._run_row(run_id)
+        meta = util.loads(run.get("meta") or "", {}) if run else {}
+        return meta if isinstance(meta, dict) else {}
+
+    def _save_meta(self, run_id: str, meta: dict[str, Any]) -> None:
+        self._save_run(run_id, meta=util.dumps(meta))
+
+    def _toolset(self, run_id: str) -> dict[str, Any]:
+        snapshot = self._run_meta(run_id).get("toolset")
+        return snapshot if isinstance(snapshot, dict) else {}
+
+    def _allowed_tool_names(self, run_id: str) -> set[str] | None:
+        """The run snapshot's tool names, or ``None`` before one exists."""
+        names = self._toolset(run_id).get("names")
+        return set(names) if isinstance(names, list) else None
+
+    def _select_tools(self, domain_id: str | None) -> dict[str, Any]:
+        """Resolve eligible modules, then apply the schema budget."""
+        return self.tools.schemas_for(
+            domain_id,
+            budget_tokens=self._schema_budget(),
+            eligible_modules=self.app.modules.eligible_module_ids(domain_id),
+        )
+
     def _save_toolset(
         self, run_id: str, selection: dict[str, Any]
     ) -> None:
-        run = self._run_row(run_id)
-        meta = util.loads(run.get("meta") or "", {}) if run else {}
-        if not isinstance(meta, dict):
-            meta = {}
+        meta = self._run_meta(run_id)
         meta["toolset"] = self._toolset_snapshot(selection)
-        self._save_run(run_id, meta=util.dumps(meta))
+        self._save_meta(run_id, meta)
+
+    def _append_context_source(
+        self, run_id: str, source: dict[str, Any]
+    ) -> None:
+        run = self._run_row(run_id)
+        sources = util.loads(run.get("context_sources") or "", []) if run else []
+        if not isinstance(sources, list):
+            sources = []
+        sources.append(source)
+        self._save_run(run_id, context_sources=util.dumps(sources))
+
+    def _record_toolset_change(
+        self, run_id: str, previous: dict[str, Any], selection: dict[str, Any]
+    ) -> None:
+        """The domain changed mid-run; recompute and explain the change."""
+        old_domain = previous.get("domain_id")
+        new_domain = selection.get("domain_id")
+        detail = (
+            f"task domain changed from {old_domain!r} to {new_domain!r}; "
+            "the toolset was recomputed for the run"
+        )
+        self.events.record(
+            "toolset.changed", run_id=run_id,
+            data={
+                "from_domain_id": old_domain,
+                "to_domain_id": new_domain,
+                "names": selection["names"],
+                "modules": selection["modules"],
+            },
+        )
+        self._append_context_source(
+            run_id,
+            {"section": "tools", "ref": "toolset.changed", "reason": detail},
+        )
+        for exclusion in selection["exclusions"]:
+            self._append_context_source(run_id, {
+                "section": "tools",
+                "ref": exclusion["tool"],
+                "reason": f"excluded: {exclusion['detail']}",
+            })
 
     def _run_schemas(
         self, run: dict[str, Any], task: dict[str, Any] | None
     ) -> list[dict[str, Any]]:
         """Schemas for this run: its snapshot, or one computed and saved now.
 
-        Older runs (and hand-built test runs) have no snapshot. They get one
-        on first use, so every later iteration stays on the same toolset.
+        A module reload or a domain switch cannot silently change the toolset
+        mid-run. The one allowed change is an explicit domain change (for
+        example ``use_domain``): it recomputes once and records the event and
+        a context source. Older runs without a snapshot get one on first use.
         """
-        meta = util.loads(run.get("meta") or "", {})
-        snapshot = meta.get("toolset") if isinstance(meta, dict) else None
-        if (
-            isinstance(snapshot, dict)
-            and isinstance(snapshot.get("names"), list)
-        ):
+        domain_id = task.get("domain_id") if task else None
+        snapshot = self._toolset(run["id"])
+        if isinstance(snapshot.get("names"), list):
+            if snapshot.get("domain_id") != domain_id:
+                selection = self._select_tools(domain_id)
+                self._save_toolset(run["id"], selection)
+                self._record_toolset_change(run["id"], snapshot, selection)
+                return selection["schemas"]
             return self.tools.schemas_for_names(snapshot["names"])
-        selection = self.tools.schemas_for(
-            task.get("domain_id") if task else None,
-            budget_tokens=self._schema_budget(),
-        )
+        selection = self._select_tools(domain_id)
         self._save_toolset(run["id"], selection)
         return selection["schemas"]
+
+    # -- trust / taint -----------------------------------------------------
+
+    def _taint_sources(self, run_id: str) -> list[dict[str, Any]]:
+        sources = self._run_meta(run_id).get("tainted_sources")
+        return sources if isinstance(sources, list) else []
+
+    def _taint_origin(self, result: Any) -> str:
+        """Name the external origin an approval prompt must identify."""
+        if isinstance(result, dict):
+            sources = result.get("sources")
+            if isinstance(sources, list):
+                urls = [str(url) for url in sources if str(url).strip()]
+                if urls:
+                    return urls[0]
+            for key in ("url", "source", "origin"):
+                if result.get(key):
+                    return util.clip(str(result[key]), 300)
+            if result.get("query"):
+                return f"web results for '{result['query']}'"
+            content = result.get("content")
+            if isinstance(content, str) and content.strip():
+                return util.clip(content.strip(), 300)
+        return util.clip(str(result or ""), 300)
+
+    def _mark_tainted(
+        self, run_id: str, tool: str, module: str, origin: str
+    ) -> dict[str, Any]:
+        """Record untrusted content on the run (bounded, newest last)."""
+        meta = self._run_meta(run_id)
+        sources = meta.get("tainted_sources")
+        if not isinstance(sources, list):
+            sources = []
+        entry = {
+            "tool": tool,
+            "module": module,
+            "origin": util.clip(origin, 300),
+            "at": util.iso(),
+        }
+        if sources and all(
+            sources[-1].get(key) == entry[key]
+            for key in ("tool", "origin")
+        ):
+            return sources[-1]
+        sources.append(entry)
+        meta["tainted_sources"] = sources[-20:]
+        self._save_meta(run_id, meta)
+        self.events.record(
+            "trust.tainted", run_id=run_id,
+            data={"tool": tool, "module": module, "origin": entry["origin"]},
+        )
+        return entry
 
     def _prepare_prompt(
         self,
@@ -409,9 +524,7 @@ class AgentRuntime:
             if task.get("domain_id") else None,
             trigger=trigger, pending_approvals=pending,
         )
-        selection = self.tools.schemas_for(
-            task.get("domain_id"), budget_tokens=self._schema_budget()
-        )
+        selection = self._select_tools(task.get("domain_id"))
         sources = list(built["sources"])
         for exclusion in selection["exclusions"]:
             sources.append({
@@ -588,10 +701,19 @@ class AgentRuntime:
             raw_arguments=util.dumps(approval["arguments"]),
         )
         ctx = self.app.tool_context(run["id"], task["id"], task.get("domain_id"))
+        allowed = self._allowed_tool_names(run["id"])
         outcome = self.tools.execute(
             call, ctx, run_id=run["id"], task_id=task["id"],
             execution_id=execution_id, approval_id=approval["id"],
+            allowed_names=allowed,
         )
+        if outcome.get("status") == "succeeded":
+            spec = self.tools.resolve_optional(call.name)
+            if spec is not None and spec.untrusted_output:
+                self._mark_tainted(
+                    run["id"], call.name, spec.module,
+                    self._taint_origin(outcome.get("result")),
+                )
         self.approvals.mark_executed(approval["id"])
         self._append_tool_result(
             run["id"], call.id, outcome, approval["id"]
@@ -943,8 +1065,11 @@ class AgentRuntime:
         self, run: dict[str, Any], task: dict[str, Any], call: ToolCall
     ) -> dict[str, Any]:
         run_id, task_id = run["id"], task["id"]
+        # Visibility is enforced here as well as in the prompt: a call by name
+        # for a tool outside this run's snapshot is denied, not executed.
+        allowed = self._allowed_tool_names(run_id)
         try:
-            spec = self.tools.resolve(call.name)
+            spec = self.tools.resolve(call.name, allowed=allowed)
         except Exception as exc:
             self.tools.record_rejected(
                 call, run_id=run_id, task_id=task_id, error=str(exc)
@@ -981,7 +1106,28 @@ class AgentRuntime:
                         ),
                     }
 
-        if spec.risk == "confirm":
+        # Trust/taint policy: once this run has consumed untrusted content, a
+        # side-effecting tool is escalated to confirm even when it is
+        # configured low-risk or auto-approved. Read-only tools stay low.
+        taint = self._taint_sources(run_id)
+        tainted_side_effect = bool(
+            taint and spec.side_effects and not spec.read_only
+        )
+        escalated = tainted_side_effect and spec.risk != "confirm"
+        effective_risk = "confirm" if escalated else spec.risk
+        taint_origin = str(taint[0].get("origin") or "") if taint else ""
+        if escalated:
+            self.events.record(
+                "trust.escalated", task_id=task_id, run_id=run_id,
+                data={
+                    "tool": call.name,
+                    "module": spec.module,
+                    "from_risk": spec.risk,
+                    "origin": taint_origin,
+                },
+            )
+
+        if effective_risk == "confirm":
             pending = self.approvals.pending_for_run(run_id)
             if pending is not None:
                 # A confirm-risk action is already awaiting a decision; do
@@ -992,15 +1138,20 @@ class AgentRuntime:
                              f"({pending['tool']}); wait for that decision.",
                 }
             try:
-                arguments = self.tools.validate(call)
+                arguments = self.tools.validate(call, allowed=allowed)
             except Exception as exc:
                 return {"status": "denied", "error": str(exc)}
             action = "create_domain" if call.name == "create_domain" else "tool"
+            reason = (
+                f"untrusted content from {taint_origin} requires approval "
+                f"before {call.name} can change state"
+                if tainted_side_effect else f"confirm-risk tool: {call.name}"
+            )
             approval = self.approvals.create(
                 task_id=task_id, run_id=run_id, action=action,
                 tool=call.name, arguments=arguments,
-                risk=spec.risk, tool_call_id=call.id,
-                reason=f"confirm-risk tool: {call.name}",
+                risk=effective_risk, tool_call_id=call.id,
+                reason=reason,
             )
             execution_id = util.new_id("ex")
             self.db.execute(
@@ -1026,10 +1177,16 @@ class AgentRuntime:
                 task_id, "waiting_approval",
                 reason=f"awaiting approval for {call.name}",
             )
+            provenance = (
+                f" This run contains untrusted content from **{taint_origin}**, "
+                "so a side-effecting action needs your explicit approval."
+                if tainted_side_effect else ""
+            )
             note = (
                 f"I want to run **{call.name}** with "
-                f"{util.clip(util.dumps(arguments), 400)}. This action needs "
-                "your approval (reply approve/reject, or use the Approvals panel)."
+                f"{util.clip(util.dumps(arguments), 400)}.{provenance} This "
+                "action needs your approval (reply approve/reject, or use the "
+                "Approvals panel)."
             )
             self.messages.record(
                 "note", note, source="system", task_id=task_id, run_id=run_id,
@@ -1042,7 +1199,16 @@ class AgentRuntime:
             }
 
         ctx = self.app.tool_context(run_id, task_id, task.get("domain_id"))
-        return self.tools.execute(call, ctx, run_id=run_id, task_id=task_id)
+        outcome = self.tools.execute(
+            call, ctx, run_id=run_id, task_id=task_id,
+            allowed_names=allowed,
+        )
+        if outcome.get("status") == "succeeded" and spec.untrusted_output:
+            self._mark_tainted(
+                run_id, call.name, spec.module,
+                self._taint_origin(outcome.get("result")),
+            )
+        return outcome
 
     def _append_tool_result(
         self, run_id: str, call_id: str, outcome: dict[str, Any],

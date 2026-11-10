@@ -1,28 +1,35 @@
-"""Module registry: persistence and the ``load_all`` seam.
+"""Module registry: persistence, eligibility, and the loader seam.
 
-Phase 0 deliberately keeps the existing skill directory and MCP servers file
-as the source of truth. ``load_all`` is a no-op placeholder so later phases
-can replace those loaders without changing the composition root again.
+MCP and web modules are authoritative in Phase 1: ``load_all`` imports the
+legacy servers file, creates the shipped web module, discovers tools, caches
+them in ``module_tools``, and registers callable specs. Skills still load
+through their directory until Phase 2.
 
-Until then the registry still owns the module tables and exposes read
-helpers, so the UI and tests can inspect records that a later loader writes.
+The registry is also the single place that answers "which modules are active
+for this domain?", so the runtime never re-implements binding rules.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import util
 from ..db import Database
 from ..store import Events
 from .types import Module, ModuleBinding, ModuleTool
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..tools import ToolRegistry
+
 
 class ModuleRegistry:
     """Read/write access to module records for one data directory."""
 
-    def __init__(self, db: Database, events: Events, config, data_dir: Path):
+    def __init__(
+        self, db: Database, events: Events, config, data_dir: Path,
+        tools: "ToolRegistry | None" = None,
+    ):
         self.db = db
         self.events = events
         self.config = config
@@ -30,17 +37,63 @@ class ModuleRegistry:
         self.root = self.data_dir / str(config.get("modules.dir", "modules"))
         self.root.mkdir(parents=True, exist_ok=True)
         self.skills_dir = self.root / "skills"
+        # Keep the tool registry off the ``tools()`` read method's name.
+        self.tool_registry = tools
+        self._loader = None
 
     # -- loading ----------------------------------------------------------
 
-    def load_all(self) -> dict[str, Any]:
-        """Discover and register capability modules.
+    @property
+    def loader(self):
+        if self._loader is None:
+            from .mcp import McpModuleLoader
 
-        Phase 0: intentionally empty. Skills and MCP servers are still loaded
-        by their existing loaders. The return shape is stable for the callers
-        added in Phase 1.
+            self._loader = McpModuleLoader(
+                self, self.tool_registry, self.config, self.events
+            )
+        return self._loader
+
+    @property
+    def status(self) -> dict[str, str]:
+        """Per-module human status for diagnostics (``/api/tools``)."""
+        return self.loader.status
+
+    def load_all(self) -> dict[str, Any]:
+        """Import, discover, and register every eligible capability module."""
+        return self.loader.load_all()
+
+    def reload(self, module_id: str | None = None) -> dict[str, Any]:
+        """Reload one module or all modules without a process restart."""
+        return self.loader.reload(module_id)
+
+    def set_enabled(self, module_id: str, enabled: bool) -> Module:
+        return self.loader.set_enabled(module_id, enabled)
+
+    def health_tick(self, now=None) -> dict[str, Any]:
+        return self.loader.health_tick(now)
+
+    def eligible_module_ids(self, domain_id: str | None) -> set[str]:
+        """Active modules that may contribute tools in this domain.
+
+        ``global`` is always eligible; ``domain`` requires an enabled binding;
+        ``adaptive`` is reserved for skills (Phase 2). Draft, disabled, and
+        error modules are never eligible.
         """
-        return {"loaded": [], "skipped": [], "errors": []}
+        bound = {
+            binding.module_id
+            for binding in self.bindings()
+            if binding.enabled and domain_id is not None
+            and binding.domain_id == domain_id
+        }
+        eligible: set[str] = set()
+        for module in self.all():
+            if module.status != "active" or module.kind == "skill":
+                continue
+            if module.scope == "global":
+                eligible.add(module.id)
+            elif module.scope == "domain" and module.id in bound:
+                eligible.add(module.id)
+        return eligible
 
     # -- reads ------------------------------------------------------------
 
@@ -144,6 +197,7 @@ class ModuleRegistry:
         return tools
 
     def record_error(self, module_id: str, error: str) -> None:
+        """Mark a module unloadable (invalid manifest/transport)."""
         self.db.execute(
             "UPDATE modules SET status='error', last_error=?, updated_at=?"
             " WHERE id=?", (util.clip(error, 1000), util.iso(), module_id),
@@ -153,8 +207,27 @@ class ModuleRegistry:
             data={"module_id": module_id, "error": util.clip(error, 500)},
         )
 
+    def set_last_error(self, module_id: str, error: str) -> None:
+        """Record a transient failure without dropping cached capability.
 
-def load_all(db: Database, events: Events, config, data_dir: Path
-             ) -> dict[str, Any]:
+        Health failures keep the module active: cached tools still work and a
+        later tick can recover. A turn is never blocked by an unavailable
+        server.
+        """
+        self.db.execute(
+            "UPDATE modules SET last_error=?, updated_at=? WHERE id=?",
+            (util.clip(error, 1000), util.iso(), module_id),
+        )
+
+    def mark_loaded(self, module_id: str) -> None:
+        self.db.execute(
+            "UPDATE modules SET last_loaded_at=?, last_error=NULL,"
+            " updated_at=? WHERE id=?",
+            (util.iso(), util.iso(), module_id),
+        )
+
+
+def load_all(db: Database, events: Events, config, data_dir: Path,
+             tools: "ToolRegistry | None" = None) -> dict[str, Any]:
     """Convenience wrapper for callers that do not hold a registry object."""
-    return ModuleRegistry(db, events, config, data_dir).load_all()
+    return ModuleRegistry(db, events, config, data_dir, tools=tools).load_all()

@@ -1,14 +1,60 @@
 # Optional stdio MCP servers.
 #
 # Point tools.mcp_servers_file in data/config.yaml at a copy of this file
-# (absolute path recommended). Tools are discovered at harness start; a
-# server that fails to start is shown as unavailable and never blocks turns.
+# (absolute path recommended). Entries are imported into module rows
+# (id: mcp:<name>) on first load; later edits to this file do not overwrite
+# an existing row. Use `python -m harness modules --reload mcp:<name>` after
+# changing a manifest directly in the database.
 #
-# autoapprove: true  -> the server's tools run without per-call approval
-# (default)          -> every call needs an explicit approval
+# Fields:
+#   transport     stdio only for now
+#   command       executable to launch (required)
+#   args          argument list
+#   env           variable names to forward from the harness environment;
+#                 values are never stored in editable state
+#   domains       bind the module to these domains (scope=domain).
+#                 Omit/empty for scope=global
+#   scope         explicit global|domain (inferred from domains when omitted)
+#   autoapprove   true -> calls run without per-call approval (default false)
+#   risk_default  low|confirm (default: modules.default_mcp_risk)
+#   tools_allow   only expose these discovered tool names
+#   tools_deny    never expose these discovered tool names
+#   read_only     true -> output cannot change the world; stays low-risk in a
+#                 tainted run. Default false: unknown provenance is
+#                 side-effecting.
+#   side_effects  explicit override; defaults to not read_only
+#   startup       eager|lazy (default lazy: use cached discovery, launch on
+#                 first call or reload)
+#   timeout_s     per-request subprocess timeout (default 30)
+#
+# Every MCP tool result is untrusted data. After an untrusted result enters a
+# run, a side-effecting non-read-only tool needs approval even when it is
+# auto-approved or configured low-risk.
+
 servers:
   - name: example_echo
     command: python
     args:
       - examples/mcp/echo_server.py
     autoapprove: true
+    read_only: true
+    startup: lazy
+    timeout_s: 30
+    tools_allow:
+      - echo
+      - add
+
+  # Domain-bound example: only eligible for tasks in dom_example. Enable the
+  # binding with `python -m harness modules --enable mcp:example_domain`.
+  # - name: example_domain
+  #   command: python
+  #   args:
+  #     - examples/mcp/echo_server.py
+  #   domains:
+  #     - dom_example
+  #   tools_allow:
+  #     - echo
+  #   autoapprove: false
+  #   read_only: false
+  #   side_effects: true
+  #   startup: eager

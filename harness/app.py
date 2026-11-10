@@ -32,7 +32,7 @@ from .modules.registry import ModuleRegistry
 from .runtime import AgentRuntime
 from .scheduler import Scheduler
 from .store import Domains, Events, Messages, Tasks
-from .tools import ToolContext, ToolRegistry, McpTools
+from .tools import ToolContext, ToolRegistry
 
 log = get_logger("app")
 
@@ -138,12 +138,11 @@ class App:
             self.db, self.events, self.config, self.artifacts_dir
         )
         self.modules = ModuleRegistry(
-            self.db, self.events, self.config, data_dir
+            self.db, self.events, self.config, data_dir, tools=self.tools
         )
-        self.mcp = McpTools(self.tools, self.config, self.events)
-        self.mcp.load()
-        # Phase 0 seam: the registry exists and is queried by the runtime,
-        # while skills/MCP keep loading through their existing paths.
+        # Phase 1: the registry is authoritative for MCP and web modules. It
+        # imports the legacy servers file once, creates the shipped web
+        # module, discovers/caches tools, and registers callable specs.
         self.modules.load_all()
         self.approvals = Approvals(self.db, self.events, self.config, self.model)
         self.context = ContextBuilder(

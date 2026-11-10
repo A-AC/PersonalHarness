@@ -1,4 +1,4 @@
-"""Phase 0 foundations: UI shell split, module registry seam, schema v3."""
+"""Module foundations: registry, v3 schema, budget, and the web seam."""
 
 from __future__ import annotations
 
@@ -12,16 +12,19 @@ from harness.modules.types import Module, ModuleBinding, ModuleTool
 from harness.server import Server
 
 
-def test_module_package_is_wired_without_changing_loaders(make_app):
+def test_module_registry_is_the_authoritative_capability_loader(make_app):
     app = make_app.build(default="ok")
-    assert app.modules.load_all() == {
-        "loaded": [], "skipped": [], "errors": [],
-    }
+    report = app.modules.load_all()
+    assert "web" in report["loaded"]
+    assert report["errors"] == []
     assert app.modules.root.is_dir()
     assert app.config.get("modules.enabled") is True
     assert app.config.get("modules.dir") == "modules"
     assert app.config.get("modules.health_interval_s") == 300.0
     assert app.config.get("modules.tool_schema_budget_tokens") == 2400
+    assert "web_search" in app.tools.names()
+    web = app.modules.get("web")
+    assert web is not None and web.kind == "web" and web.status == "active"
     tables = {
         row["name"] for row in app.db.query(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -63,7 +66,7 @@ def test_registry_round_trips_records_and_bindings(make_app):
     tools = app.modules.tools("skill_demo")
     assert [tool.tool_name for tool in tools] == ["demo_tool"]
     assert tools[0].read_only is True
-    assert app.modules.all()[0].name == "Demo"
+    assert app.modules.get("skill_demo").name == "Demo"
 
 
 def test_schema_migration_from_v2_opens_an_existing_database(tmp_path):
@@ -125,11 +128,12 @@ def test_schema_budget_drops_whole_tools_and_records_exclusions(make_app):
     for exclusion in selection["exclusions"]:
         assert exclusion["reason"] == "tool_schema_budget"
         assert exclusion["tokens"] >= 1
-        assert exclusion["module"] == "builtin"
+        assert exclusion["module"] in ("builtin", "web")
 
 
 def test_run_persists_a_global_toolset_snapshot(make_app):
     app = make_app.build(default="ok")
+    app.config.set("modules.tool_schema_budget_tokens", 100000)
     result = app.runtime.submit_user_message("hello")
     assert result.status == "completed"
     run = app.db.query_one(
@@ -137,9 +141,11 @@ def test_run_persists_a_global_toolset_snapshot(make_app):
     )
     snapshot = util.loads(run["meta"], {})["toolset"]
     assert set(snapshot["names"]) == set(app.tools.names())
-    assert snapshot["modules"] == ["builtin"]
+    assert set(snapshot["modules"]) == {
+        spec.module for spec in app.tools.specs()
+    }
     assert snapshot["exclusions"] == []
-    assert snapshot["budget_tokens"] == 2400
+    assert snapshot["budget_tokens"] == 100000
 
 
 def test_budget_dropped_tools_are_recorded_on_the_run(make_app):
@@ -167,7 +173,48 @@ def test_tool_specs_drive_the_api_without_private_registry_access(make_app, clie
     assert {spec.name for spec in specs} == set(app.tools.names())
     payload = client(app).get("/api/tools").json()
     assert {tool["name"] for tool in payload["tools"]} == set(app.tools.names())
-    assert all(tool["module"] == "builtin" for tool in payload["tools"])
+    builtins = {tool["name"] for tool in payload["tools"]
+                if tool["module"] == "builtin"}
+    assert {"remember", "search_knowledge"} <= builtins
+    assert any(tool["module"] == "web" for tool in payload["tools"])
+
+
+def test_modules_api_lists_reloads_and_toggles(make_app, client):
+    app = make_app.build(default="ok")
+    api = client(app)
+
+    payload = api.get("/api/modules").json()
+    web = next(module for module in payload["modules"]
+               if module["id"] == "web")
+    assert web["status"] == "active"
+    assert web["tools"] and web["tools"][0]["name"] == "web_search"
+    assert web["bound_domains"] == []
+    assert payload["schema_budget_tokens"] == 2400
+
+    disabled = api.post("/api/modules/web/disable").json()
+    assert disabled["module"]["status"] == "disabled"
+    assert "web_search" not in app.tools.names()
+    assert "web" not in app.modules.eligible_module_ids(None)
+
+    enabled = api.post("/api/modules/web/enable").json()
+    assert enabled["module"]["status"] == "active"
+    assert "web_search" in app.tools.names()
+
+    reloaded = api.post("/api/modules/web/reload").json()
+    assert reloaded["module"]["loaded"] is True
+
+    report = api.post("/api/modules/reload").json()["report"]
+    assert "web" in report["loaded"]
+
+
+def test_heartbeat_runs_module_health_without_blocking(make_app):
+    app = make_app.build(default="ok")
+    report = app.scheduler.heartbeat()
+    modules = report["modules"]
+    assert modules["skipped"] is False
+    assert "web" in modules["module_ids"]
+    assert modules["checked"] >= 1
+    assert modules["errors"] == []
 
 
 def test_ui_assets_require_authentication(make_app):

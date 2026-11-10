@@ -53,8 +53,18 @@ class ToolSpec:
     risk: str
     handler: Callable[["ToolContext", dict[str, Any]], dict[str, Any]]
     # Capability attribution. Builtins belong to the harness itself; module
-    # tools carry the owning module id (Phase 1 fills this from the registry).
+    # tools carry the owning module id (filled from the registry).
     module: str = "builtin"
+    # Trust metadata. ``side_effects`` means the tool can change the world
+    # outside the harness; ``read_only`` is an explicit module declaration;
+    # ``untrusted_output`` means the result text is not authored by the user
+    # and taints the run for later steps. Unknown provenance is treated as
+    # side-effecting: only builtins and modules that opt in are exempt.
+    side_effects: bool = False
+    read_only: bool = False
+    untrusted_output: bool = False
+    # Eligibility scope of the owning module (global | domain | adaptive).
+    scope: str = "global"
 
 
 @dataclass
@@ -156,20 +166,52 @@ class ToolRegistry:
         self._tools[spec.name] = ToolSpec(
             name=spec.name, description=spec.description,
             parameters=spec.parameters, risk=effective, handler=spec.handler,
-            module=spec.module,
+            module=spec.module, side_effects=bool(spec.side_effects),
+            read_only=bool(spec.read_only),
+            untrusted_output=bool(spec.untrusted_output),
+            scope=spec.scope,
         )
 
-    def resolve(self, name: str) -> ToolSpec:
+    def unregister_module(self, module_id: str) -> list[str]:
+        """Remove every tool owned by one module (reload/disable).
+
+        Tools are registered globally and filtered per run; removing them
+        here makes a disabled module immediately uncallable while a run
+        snapshot simply stops disclosing names that no longer exist.
+        """
+        names = [
+            name for name, spec in self._tools.items()
+            if spec.module == module_id
+        ]
+        for name in names:
+            self._tools.pop(name, None)
+        return names
+
+    def resolve(
+        self, name: str, *, allowed: set[str] | frozenset[str] | None = None
+    ) -> ToolSpec:
         spec = self._tools.get(name)
         if spec is None:
             raise ToolError(
                 f"unknown tool: {name} (available: "
                 f"{', '.join(sorted(self._tools))})"
             )
+        # Visibility is enforced twice: the schema is filtered per run, and a
+        # call by name is refused when the tool is not in the run snapshot.
+        # Hiding a schema while still accepting the call is a permission
+        # bypass, so this check is deliberately independent of risk class.
+        if allowed is not None and name not in allowed:
+            raise ToolDenied(
+                f"tool '{name}' is not available in this run"
+            )
         return spec
 
     def names(self) -> list[str]:
         return sorted(self._tools)
+
+    def resolve_optional(self, name: str) -> ToolSpec | None:
+        """Look up a tool without raising (used by module registration)."""
+        return self._tools.get(name)
 
     def specs(self) -> list[ToolSpec]:
         """Every registered tool in deterministic declaration order."""
@@ -191,21 +233,43 @@ class ToolRegistry:
         return [self._schema(spec) for spec in self._tools.values()]
 
     def schemas_for(
-        self, domain_id: str | None, *, budget_tokens: int | None = None
+        self,
+        domain_id: str | None,
+        *,
+        budget_tokens: int | None = None,
+        eligible_modules: set[str] | frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Select this run's tool schemas under a token budget.
 
-        Phase 0 has no module eligibility yet: every tool is global. The
-        budget is enforced by dropping whole tools, lowest priority and
-        latest-registered first, never by trimming a schema. The selection is
-        deterministic for a given registry and budget.
+        ``eligible_modules`` is the registry's active module set for the
+        task's domain. Builtins are always eligible. Ineligible module tools
+        are excluded with a recorded reason, so a domain-bound module cannot
+        leak into another domain. The budget drops whole tools, lowest
+        priority and latest-registered first, never a partial schema.
 
-        Returns a dict with the schemas plus the capability snapshot fields
-        persisted on the run: names, modules, exclusions, token totals.
+        Returns the schemas plus the capability snapshot fields persisted on
+        the run: names, modules, exclusions, token totals.
         """
         budget = max(0, int(budget_tokens or 0))
         entries = []
+        exclusions: list[dict[str, Any]] = []
         for index, spec in enumerate(self._tools.values()):
+            if (
+                eligible_modules is not None
+                and spec.module != "builtin"
+                and spec.module not in eligible_modules
+            ):
+                exclusions.append({
+                    "tool": spec.name,
+                    "module": spec.module,
+                    "risk": spec.risk,
+                    "tokens": 0,
+                    "reason": "module_not_eligible",
+                    "detail": (
+                        f"module {spec.module} is not active for this domain"
+                    ),
+                })
+                continue
             schema = self._schema(spec)
             entries.append({
                 "spec": spec,
@@ -214,17 +278,18 @@ class ToolRegistry:
                 "tokens": util.token_len(util.dumps(schema)),
             })
         kept = list(entries)
-        exclusions: list[dict[str, Any]] = []
         total = sum(entry["tokens"] for entry in kept)
         if budget > 0:
-            # builtins first; then module tools. Within one priority the most
-            # recently registered tool is dropped first, which keeps the
-            # long-standing core tools stable.
+            # Drop in reverse priority: the rest, global modules, domain-bound
+            # modules, web, trusted low-risk modules, then builtins. Within one
+            # priority the most recently registered tool is dropped first,
+            # which keeps the long-standing core tools stable.
             order = sorted(
-                entries, key=lambda entry: (
-                    self._schema_priority(entry["spec"]),
-                    -entry["index"],
-                )
+                entries,
+                key=lambda entry: (
+                    self._schema_priority(entry["spec"]), entry["index"],
+                ),
+                reverse=True,
             )
             for entry in order:
                 if total <= budget:
@@ -246,7 +311,7 @@ class ToolRegistry:
                     ),
                 })
         kept.sort(key=lambda entry: entry["index"])
-        exclusions.sort(key=lambda item: item["tool"])
+        exclusions.sort(key=lambda item: (item["tool"], item["reason"]))
         return {
             "domain_id": domain_id,
             "schemas": [entry["schema"] for entry in kept],
@@ -262,8 +327,14 @@ class ToolRegistry:
         """Lower is kept longer when the schema budget is tight."""
         if spec.module == "builtin":
             return 0
-        if spec.module.startswith("web"):
+        if spec.module != "web" and not spec.side_effects and spec.risk == RISK_LOW:
+            return 1
+        if spec.module == "web" or spec.module.startswith("web:"):
             return 2
+        if spec.scope == "domain":
+            return 3
+        if spec.scope == "global":
+            return 4
         return 5
 
     def schemas_for_names(self, names: list[str]) -> list[dict[str, Any]]:
@@ -281,9 +352,12 @@ class ToolRegistry:
 
     # -- execution --------------------------------------------------------
 
-    def validate(self, call: ToolCall) -> dict[str, Any]:
+    def validate(
+        self, call: ToolCall, *,
+        allowed: set[str] | frozenset[str] | None = None,
+    ) -> dict[str, Any]:
         """Public validation used by the runtime before creating approvals."""
-        spec = self.resolve(call.name)
+        spec = self.resolve(call.name, allowed=allowed)
         return validate_arguments(spec, call.arguments)
 
     def record_rejected(
@@ -313,16 +387,18 @@ class ToolRegistry:
         task_id: str,
         execution_id: str | None = None,
         approval_id: str | None = None,
+        allowed_names: set[str] | frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Validate + dispatch + record. Never raises for tool-level problems;
         those are captured as status='failed'/'denied'. When ``execution_id``
         is given (an approval resumed), the existing record is completed in
-        place instead of creating a duplicate row."""
+        place instead of creating a duplicate row. ``allowed_names`` is the
+        run's capability snapshot; a name outside it is denied, not run."""
         started = util.iso()
         started_monotonic = time.monotonic()
         execution_id = execution_id or util.new_id("ex")
         try:
-            spec = self.resolve(call.name)
+            spec = self.resolve(call.name, allowed=allowed_names)
             arguments = validate_arguments(spec, call.arguments)
         except (ToolError, ToolDenied) as exc:
             self._record(
@@ -752,18 +828,20 @@ class McpServer:
     """One configured stdio MCP server. Launched per call for isolation."""
 
     def __init__(self, name: str, command: str, args: list[str],
-                 env: dict[str, str] | None = None):
+                 env: dict[str, str] | None = None,
+                 timeout_s: float = 30.0):
         self.name = name
         self.command = command
         self.args = args
         self.env = env
+        self.timeout_s = max(0.1, float(timeout_s or 30.0))
 
     def _request(self, process: subprocess.Popen, payload: dict[str, Any]) -> dict[str, Any]:
         stdin_text = util.dumps(payload) + "\n"
         process.stdin.write(stdin_text.encode("utf-8"))
         process.stdin.flush()
         # Read lines until a response with our id arrives (skip notifications).
-        deadline = time.monotonic() + 30.0
+        deadline = time.monotonic() + self.timeout_s
         lines: list[str] = []
         while time.monotonic() < deadline:
             line = process.stdout.readline()
@@ -861,99 +939,6 @@ def mcp_text(result: dict[str, Any]) -> str:
     return "\n".join(parts)[:4000]
 
 
-class McpTools:
-    """Registers tools from the configured MCP servers file."""
-
-    def __init__(self, registry: ToolRegistry, config, events: Events):
-        self.registry = registry
-        self.config = config
-        self.events = events
-        self.servers: dict[str, McpServer] = {}
-        self.status: dict[str, str] = {}
-
-    def load(self) -> None:
-        path_text = str(self.config.get("tools.mcp_servers_file", "") or "")
-        if not path_text:
-            return
-        import yaml
-
-        path = Path(path_text)
-        if not path.is_absolute():
-            path = self.registry.artifacts_dir.parent / path
-        if not path.is_file():
-            self.events.record(
-                "mcp.config_missing", level="warn",
-                data={"path": str(path)},
-            )
-            return
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as exc:
-            self.events.record(
-                "mcp.config_error", level="warn", data={"error": str(exc)}
-            )
-            return
-        for entry in data.get("servers") or []:
-            name = str(entry.get("name") or "").strip()
-            command = str(entry.get("command") or "").strip()
-            if not name or not command:
-                continue
-            server = McpServer(
-                name, command,
-                [str(a) for a in entry.get("args") or []],
-                entry.get("env") or None,
-            )
-            self.servers[name] = server
-            self._register_server(server, entry)
-
-    def _register_server(self, server: McpServer, entry: dict[str, Any]) -> None:
-        autoapprove = bool(entry.get("autoapprove", False))
-        default_risk = (
-            RISK_LOW if autoapprove
-            else str(self.config.get("tools.mcp_default_risk", RISK_CONFIRM))
-        )
-        prefix = f"mcp_{server.name}_"
-        try:
-            tools = server.list_tools()
-        except (McpError, Exception) as exc:
-            self.status[server.name] = f"unavailable: {exc}"
-            self.events.record(
-                "mcp.server_unavailable", level="warn",
-                data={"server": server.name, "error": str(exc)},
-            )
-            return
-        count = 0
-        for tool in tools:
-            tool_name = str(tool.get("name") or "").strip()
-            if not tool_name:
-                continue
-            registered = prefix + re.sub(r"[^a-zA-Z0-9_]", "_", tool_name)
-            if registered in self.registry.names():
-                continue
-            try:
-                self.registry.register(ToolSpec(
-                    name=registered,
-                    description=(
-                        f"[MCP {server.name}] "
-                        + str(tool.get("description") or tool_name)
-                    ),
-                    parameters=tool.get("inputSchema")
-                    or {"type": "object", "properties": {}},
-                    risk=default_risk,
-                    handler=self._make_handler(server, tool_name),
-                    module=f"mcp:{server.name}",
-                ))
-                count += 1
-            except (ToolDenied, ToolError) as exc:
-                self.events.record(
-                    "mcp.tool_refused", level="warn",
-                    data={"server": server.name, "tool": tool_name,
-                          "error": str(exc)},
-                )
-        self.status[server.name] = f"ok ({count} tools)"
-
-    def _make_handler(self, server: McpServer, tool_name: str) -> Callable:
-        def handler(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-            result = server.call(tool_name, args)
-            return {"content": mcp_text(result)}
-        return handler
+# MCP module loading lives in ``harness/modules/mcp.py``: it is registry-backed
+# so discovery, health, domain bindings, and reload share one record shape.
+# The stdio client above stays here because it is the transport, not policy.

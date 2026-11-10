@@ -1,8 +1,8 @@
 """Capability modules: skills, MCP servers, and web as one record shape.
 
-Phase 0 adds the package, record types, and the ``load_all`` seam. The
-existing skill-directory and MCP-file loaders remain authoritative until
-Phase 1 replaces them through the registry.
+Phase 1 makes the registry authoritative for MCP and web modules:
+``load_all`` imports legacy MCP files, installs the system web module, and
+reloads enabled modules. Skills remain directory-based until Phase 2.
 """
 
 from .registry import ModuleRegistry, load_all

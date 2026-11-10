@@ -405,6 +405,21 @@ class Scheduler:
             #    them; identical actions must never queue up per new task.
             self.app.approvals.dedupe_pending()
 
+            # 0b. Module health refresh. Bounded by modules.health_interval_s
+            #     and never allowed to raise into the tick: cached tools keep
+            #     working and a later check can recover.
+            try:
+                report["modules"] = self.app.modules.health_tick(now)
+            except Exception as exc:
+                report["modules"] = {
+                    "checked": 0, "errors": [f"{type(exc).__name__}: {exc}"],
+                    "module_ids": [], "skipped": False,
+                }
+                self.events.record(
+                    "module.unavailable", level="warn",
+                    data={"error": util.clip(str(exc), 500)},
+                )
+
             # 1. Due schedules (idempotent occurrence submission).
             submitted_task_ids: set[str] = set()
             for item in self.submit_due(now):

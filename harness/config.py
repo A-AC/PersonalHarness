@@ -93,13 +93,28 @@ DEFAULTS: dict[str, Any] = {
         "disallowed_prefixes": [],     # extra name prefixes banned outright
     },
     "modules": {
-        # Capability records (skills, MCP, web) become authoritative in Phase
-        # 1. In Phase 0 the directory is created, backed up, and the budget is
-        # measured, while the existing skills/MCP loaders stay in charge.
+        # Capability records (skills, MCP, web) share one registry. MCP and
+        # web are authoritative in Phase 1; skills follow in Phase 2.
         "enabled": True,
         "dir": "modules",              # relative to the data dir
         "health_interval_s": 300.0,
         "tool_schema_budget_tokens": 2400,
+        # Risk for an MCP tool whose manifest does not set risk_default and
+        # that did not opt into autoapprove.
+        "default_mcp_risk": "confirm",
+        # Register a lazy module from cached discovery; discover once when
+        # there is no cache yet so a fresh install is immediately usable.
+        "lazy_start": True,
+    },
+    "web": {
+        # The shipped web module is a stdio MCP server using SearXNG's JSON
+        # API. Results are untrusted data and taint the run.
+        "enabled": True,
+        "searxng_url": "http://192.168.50.40:8080",
+        "max_results": 5,
+        "timeout_s": 10.0,
+        "categories": "general",
+        "safe_search": 1,
     },
     "scheduler": {
         "enabled": True,
@@ -162,12 +177,15 @@ ENV_OVERRIDES = {
     "HARNESS_MODEL_NAME": ("model", "name"),
     "HARNESS_MODEL_API_KEY": ("model", "api_key"),
     "HARNESS_TIMEZONE": ("timezone",),
+    "HARNESS_WEB_ENABLED": ("web", "enabled", lambda value: str(value).lower()
+                            in ("1", "true", "yes", "on")),
+    "HARNESS_WEB_SEARXNG_URL": ("web", "searxng_url"),
 }
 
 # Keys a user may edit through the UI/CLI without a restart hazard.
 EDITABLE_KEYS = {
     "persona", "limits", "context", "domains", "memory", "tools",
-    "modules", "scheduler", "consolidation", "approvals", "timezone",
+    "modules", "web", "scheduler", "consolidation", "approvals", "timezone",
 }
 
 

@@ -391,11 +391,11 @@ replays the persisted transcript, so completed actions are not repeated.
 Unknown external outcomes are surfaced to the model and the user for
 reconciliation rather than blindly retried.
 
-## Tools, permissions, MCP, and skills
+## Tools, permissions, modules, and skills
 
 Built-in tools (all low-risk unless noted): `remember`, `update_memory`,
 `retract_memory`, `search_knowledge`, `read_artifact`,
-`update_task_notes`, and `create_domain` (confirm-risk).
+`update_task_notes`, `use_domain`, and `create_domain` (confirm-risk).
 
 There is no shell, command, or code-execution tool, and the registry
 refuses to register any tool whose name starts with bash/sh/exec/run/
@@ -403,13 +403,29 @@ python/eval and similar, no matter where the configuration comes from.
 
 Risk classes are enforced by the harness, not the model: `low` runs
 immediately; `confirm` requires an approval. MCP tools default to
-confirm-risk unless the server entry sets `autoapprove: true`;
+confirm-risk unless the manifest sets `autoapprove: true`;
 `tools.risk_overrides` can override individual tools. Tool outputs and
 skills are untrusted data: they can never change risk classes or bypass
 approvals (regression-tested).
 
+**Capability modules.** MCP servers and the shipped web module are database
+rows (`modules`, `module_bindings`, `module_tools`) owned by
+`harness/modules/`. Each row has a kind, status, scope, manifest,
+provenance, version, health, and cached discovery. `scope=global` is
+always eligible; `scope=domain` requires an enabled binding for the task's
+domain. A draft, disabled, or error module is never disclosed and never
+callable. Reloading a module changes the registered toolset without a
+process restart. Each run keeps a capability snapshot, so a reload cannot
+silently change the tools mid-run; an explicit `use_domain` change
+recomputes once and records `toolset.changed`.
+
 **MCP servers.** Set `tools.mcp_servers_file` to a YAML file listing stdio
-servers (see `examples/mcp_servers.yaml`):
+servers (see `examples/mcp_servers.yaml`). The file is an import source:
+entries become module rows on first load and are never overwritten by later
+edits. Manifest fields include `transport` (stdio), `command`, `args`,
+`env_names`, `domains`, `autoapprove`, `risk_default`, `tools_allow`,
+`tools_deny`, `read_only`, `side_effects`, `startup` (`eager`/`lazy`), and
+`timeout_s`:
 
 ```yaml
 servers:
@@ -417,18 +433,61 @@ servers:
     command: python
     args: [examples/mcp/echo_server.py]
     autoapprove: true
+    read_only: true             # echo cannot change external state
+    # domains: [dom_example]    # domain-bound instead of global
+    # tools_allow: [echo, add]
+    # startup: lazy             # default; use cached discovery
 ```
 
 Servers are launched per call for isolation; a server that fails to start
-is reported as unavailable and never blocks turns. The client speaks the
-MCP stdio JSON-RPC protocol directly (initialize, tools/list, tools/call)
-with no heavy SDK dependency.
+is reported as unavailable and never blocks turns. Discovery is cached in
+`module_tools`; the heartbeat refreshes enabled modules every
+`modules.health_interval_s`. The client speaks the MCP stdio JSON-RPC
+protocol directly (initialize, tools/list, tools/call) with no heavy SDK
+dependency.
+
+Manage modules from the API or CLI:
+
+```bash
+python -m harness modules                  # status, health, tool counts
+python -m harness modules --reload         # reload every module
+python -m harness modules --reload mcp:example_echo
+python -m harness modules --disable web
+python -m harness modules --enable web
+```
+
+The same actions are available as `GET /api/modules`,
+`POST /api/modules/reload`, and
+`POST /api/modules/{id}/reload|enable|disable`.
+
+**Web search.** The shipped `web` module is a small stdio MCP server that
+queries SearXNG's JSON API and returns bounded `{title, url, snippet}`
+results. Configure it with `web.searxng_url` (verified against
+`http://192.168.50.40:8080`). Results are marked `untrusted_output`, so
+they taint the run: after web content enters a run, any side-effecting
+tool is escalated to confirm-risk and the approval names the source URL.
+Read-only tools stay low-risk. `web_fetch` is deliberately not provided
+(SSRF and injection surface).
+
+> Port note: the harness also defaults to port 8080. Do not run it and
+> SearXNG on the same host unless you change `HARNESS_PORT` or
+> `server.port` for the harness.
+
+**Trust and taint.** `ToolSpec` carries `side_effects`, `read_only`, and
+`untrusted_output`. MCP output is untrusted by default; builtin memory and
+history output is trusted. An untrusted result appends a bounded entry to
+`runs.meta.tainted_sources` (`tool`, `module`, `origin`, `at`). In a
+tainted run, a tool with `side_effects=True` becomes confirm-risk even if
+it was configured low or auto-approved. A module must opt into
+`read_only` explicitly; unknown provenance is treated as side-effecting.
+The Phase 7 guard can add friction on top of this policy, never remove it.
 
 **Skills.** Set `tools.skills_dir` to a folder of
 `<name>/SKILL.md` files with optional front matter (`name`, `description`,
 `preconditions`). A skill is instruction text only — it is disclosed in
 the context when the task objective matches its preconditions, and every
 action it describes still goes through the normal tools and permissions.
+Skills become registry rows in Phase 2.
 
 ## Configuration
 
@@ -436,7 +495,8 @@ Settings live in `data/config.yaml` (created with defaults on first start)
 and are validated at startup: unknown keys fail fast. Environment
 overrides: `HARNESS_DATA_DIR`, `HARNESS_HOST`, `HARNESS_PORT`,
 `HARNESS_TOKEN`, `HARNESS_MODEL_BASE_URL`, `HARNESS_MODEL_NAME`,
-`HARNESS_MODEL_API_KEY`, `HARNESS_TIMEZONE`.
+`HARNESS_MODEL_API_KEY`, `HARNESS_TIMEZONE`, `HARNESS_WEB_ENABLED`,
+`HARNESS_WEB_SEARXNG_URL`.
 
 Timestamps are stored in UTC and shown in the host's local time. The
 `timezone` setting defaults to `system`; set an IANA name only to override
@@ -456,10 +516,12 @@ Main groups:
   budgets
 - `domains.*`: routing threshold, ambiguity margins
 - `memory.*`: result limits, temp expiry
-- `tools.*`: MCP servers file, skills dir, default MCP risk, risk overrides
+- `tools.*`: MCP servers import file, skills dir, default MCP risk, risk
+  overrides
 - `modules.*`: enabled, module directory, health interval, tool-schema
-  budget (Phase 0 wires the directory and budget; module loading becomes
-  authoritative in Phase 1)
+  budget, default MCP risk, lazy startup
+- `web.*`: enabled, `searxng_url`, `max_results`, `timeout_s`,
+  `categories`, `safe_search`
 - `scheduler.*`: enabled, tick interval, missed policy and grace,
   interrupted-run resume, per-tick run/retry caps, retry cooldown and
   exponential backoff, permanent-failure policy, user-activity grace,
@@ -480,7 +542,8 @@ and can update whole editable groups.
 Everything important is inspectable without exposing chain-of-thought:
 
 - `event_log` rows for routing, tasks, runs, model calls, tool outcomes,
-  approvals, schedules, heartbeat actions, recovery, consolidation
+  approvals, schedules, heartbeat actions, module load/reload/health,
+  trust taint/escalation, recovery, consolidation
 - `tool_executions` rows: status (including `unknown`), arguments,
   bounded results, errors, approval links, durations
 - `runs` rows: status, decision ("why it stopped"), iterations, tool-call
@@ -524,7 +587,11 @@ marked `live` and were run against the reachable endpoint
 - The quick-confirm classifier is conservative by design; anything
   non-obvious is ambiguous and becomes a normal conversation turn.
 - Tool results are bounded by size, and MCP servers pay process startup
-  latency per call.
+  latency per call. Discovery is cached; calls still launch one process.
+- Web search covers SearXNG results only. `web_fetch`/browsing is deferred
+  because it adds SSRF and injection surface.
+- The harness and SearXNG both default to port 8080; use a different
+  `HARNESS_PORT` (or `server.port`) when they share a host.
 - The waiting-for-user marker is an instructed convention; if a model
   forgets it, a question may complete its task and the next message opens
   new work (recoverable, not a safety issue).
@@ -537,8 +604,12 @@ marked `live` and were run against the reachable endpoint
   LAN/VPN only.
 - The harness sends no credentials to the model endpoint unless you
   configure `model.api_key`.
-- Skills and MCP results are data, never instructions; they cannot change
-  permissions. Confirm-risk actions always need an explicit approval.
+- Skills and tool/MCP results are data, never instructions; they cannot
+  change permissions. Confirm-risk actions always need an explicit approval.
+- MCP output is untrusted by default. After web or MCP content enters a run,
+  any side-effecting tool is escalated to confirm-risk and the approval
+  names the untrusted source. Mark a module `read_only: true` only when it
+  genuinely cannot change external state.
 - Backups contain the full conversation and memory state; protect them.
 
 
