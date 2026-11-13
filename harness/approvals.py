@@ -360,44 +360,50 @@ class Approvals:
         if action == "create_domain":
             name = arguments.get("name") or "a new domain"
             return f"create the domain '{name}'"
-        if approval.get("tool") == "propose_skill":
-            name = arguments.get("name") or "a new skill"
-            return f"save the draft skill '{name}'"
+        if approval.get("tool") in ("propose_skill", "edit_skill"):
+            name = arguments.get("name") or "a skill"
+            verb = (
+                "revise" if approval.get("tool") == "edit_skill" else "save"
+            )
+            return f"{verb} the draft skill '{name}'"
         detail = util.dumps(arguments)
         if len(detail) > 120:
             detail = detail[:117] + "…"
         return f"run {approval.get('tool')} with {detail}"
 
     def dedupe_pending(
-        self, actions: tuple[str, ...] = ("create_domain", "propose_skill")
+        self,
+        actions: tuple[str, ...] = (
+            "create_domain", "propose_skill", "edit_skill",
+        ),
     ) -> int:
         """Cancel duplicate pending approvals for the same action+arguments.
 
         Newest wins (``pending`` is ordered newest first) so the approval a
         user is most likely looking at stays actionable. Only the listed
         virtual actions are deduped by default; external tool approvals can
-        legitimately repeat with identical arguments. ``propose_skill`` is
-        keyed by skill name because re-proposing a name revises one row.
+        legitimately repeat with identical arguments. Skill writes are keyed
+        by skill name because re-proposing or editing a name changes one row.
         """
         seen: dict[tuple[str, str, str], str] = {}
         cancelled = 0
         for approval in self.pending():
             action = (approval.get("meta") or {}).get("action", "tool")
-            is_proposal = (
-                approval.get("tool") == "propose_skill"
-                and "propose_skill" in actions
+            tool = str(approval.get("tool"))
+            is_skill_write = (
+                tool in ("propose_skill", "edit_skill")
+                and tool in actions
             )
-            if action not in actions and not is_proposal:
+            if action not in actions and not is_skill_write:
                 continue
             arguments = approval.get("arguments") or {}
-            if is_proposal:
+            if is_skill_write:
                 key = (
-                    action,
-                    str(approval.get("tool")),
+                    action, "skill",
                     str(arguments.get("name") or "").strip().lower(),
                 )
             else:
-                key = (action, str(approval.get("tool")), util.dumps(arguments))
+                key = (action, tool, util.dumps(arguments))
             keeper = seen.get(key)
             if keeper is None:
                 seen[key] = approval["id"]

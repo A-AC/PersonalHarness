@@ -41,6 +41,10 @@ MAX_DOMAINS = 12
 DISCLOSURE_BODY_CHARS = 2000
 HISTORY_LIMIT = 20
 AUDIT_LIMIT = 50
+# Only these identities may refine existing agent-owned skills. Imported and
+# user-created skills stay read-only to the agent; the user may still edit
+# them through the UI/API.
+AGENT_SKILL_CREATORS = frozenset({"model", "builder"})
 
 _LIST_FIELDS = ("preconditions", "domains")
 _FRONT_MATTER_FIELDS = ("name", "description", "preconditions", "domains")
@@ -150,6 +154,28 @@ class SkillManager:
                 return module
         return None
 
+    def is_agent_owned(self, module: Module | None) -> bool:
+        """True only for skills the agent itself created.
+
+        Imported and user-created skills are deliberately excluded, even if
+        the user later revised them. Only ``create_draft`` by the model or
+        builder establishes agent ownership.
+        """
+        return bool(
+            module is not None
+            and module.kind == "skill"
+            and module.origin == "agent"
+            and module.created_by in AGENT_SKILL_CREATORS
+        )
+
+    @staticmethod
+    def ownership_error(module: Module) -> str:
+        owner = module.created_by or module.origin or "another owner"
+        return (
+            f"skill {module.name!r} was created by {owner}; the agent may "
+            "only edit skills it created, not imported or user-created skills"
+        )
+
     def body(self, module: Module) -> str | None:
         """Read a skill body. Missing files are reported, never invented."""
         if not module.content_path:
@@ -183,6 +209,7 @@ class SkillManager:
             "origin": module.origin,
             "provenance": module.provenance,
             "created_by": module.created_by,
+            "agent_owned": self.is_agent_owned(module),
             "created_at": module.created_at,
             "updated_at": module.updated_at,
             "content_path": module.content_path,
@@ -503,6 +530,15 @@ class SkillManager:
                 f"module id {module_id} already belongs to "
                 f"{existing.name!r}"
             )
+        if (
+            existing is not None
+            and created_by in AGENT_SKILL_CREATORS
+            and not self.is_agent_owned(existing)
+        ):
+            # The agent may refine its own procedures, never imported or
+            # user-authored ones. The UI passes created_by="user" and keeps
+            # the explicit user override.
+            raise ValueError(self.ownership_error(existing))
         manifest = dict(existing.manifest) if existing else {}
         history = list(manifest.get("version_history") or [])
         if existing is not None:
@@ -569,6 +605,79 @@ class SkillManager:
             },
         )
         return self.registry.get(module_id) or module
+
+    def edit_plan(
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+        preconditions: Any = None,
+        domains: Any = None,
+        body: str | None = None,
+    ) -> tuple[Module, dict[str, Any]]:
+        """Resolve an agent-owned skill and merge the fields to be revised.
+
+        Omitted fields keep their current values. Validation happens here, so
+        the runtime can reject a bad edit before asking the user to approve
+        it.
+        """
+        module = self.find_by_name(name)
+        if module is None:
+            raise ValueError(f"no skill named {name!r}")
+        if not self.is_agent_owned(module):
+            raise ValueError(self.ownership_error(module))
+        manifest = module.manifest or {}
+        current_body = self.body(module)
+        if current_body is None:
+            raise ValueError(
+                f"skill {module.id} has no readable body and cannot be edited"
+            )
+        fields = self.validate_fields(
+            name=module.name,
+            description=(
+                str(manifest.get("description") or "")
+                if description is None else description
+            ),
+            preconditions=(
+                manifest.get("preconditions")
+                if preconditions is None else preconditions
+            ),
+            domains=(
+                manifest.get("domains")
+                if domains is None else domains
+            ),
+            body=current_body if body is None else body,
+        )
+        return module, fields
+
+    def edit(
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+        preconditions: Any = None,
+        domains: Any = None,
+        body: str | None = None,
+        created_by: str = "model",
+        provenance: dict[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> Module:
+        """Revise an agent-created skill as a new draft version."""
+        module, fields = self.edit_plan(
+            name=name, description=description,
+            preconditions=preconditions, domains=domains, body=body,
+        )
+        return self.create_draft(
+            name=fields["name"],
+            description=fields["description"],
+            preconditions=fields["preconditions"],
+            domains=fields["domains"],
+            body=fields["body"],
+            origin=module.origin,
+            provenance=provenance,
+            created_by=created_by,
+            reason=reason or "refined by the agent",
+        )
 
     def activate(self, module_id: str) -> Module:
         module = self._require(module_id)
@@ -904,8 +1013,13 @@ Rules:
 - Keep the body under {max_body} characters and the name under 80 characters.
 - Preconditions are short keywords that indicate when the skill applies.
 - Domains bind the skill to existing domain ids; use [] for a global skill.
+- To refine one of your own skills, use its exact existing name.
+- Never reuse the name of an imported or user-created skill.
 - If the batch shows no reusable procedure, answer with {{"skill": null}}.
 - Reply with ONLY a JSON object, no prose, no code fence.
+
+Existing agent-created skills you may refine:
+{owned_skills}
 
 Completed tasks:
 {tasks}
@@ -1000,6 +1114,7 @@ or {{"skill": null}}
         report["run_ids"] = run_ids
         prompt = self.PROMPT.format(
             max_body=self.skills.max_body_chars(),
+            owned_skills=self._owned_skill_index(),
             tasks=self._task_summaries(batch),
         )
         try:
@@ -1094,6 +1209,20 @@ or {{"skill": null}}
                 f"  tools: {util.clip(tools, 300)}"
             )
         return "\n".join(lines) or "(none)"
+
+    def _owned_skill_index(self) -> str:
+        lines: list[str] = []
+        for module in self.skills.all():
+            if not self.skills.is_agent_owned(module):
+                continue
+            description = str(
+                (module.manifest or {}).get("description") or ""
+            )
+            lines.append(
+                f"- {module.name} (v{module.version}, {module.status}): "
+                f"{util.clip(description, 160) or '(no description)'}"
+            )
+        return "\n".join(lines[:20]) or "(none)"
 
     @staticmethod
     def _parse(content: str) -> tuple[dict[str, Any] | None, str | None]:

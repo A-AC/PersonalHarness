@@ -18,7 +18,7 @@ tests under the `live` marker.
 | `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + deterministic routing), `Tasks` (statuses, resume-candidate scoring, parent/child tree relationships) |
 | `harness/memory.py` | `MemoryManager`: capture with conflict supersession, scopes/kinds, revisions + provenance, FTS retrieval with scope priority and recency, usage accounting with per-run dedupe, deterministic lifetime sweep, archive/restore/pin, expiry, merge, bounded artifact reads, artifact consistency checks |
 | `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules, state, memories, recent + retrieved history, registry-driven skill disclosure), sub-agent mode (goal + parent brief + domain memories, no parent history), inclusion/exclusion sources |
-| `harness/tools.py` | `ToolRegistry` (builtin tools including `delegate_task` and `propose_skill`, JSON-schema-lite validation, risk classes, trust flags, banned-name refusal, execution records, budgeted per-run schema selection scoped by eligible modules and role), minimal MCP stdio JSON-RPC client |
+| `harness/tools.py` | `ToolRegistry` (builtin tools including `delegate_task`, `propose_skill`, and `edit_skill`, JSON-schema-lite validation, risk classes, trust flags, banned-name refusal, execution records, budgeted per-run schema selection scoped by eligible modules and role), minimal MCP stdio JSON-RPC client |
 | `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired), expiry sweep, name-keyed proposal dedupe, quick-confirm classification (keyword + tiny model call) |
 | `harness/runtime.py` | `AgentRuntime`: the single bounded loop; capability snapshots; trust/taint escalation; routing/resume entry point; approval/question/interrupt/limit pause and resume; transcript persistence; child budgets, role-aware tool denial, and hidden child messages |
 | `harness/subagents.py` | `SubAgentManager`: bounded sequential delegation, goal-hash dedupe/reuse, child task/run creation, blocked-outcome closing, durable result artifacts, and sub-agent events |
@@ -28,7 +28,7 @@ tests under the `live` marker.
 | `harness/modules/types.py` | `Module`, `ModuleBinding`, `ModuleTool` value objects over the v3 tables |
 | `harness/modules/registry.py` | Module persistence, domain eligibility, lazy skill manager, and the loader seam (`load_all`, `reload`, `set_enabled`, `health_tick`); skill imports and reloads route here |
 | `harness/modules/mcp.py` | Registry-backed MCP/web loader: legacy import, manifests, discovery cache, per-domain visibility, reload, health, trusted/untrusted flags |
-| `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions) and `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
+| `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions, agent-owned edit guard) and `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
 | `harness/modules/web/server.py` | Shipped web-search stdio MCP server over SearXNG JSON; bounded results, no `web_fetch` |
 | `harness/app.py` | `App` composition root, startup recovery, `ProcessLock` (single writer), backup/restore, graceful shutdown; `build_app` test helper |
 | `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; per-panel endpoints (`/api/summary`, `/api/messages`, `/api/tasks` with optional `include_subagents=1`, `/api/approvals`, `/api/schedules`, `/api/inbox`, `/api/automations`, `/api/memories`, `/api/domains`, `/api/skills`, `/api/consolidations`, `/api/modules`, `/api/tools`, `/api/events`, `/api/system`, `/api/config`, `/api/backups`), memory edit/retract and skill draft/delete and module-binding mutations, task detail with each run's full persisted model transcript/context sources and the child tree (children hidden from the default task list), `/api/state` as a compatibility aggregate for the CLI; authenticated static UI assets |
@@ -64,11 +64,11 @@ web POST /api/message | CLI msg | schedule due | inbox triage | heartbeat | appr
          tool_calls? -> resolve inside snapshot (outside -> denied record)
                         validate args (all problems at once)
                         tainted run + side effects? -> confirm escalation
-                        tainted run + propose_skill? -> refused; no draft
+                        tainted run + skill write? -> refused; no draft
                         confirm-risk? -> approval + awaiting execution row;
                                           run waiting_approval; visible note
                                           (reason names untrusted origin;
-                                           propose_skill shows bounded body)
+                                           skill writes show bounded body)
                         else           -> execute; record outcome; append
                                           observation to transcript
                                           untrusted output? -> taint run
@@ -150,7 +150,7 @@ heartbeat -> inbox.triage(new events, oldest first)
 | `tests/test_approvals.py` | Exact action binding, quick confirm (keyword/model/ambiguous), rejection/cancellation/expiry/staleness, untrusted-output immunity, no shell tools, risk override validation |
 | `tests/test_recovery.py` | Restart preservation, interrupted-run resume without repeats, unknown outcomes, graceful shutdown, backup/restore round trip, writer lock, concurrent web+CLI with one scheduler |
 | `tests/test_modules_foundations.py` | UI shell/assets, registry loader, v3 schema migration, backup/restore of `modules/`, module API/toggle/reload, heartbeat health, tool-schema budget and run snapshots |
-| `tests/test_skills.py` | Front-matter import, global/domain/adaptive disclosure, proposal approval lifecycle, bounded validation, dedupe, taint refusal, builder batching/limits/failure, skills API |
+| `tests/test_skills.py` | Front-matter import, global/domain/adaptive disclosure, proposal/edit approval lifecycle, agent ownership refusal, bounded validation, dedupe, taint refusal, builder batching/limits/failure, skills API |
 | `tests/test_tools_mcp.py` | Registry-backed MCP discovery/risk/round trip/bounded results/unavailable servers, domain scope and refusal, reload, schema budget priority, web search stub (bounded/untrusted/malformed), taint escalation with source provenance, skill disclosure |
 | `tests/test_subagents.py` | Parent delegation/result return, child context isolation, reduced toolset/depth/confirm refusal, blocked limits, goal-hash reuse, child budgets/caps, crash-mid-child unknown recovery, v5 migration, task-detail child tree |
 | `tests/test_inbox.py` | Inbox idempotency/API bounds, dedupe, automation task/cooldown, hourly breaker, tainted run approval, quiet hours, self-scheduling caps/depth, inbox-before-schedule ordering, v6 migration |

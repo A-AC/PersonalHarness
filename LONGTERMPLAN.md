@@ -916,6 +916,8 @@ UI) and update this plan. Do not mix phases.
 | 2026-11-13 | Schedule bounds are enforced in `Scheduler.create_for_task`, not the tool handler | Direct API callers must not bypass the per-task cap or chain-depth limit |
 | 2026-11-13 | Schedule chains carry `schedule_depth` in schedule/task meta and the parent task id in schedule meta | A scheduled task can be bounded without adding mutable state to the schedule row |
 | 2026-11-13 | Inbox triage shares the scheduler run budget and runs before due schedules | Urgent external work wins the tick while background model work stays bounded |
+| 2026-11-13 | The agent may refine only skills it created (`origin=agent`, `created_by=model|builder`) | Self-built procedures can improve without letting the model rewrite imported or user-authored instructions |
+| 2026-11-13 | User UI/API revisions keep the original ownership markers | An agent skill edited by the user remains agent-owned, while an imported or user-created skill stays read-only to the agent |
 
 ---
 
@@ -927,8 +929,8 @@ The plan is complete when:
    see its health and schema budget in the UI without editing code.
 2. Web search works, and a web result cannot cause a side effect without an
    approval that names the source.
-3. The agent can propose a skill from a successful task, and the user can
-   review, activate, disable, and roll back it.
+3. The agent can propose a skill from a successful task, refine its own
+   skills, and the user can review, activate, disable, and roll back them.
 4. Memory usage determines retention; archived memory can be found again.
 5. An external app can POST to `/api/inbox` and get exactly one durable task,
    with loop protection and no unapproved side effect.

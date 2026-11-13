@@ -860,7 +860,10 @@ class ToolRegistry:
                 "Propose a reusable procedural skill for the user to review. "
                 "A skill is instruction text only: no code, handlers, or tool "
                 "schemas. The proposal becomes a draft only after explicit "
-                "approval, and drafts are never activated automatically."
+                "approval, and drafts are never activated automatically. "
+                "Reusing the exact name of an existing skill you created "
+                "revises it; imported and user-created skills cannot be "
+                "revised this way."
             ),
             parameters={
                 "type": "object",
@@ -895,6 +898,52 @@ class ToolRegistry:
             },
             risk=RISK_CONFIRM,
             handler=self._tool_propose_skill,
+        ))
+        self.register(ToolSpec(
+            name="edit_skill",
+            description=(
+                "Refine a skill the agent created. Use the existing skill "
+                "name; omitted fields keep their current values. A skill is "
+                "instruction text only, and the edit becomes a new draft "
+                "version only after explicit approval. Imported and "
+                "user-created skills cannot be edited by the agent."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact name of an agent-created "
+                            "skill.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "New one-line description; omit to "
+                            "keep the current one.",
+                    },
+                    "preconditions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "New precondition keywords; omit to "
+                            "keep the current list.",
+                    },
+                    "domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "New domain bindings; omit to keep "
+                            "the current bindings.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Full replacement instructions, "
+                            "bounded by skills.max_body_chars; omit to keep "
+                            "the current body.",
+                    },
+                },
+                "required": ["name"],
+            },
+            risk=RISK_CONFIRM,
+            handler=self._tool_edit_skill,
         ))
 
     # handlers -------------------------------------------------------------
@@ -1104,6 +1153,35 @@ class ToolRegistry:
             "status": module.status,
             "scope": module.scope,
             "note": "saved as a draft; activate it explicitly when ready",
+        }
+
+    def _tool_edit_skill(
+        self, ctx: ToolContext, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        assert ctx.skills is not None
+        module = ctx.skills.edit(
+            name=args["name"],
+            description=args.get("description"),
+            preconditions=args.get("preconditions"),
+            domains=args.get("domains"),
+            body=args.get("body"),
+            created_by="model",
+            provenance={
+                "source": "model",
+                "run_id": ctx.run_id,
+                "task_id": ctx.task_id,
+                "edited": True,
+            },
+            reason="refined by the model and approved by the user",
+        )
+        return {
+            "skill_id": module.id,
+            "name": module.name,
+            "version": module.version,
+            "status": module.status,
+            "scope": module.scope,
+            "note": "saved as a draft revision; activate it explicitly when "
+                    "ready",
         }
 
 

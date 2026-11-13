@@ -496,8 +496,9 @@ Built-in tools (all low-risk unless noted): `remember`, `update_memory`,
 `retract_memory`, `search_knowledge`, `read_artifact`,
 `update_task_notes`, `use_domain`, `delegate_task`, `create_domain`
 (confirm-risk), `schedule_task` / `cancel_schedule` (confirm-risk; bounded
-to schedules the task owns), and `propose_skill` (confirm-risk; saves a draft
-only after approval).
+to schedules the task owns), `propose_skill` (confirm-risk; saves a draft
+only after approval), and `edit_skill` (confirm-risk; refines only skills
+the agent created).
 
 There is no shell, command, or code-execution tool, and the registry
 refuses to register any tool whose name starts with bash/sh/exec/run/
@@ -634,6 +635,16 @@ activates it. A run that consumed untrusted content cannot propose a skill
 `skills.draft_after_successful_tasks` completed tool-using tasks, subject
 to `skills.max_drafts_per_day`; tainted runs are refused, and a failed pass
 changes no skill. Builder logs are written under `artifacts/skills/`.
+
+The agent may refine skills it created with `edit_skill` (confirm-risk):
+it names the existing skill and supplies any of description, preconditions,
+domains, or a replacement body; omitted fields stay unchanged. Approval
+writes a new draft version, so an active skill becomes a draft until the
+user activates it again. Agent ownership is established only when the model
+or the builder creates the row (`origin=agent`, `created_by=model|builder`).
+Imported skills and skills created by the user through the UI/API remain
+read-only to the agent; `propose_skill` cannot overwrite them by reusing
+their name. Users can still revise any skill through the UI.
 
 ```bash
 python -m harness skills                    # status, scope, versions

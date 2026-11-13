@@ -35,6 +35,9 @@ from .model import (
 from .store import Domains, Events, Messages, Tasks
 
 
+SKILL_WRITE_TOOLS = frozenset({"propose_skill", "edit_skill"})
+
+
 @dataclass
 class RunResult:
     status: str
@@ -1220,12 +1223,12 @@ class AgentRuntime:
                         ),
                     }
 
-        # propose_skill is approval-gated and deduped by skill name, so a
-        # model cannot queue the same draft proposal repeatedly.
-        if call.name == "propose_skill":
+        # Skill writes are approval-gated and deduped by skill name, so a
+        # model cannot queue repeated proposals/edits for the same skill.
+        if call.name in SKILL_WRITE_TOOLS:
             name = str((call.arguments or {}).get("name") or "").strip()
             for approval in self.approvals.pending():
-                if approval.get("tool") != "propose_skill":
+                if approval.get("tool") not in SKILL_WRITE_TOOLS:
                     continue
                 pending_name = str(
                     (approval.get("arguments") or {}).get("name") or ""
@@ -1234,9 +1237,10 @@ class AgentRuntime:
                     return {
                         "status": "denied",
                         "error": (
-                            f"A propose_skill approval for '{name}' is "
-                            f"already pending (approval {approval['id']}). "
-                            "Wait for that decision; do not propose it again."
+                            f"A skill change for '{name}' is already pending "
+                            f"({approval.get('tool')}, approval "
+                            f"{approval['id']}). Wait for that decision; do "
+                            "not propose it again."
                         ),
                     }
 
@@ -1244,7 +1248,7 @@ class AgentRuntime:
         # side-effecting tool is escalated to confirm even when it is
         # configured low-risk or auto-approved. Read-only tools stay low.
         taint = self._taint_sources(run_id)
-        if call.name == "propose_skill" and taint:
+        if call.name in SKILL_WRITE_TOOLS and taint:
             origin = str(taint[0].get("origin") or "untrusted content")
             self.events.record(
                 "skill.refused", level="warn", task_id=task_id, run_id=run_id,
@@ -1252,6 +1256,7 @@ class AgentRuntime:
                 data={
                     "reason": "untrusted provenance",
                     "origin": util.clip(origin, 300),
+                    "tool": call.name,
                     "name": str(
                         (call.arguments or {}).get("name") or ""
                     ).strip()[:120],
@@ -1261,7 +1266,7 @@ class AgentRuntime:
                 "status": "denied",
                 "error": (
                     "This run consumed untrusted content from "
-                    f"{util.clip(origin, 160)}, so it cannot propose a skill. "
+                    f"{util.clip(origin, 160)}, so it cannot change a skill. "
                     "Skills are built only from trusted work."
                 ),
             }
@@ -1298,7 +1303,7 @@ class AgentRuntime:
                 )
             except Exception as exc:
                 return {"status": "denied", "error": str(exc)}
-            if call.name == "propose_skill":
+            if call.name in SKILL_WRITE_TOOLS:
                 skills = self.app.modules.skills
                 if not skills.enabled:
                     return {
@@ -1306,13 +1311,32 @@ class AgentRuntime:
                         "error": "skills are disabled in configuration",
                     }
                 try:
-                    arguments = skills.validate_fields(
-                        name=str(arguments.get("name") or ""),
-                        description=str(arguments.get("description") or ""),
-                        preconditions=arguments.get("preconditions"),
-                        domains=arguments.get("domains"),
-                        body=str(arguments.get("body") or ""),
-                    )
+                    if call.name == "edit_skill":
+                        _, arguments = skills.edit_plan(
+                            name=str(arguments.get("name") or ""),
+                            description=arguments.get("description"),
+                            preconditions=arguments.get("preconditions"),
+                            domains=arguments.get("domains"),
+                            body=arguments.get("body"),
+                        )
+                    else:
+                        arguments = skills.validate_fields(
+                            name=str(arguments.get("name") or ""),
+                            description=str(
+                                arguments.get("description") or ""
+                            ),
+                            preconditions=arguments.get("preconditions"),
+                            domains=arguments.get("domains"),
+                            body=str(arguments.get("body") or ""),
+                        )
+                        existing = skills.find_by_name(arguments["name"])
+                        if existing is not None and not skills.is_agent_owned(
+                            existing
+                        ):
+                            return {
+                                "status": "denied",
+                                "error": skills.ownership_error(existing),
+                            }
                 except ValueError as exc:
                     return {"status": "denied", "error": str(exc)}
             action = "create_domain" if call.name == "create_domain" else "tool"
@@ -1356,11 +1380,21 @@ class AgentRuntime:
                 "so a side-effecting action needs your explicit approval."
                 if tainted_side_effect else ""
             )
-            if call.name == "propose_skill":
+            if call.name in SKILL_WRITE_TOOLS:
+                if call.name == "edit_skill":
+                    lead = (
+                        "I want to refine an **agent-created skill**. Review "
+                        "the full bounded body below; approval writes a new "
+                        "draft version and never activates it."
+                    )
+                else:
+                    lead = (
+                        "I want to save a **draft skill**. Review the full "
+                        "bounded body below; approval writes a draft and "
+                        "never activates it."
+                    )
                 note = (
-                    "I want to save a **draft skill**. Review the full "
-                    "bounded body below; approval writes a draft and never "
-                    "activates it.\n\n"
+                    f"{lead}\n\n"
                     f"{self._skill_proposal_detail(arguments)}\n\n"
                     "Reply approve/reject, or use the Approvals panel."
                     f"{provenance}"
@@ -1395,7 +1429,7 @@ class AgentRuntime:
         return outcome
 
     def _skill_proposal_detail(self, arguments: dict[str, Any]) -> str:
-        """Bounded, readable approval content for a ``propose_skill`` call."""
+        """Bounded, readable approval content for a skill write call."""
         def listed(key: str) -> str:
             value = arguments.get(key)
             if isinstance(value, (list, tuple)):

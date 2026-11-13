@@ -251,6 +251,199 @@ def test_propose_skill_deduped_by_name_and_described(make_app):
     assert "Weekly Review" in app.approvals.describe(pending[0])
 
 
+# ---------------------------------------------------------------------------
+# Agent editing + ownership
+# ---------------------------------------------------------------------------
+
+def test_agent_can_refine_own_skill_via_approval(make_app):
+    app = make_app.build(scripts=[
+        {"tool_calls": [{
+            "name": "edit_skill",
+            "arguments": {
+                "name": "weekly review",
+                "description": "refined weekly review",
+                "body": "1. Gather tasks.\n2. Name the top blockers.",
+            },
+        }]},
+        {"content": "Edit proposed."},
+        {"content": "Edit saved."},
+    ])
+    skill = app.modules.skills.create_draft(
+        name="weekly review",
+        description="run a weekly review",
+        preconditions=["weekly", "review"],
+        body="1. Gather tasks.",
+    )
+    app.modules.skills.activate(skill.id)
+    assert app.modules.skills.is_agent_owned(skill)
+    assert app.modules.skills.describe(skill)["agent_owned"] is True
+
+    result = app.runtime.submit_user_message("refine your weekly review skill")
+    assert result.status == "waiting_approval"
+    approval = app.approvals.pending()[0]
+    assert approval["tool"] == "edit_skill"
+    # Omitted fields are merged with the current skill before approval.
+    assert approval["arguments"]["description"] == "refined weekly review"
+    assert approval["arguments"]["preconditions"] == ["weekly", "review"]
+    assert approval["arguments"]["domains"] == []
+    assert "Name the top blockers" in approval["arguments"]["body"]
+    note = app.messages.recent(limit=5)[-1]["content"]
+    assert "agent-created skill" in note
+    assert "Name the top blockers" in note
+    # Nothing is written before approval.
+    assert app.modules.skills.get(skill.id).version == 1
+    assert app.modules.skills.body(skill) == "1. Gather tasks.\n"
+
+    app.approvals.decide(approval["id"], "approve", decided_by="test")
+    resumed = app.runtime.resume_after_approval(approval, "test")
+    assert resumed.status == "completed"
+
+    updated = app.modules.skills.get(skill.id)
+    assert updated.version == 2
+    assert updated.status == "draft"
+    assert updated.manifest["description"] == "refined weekly review"
+    assert app.modules.skills.body(updated) == (
+        "1. Gather tasks.\n2. Name the top blockers.\n"
+    )
+    assert updated.manifest["version_history"][-1]["version"] == 1
+    assert updated.manifest["revisions"][-1]["changed_by"] == "model"
+    assert updated.manifest["revisions"][-1]["reason"].startswith("refined")
+
+
+def test_agent_cannot_edit_external_or_user_created_skills(make_app, tmp_path):
+    from harness.modules.types import Module
+
+    app = make_app.build(scripts=[
+        {"tool_calls": [{
+            "name": "edit_skill",
+            "arguments": {"name": "external skill", "body": "hijacked"},
+        }]},
+        {"content": "I cannot edit that skill."},
+    ])
+    skills_dir = tmp_path / "skills"
+    _skill_dir(
+        skills_dir, "external",
+        "---\nname: external skill\ndescription: imported\n---\n"
+        "Original body.\n",
+    )
+    app.config.set("tools.skills_dir", str(skills_dir))
+    app.modules.load_all()
+    external = app.modules.skills.find_by_name("external skill")
+    assert external is not None
+    assert not app.modules.skills.is_agent_owned(external)
+    assert app.modules.skills.describe(external)["agent_owned"] is False
+    with pytest.raises(ValueError, match="only edit skills it created"):
+        app.modules.skills.edit(name="external skill", body="hijacked")
+
+    result = app.runtime.submit_user_message("edit the external skill")
+    assert result.status == "completed"
+    assert app.approvals.pending() == []
+    assert app.modules.skills.get(external.id).version == 1
+    assert app.modules.skills.body(external) == "Original body.\n"
+
+    user_skill = Module(
+        id="skill:user-made", kind="skill", name="user made",
+        origin="user", created_by="user",
+    )
+    app.modules.save(user_skill)
+    assert not app.modules.skills.is_agent_owned(user_skill)
+    with pytest.raises(ValueError, match="only edit skills it created"):
+        app.modules.skills.edit(name="user made", body="hijacked")
+
+
+def test_propose_skill_cannot_revise_external_skill(make_app, tmp_path):
+    app = make_app.build(scripts=[
+        {"tool_calls": [{
+            "name": "propose_skill",
+            "arguments": {
+                "name": "external skill", "description": "hijack",
+                "body": "Replacement body.",
+            },
+        }]},
+        {"content": "I cannot revise that imported skill."},
+    ])
+    skills_dir = tmp_path / "skills"
+    _skill_dir(
+        skills_dir, "external",
+        "---\nname: external skill\ndescription: imported\n---\n"
+        "Original body.\n",
+    )
+    app.config.set("tools.skills_dir", str(skills_dir))
+    app.modules.load_all()
+    external = app.modules.skills.find_by_name("external skill")
+
+    result = app.runtime.submit_user_message("replace the external skill")
+    assert result.status == "completed"
+    assert app.approvals.pending() == []
+    assert app.modules.skills.get(external.id).version == 1
+    assert app.modules.skills.body(external) == "Original body.\n"
+
+
+def test_builder_can_refine_its_own_skill(make_app):
+    app = make_app.build(default="ok")
+    own = app.modules.skills.create_draft(
+        name="collected summary",
+        description="summarize completed work",
+        body="Group completed work by objective.",
+        created_by="builder",
+    )
+    app.modules.skills.activate(own.id)
+    for index in range(5):
+        _add_completed_run(app, f"task {index} using tools")
+    app.model.scripts.append({"content": json.dumps({
+        "skill": {
+            "name": "collected summary",
+            "description": "summarize and rank completed work",
+            "preconditions": ["summary"],
+            "domains": [],
+            "body": "Group completed work by objective, then rank blockers.",
+        },
+    })})
+
+    report = app.skill_builder.maybe_draft()
+    assert report["status"] == "created"
+    assert report["skill_id"] == own.id
+    updated = app.modules.skills.get(own.id)
+    assert updated.version == 2
+    assert updated.status == "draft"
+    assert updated.created_by == "builder"
+    assert app.modules.skills.body(updated) == (
+        "Group completed work by objective, then rank blockers.\n"
+    )
+    assert updated.manifest["version_history"][-1]["version"] == 1
+
+
+def test_builder_refuses_to_revise_external_skill(make_app, tmp_path):
+    app = make_app.build(default="ok")
+    skills_dir = tmp_path / "skills"
+    _skill_dir(
+        skills_dir, "external",
+        "---\nname: external skill\ndescription: imported\n---\n"
+        "Original body.\n",
+    )
+    app.config.set("tools.skills_dir", str(skills_dir))
+    app.modules.load_all()
+    external = app.modules.skills.find_by_name("external skill")
+    for index in range(5):
+        _add_completed_run(app, f"task {index} using tools")
+    app.model.scripts.append({"content": json.dumps({
+        "skill": {
+            "name": "external skill",
+            "description": "replace imported",
+            "domains": [],
+            "body": "Replacement body.",
+        },
+    })})
+
+    report = app.skill_builder.maybe_draft()
+    assert report["status"] == "rejected"
+    assert "only edit skills it created" in report["error"]
+    assert app.modules.skills.get(external.id).version == 1
+    assert app.modules.skills.body(external) == "Original body.\n"
+    events = _skill_events(app, "skill.builder")
+    assert events and events[-1]["data"]["status"] == "rejected"
+
+
 def test_tainted_run_cannot_propose_a_skill(make_app):
     from harness.tools import ToolSpec
 

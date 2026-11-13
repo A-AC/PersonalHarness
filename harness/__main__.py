@@ -456,6 +456,8 @@ def cmd_skills(args: argparse.Namespace) -> None:
     out = client.call("GET", "/api/skills")
     for skill in out.get("skills", []):
         flags = []
+        if skill.get("agent_owned"):
+            flags.append("agent-owned")
         if skill.get("rollback_available"):
             flags.append("rollback")
         if skill.get("created_by"):
