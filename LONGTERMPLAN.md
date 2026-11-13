@@ -679,7 +679,9 @@ cannot cause an uncontrolled loop or an unapproved side effect.
 
 ---
 
-### Phase 6 - UI information architecture
+### Phase 6 - UI rework information architecture
+
+**Status:** complete (2026-11-13).
 
 **Goal:** the UI explains and controls the system instead of accumulating
 flat tabs.
@@ -687,8 +689,8 @@ flat tabs.
 **Scope**
 
 - Navigation groups:
-  - **Conversation**: chat, task detail drawer.
-  - **Work**: tasks (+ sub-agent tree), approvals, schedules, inbox,
+  - **Conversation**: chat, task detail drawer, more dynamic chat with status on the working task.
+  - **Work**: tasks (+ sub-agent tree) each task provides detailed info on the prompt ran, the response, tool uses, etc; approvals, schedules, inbox,
     automations.
   - **Knowledge**: memories (active/archived/superseded, usage), domains,
     skills, consolidation.
@@ -697,6 +699,7 @@ flat tabs.
 - Split `/api/state` into per-panel endpoints (`/api/tasks`, `/api/memories`,
   `/api/modules`, `/api/inbox`, ...) and keep a small `/api/summary` for
   header badges. Poll only the active panel; keep the chat poll.
+- All data sources (memories, context, persona, skills, etc) can be modified, viewed, and deleted via the UI.
 - Modules page: health, last load, last error, tool count, domain bindings,
   enable/disable/reload, schema budget usage.
 - Skills page: drafts, active, disabled, provenance, version, rollback.

@@ -23,6 +23,7 @@ from . import util
 from .app import App
 from .config import EDITABLE_KEYS, ConfigError, save_config, validate_group_update
 from .inbox import InboxError, InboxTooLarge
+from .modules.types import ModuleBinding
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 # Assets are served through the same authenticated handler as the page. No
@@ -102,16 +103,21 @@ class Server:
     # -- state --------------------------------------------------------------
 
     async def state(self, request: Request) -> Response:
+        """Compatibility aggregate (CLI status/tasks use it).
+
+        The browser uses the small ``/api/summary`` plus one panel endpoint at
+        a time, but this endpoint remains the single-shot view for scripts and
+        the CLI.
+        """
         if not self._authorized(request):
             return _err("unauthorized", 401)
         return _json(await run_in_threadpool(self._state_payload))
 
-    def _state_payload(self) -> dict[str, Any]:
+    # -- panel payloads -----------------------------------------------------
+
+    def _visible_tasks(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Open work first, then recent history; children stay off the list."""
         app = self.app
-        # Open work must never fall out of the UI because history is long:
-        # show every open task first, then the most recent history.
-        # Child tasks belong inside their parent's detail view, never in the
-        # top-level work list.
         open_tasks = [
             task for task in app.tasks.list_open()
             if (task.get("role") or "user") != "subagent"
@@ -122,27 +128,145 @@ class Server:
             if task["id"] not in seen
             and (task.get("role") or "user") != "subagent"
         ]
-        approvals = app.approvals.pending()
+        return open_tasks, tasks
+
+    def _tasks_payload(self) -> dict[str, Any]:
+        open_tasks, tasks = self._visible_tasks()
+        return {
+            "tasks": tasks,
+            "open_tasks": open_tasks,
+            "counts": {
+                "open_tasks": len(open_tasks),
+                "paused": len(
+                    [task for task in tasks if task["status"] == "paused"]
+                ),
+            },
+        }
+
+    def _approvals_payload(self) -> dict[str, Any]:
+        approvals = self.app.approvals.pending()
         for approval in approvals:
-            approval["summary"] = app.approvals.describe(approval)
-        domains = app.domains.list_all()
+            approval["summary"] = self.app.approvals.describe(approval)
+        return {
+            "approvals": approvals,
+            "counts": {"pending_approvals": len(approvals)},
+        }
+
+    def _memory_counts(self) -> dict[str, int]:
+        app = self.app
+
+        def count(where: str) -> int:
+            row = app.db.query_one(
+                f"SELECT COUNT(*) AS n FROM memories WHERE {where}"
+            )
+            return int(row["n"] if row else 0)
+
+        return {
+            "active": count("status='active' AND archived_at IS NULL"),
+            "archived": count("status='active' AND archived_at IS NOT NULL"),
+            "superseded": count("status='superseded'"),
+            "retracted": count("status='retracted'"),
+            "expired": count("status='expired'"),
+            "pinned": count(
+                "status='active' AND archived_at IS NULL AND pinned=1"
+            ),
+        }
+
+    def _count_inbox_new(self) -> int:
+        row = self.app.db.query_one(
+            "SELECT COUNT(*) AS n FROM inbox_events WHERE status='new'"
+        )
+        return int(row["n"] if row else 0)
+
+    def _scheduler_payload(self) -> dict[str, Any]:
+        app = self.app
         report = util.loads(
             app.db.meta_get("scheduler.last_report") or "", {}
         )
-        memories = app.memory.list(limit=50)
-        archived_memories = app.memory.list(status="archived", limit=50)
+        return {
+            "last_tick": app.db.meta_get("scheduler.last_tick"),
+            "last_report": report,
+            "enabled": bool(app.config.get("scheduler.enabled", True)),
+        }
+
+    def _summary_payload(self) -> dict[str, Any]:
+        """Small header contract: badges plus the task the agent is on."""
+        app = self.app
+        open_tasks, tasks = self._visible_tasks()
+        approvals = app.approvals.pending()
+        domains = app.domains.list_all()
+        memory_counts = self._memory_counts()
+        modules = app.modules.all()
+        working = None
+        if open_tasks:
+            task = open_tasks[0]
+            run = app.db.query_one(
+                "SELECT status, decision, iterations, tool_calls FROM runs"
+                " WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
+                (task["id"],),
+            )
+            working = {
+                "id": task["id"],
+                "objective": task.get("objective"),
+                "status": task.get("status"),
+                "status_reason": task.get("status_reason"),
+                "domain_id": task.get("domain_id"),
+                "origin": task.get("origin"),
+                "updated_at": task.get("updated_at"),
+                "run_status": run["status"] if run else None,
+                "decision": run["decision"] if run else None,
+                "iterations": int(run["iterations"]) if run else 0,
+                "tool_calls": int(run["tool_calls"]) if run else 0,
+            }
+        return {
+            "counts": {
+                "open_tasks": len(open_tasks),
+                "paused": len(
+                    [task for task in tasks if task["status"] == "paused"]
+                ),
+                "pending_approvals": len(approvals),
+                "domains": len(domains),
+                "inbox_new": self._count_inbox_new(),
+                "memories": memory_counts["active"],
+                "archived_memories": memory_counts["archived"],
+                "skills": len([m for m in modules if m.kind == "skill"]),
+                "modules": len([m for m in modules if m.kind != "skill"]),
+            },
+            "working_task": working,
+            "persona": app.config.get("persona", {}),
+            "domains": [
+                {"id": d["id"], "name": d["name"], "status": d["status"]}
+                for d in domains
+            ],
+            "scheduler": self._scheduler_payload(),
+            "now": util.iso(),
+            "system_timezone": util.system_tz_name(),
+        }
+
+    def _state_payload(self) -> dict[str, Any]:
+        app = self.app
+        summary = self._summary_payload()
+        tasks = self._tasks_payload()
+        approvals = self._approvals_payload()
+        memories_all = app.memory.list(status="any", limit=100)
+        memory_counts = self._memory_counts()
         inbox_events = app.inbox.list_events(limit=60)
         automations = app.inbox.list_automations()
         automation_fires = app.inbox.list_fires(limit=40)
         return {
+            **summary,
+            **tasks,
             "messages": app.messages.list_visible(limit=300),
-            "tasks": tasks,
-            "open_tasks": open_tasks,
-            "approvals": approvals,
+            **approvals,
             "schedules": app.scheduler.list_schedules(),
-            "domains": domains,
-            "memories": memories,
-            "memories_archived": archived_memories,
+            "memories": [
+                m for m in memories_all
+                if not m.get("archived") and m.get("status") == "active"
+            ],
+            "memories_archived": [
+                m for m in memories_all if m.get("archived")
+            ],
+            "memory_counts": memory_counts,
             "tools": [
                 {"name": spec.name, "risk": spec.risk,
                  "module": spec.module,
@@ -151,31 +275,43 @@ class Server:
             ],
             "events": app.events.list(limit=120),
             "config": app.config.redacted(),
-            "persona": app.config.get("persona", {}),
             "consolidations": app.consolidation.list_runs(limit=5),
             "inbox_events": inbox_events,
             "automations": automations,
             "automation_fires": automation_fires,
             "counts": {
-                "open_tasks": len(open_tasks),
-                "pending_approvals": len(approvals),
-                "domains": len(domains),
-                "paused": len([t for t in tasks if t["status"] == "paused"]),
-                "memories": len(memories),
-                "archived_memories": len(archived_memories),
-                "inbox_new": len([e for e in inbox_events
-                                  if e["status"] == "new"]),
+                **summary["counts"],
                 "inbox_events": len(inbox_events),
                 "automations": len(automations),
             },
-            "scheduler": {
-                "last_tick": app.db.meta_get("scheduler.last_tick"),
-                "last_report": report,
-                "enabled": bool(app.config.get("scheduler.enabled", True)),
-            },
-            "now": util.iso(),
-            "system_timezone": util.system_tz_name(),
         }
+
+    async def summary(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json(await run_in_threadpool(self._summary_payload))
+
+    async def messages(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        try:
+            limit = int(request.query_params.get("limit", 300))
+        except ValueError:
+            return _err("limit must be an integer")
+        limit = max(1, min(limit, 1000))
+        return _json({
+            "messages": self.app.messages.list_visible(limit=limit),
+        })
+
+    async def tasks_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json(await run_in_threadpool(self._tasks_payload))
+
+    async def approvals_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json(await run_in_threadpool(self._approvals_payload))
 
     async def events(self, request: Request) -> Response:
         if not self._authorized(request):
@@ -222,10 +358,20 @@ class Server:
             return _err("no such task", 404)
         runs = self.app.db.query(
             "SELECT id, status, trigger, started_at, ended_at, iterations,"
-            " tool_calls, decision, error FROM runs WHERE task_id=?"
+            " tool_calls, decision, error, meta FROM runs WHERE task_id=?"
             " ORDER BY started_at",
             (task_id,),
         )
+        runs_payload: list[dict[str, Any]] = []
+        latest_toolset = None
+        for row in runs:
+            item = dict(row)
+            meta = util.loads(item.pop("meta", None) or "{}", {})
+            item["toolset"] = meta.get("toolset")
+            item["tainted_sources"] = meta.get("tainted_sources", [])
+            if item["toolset"]:
+                latest_toolset = item["toolset"]
+            runs_payload.append(item)
         executions = self.app.db.query(
             "SELECT * FROM tool_executions WHERE task_id=? ORDER BY"
             " started_at",
@@ -245,7 +391,8 @@ class Server:
             "children": children,
             "domain": self.app.domains.get(task.get("domain_id"))
             if task.get("domain_id") else None,
-            "runs": [dict(r) for r in runs],
+            "runs": runs_payload,
+            "toolset": latest_toolset,
             "executions": [dict(r) for r in executions],
             "approvals": [
                 a for a in self.app.approvals.pending(task_id)
@@ -548,17 +695,26 @@ class Server:
             return _err("unauthorized", 401)
         scope = request.query_params.get("scope")
         status = request.query_params.get("status", "active")
+        try:
+            limit = int(request.query_params.get("limit", 200))
+        except ValueError:
+            return _err("limit must be an integer")
+        limit = max(1, min(limit, 1000))
         payload = await run_in_threadpool(
-            self._memories_payload, scope, status
+            self._memories_payload, scope, status, limit
         )
         return _json(payload)
 
     def _memories_payload(
-        self, scope: str | None, status: str
+        self, scope: str | None, status: str, limit: int = 200
     ) -> dict[str, Any]:
         return {
-            "memories": self.app.memory.list(scope=scope, status=status),
+            "memories": self.app.memory.list(
+                scope=scope, status=status, limit=limit
+            ),
             "artifact_problems": self.app.memory.check_artifacts(),
+            "counts": self._memory_counts(),
+            "filter": status,
         }
 
     async def memory_detail(self, request: Request) -> Response:
@@ -604,6 +760,50 @@ class Server:
             limit=int(self.app.config.get("context.history_results", 4)),
         )
         return _json({"results": results, "history": history})
+
+    async def memory_update(self, request: Request) -> Response:
+        """Edit a live memory's text or kind from the UI."""
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        memory_id = request.path_params["memory_id"]
+        if self.app.memory.get(memory_id) is None:
+            return _err("no such memory", 404)
+        body = await self._body(request)
+        content = body.get("content")
+        kind = body.get("kind")
+        if content is None and kind is None:
+            return _err("content or kind is required")
+        try:
+            updated = await run_in_threadpool(
+                self.app.memory.update,
+                memory_id,
+                content=(str(content) if content is not None else None),
+                kind=(str(kind) if kind is not None else None),
+                changed_by="web",
+                reason=str(body.get("reason") or "edited in the web UI"),
+            )
+        except ValueError as exc:
+            return _err(str(exc), 409)
+        return _json({"memory": updated})
+
+    async def memory_delete(self, request: Request) -> Response:
+        """Retract a memory. Retraction keeps its revision history."""
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        memory_id = request.path_params["memory_id"]
+        if self.app.memory.get(memory_id) is None:
+            return _err("no such memory", 404)
+        body = await self._body(request)
+        try:
+            updated = await run_in_threadpool(
+                self.app.memory.retract,
+                memory_id,
+                changed_by="web",
+                reason=str(body.get("reason") or "deleted in the web UI"),
+            )
+        except ValueError as exc:
+            return _err(str(exc), 409)
+        return _json({"memory": updated})
 
     async def memory_action(self, request: Request) -> Response:
         """Archive, restore, pin, or unpin one memory."""
@@ -714,6 +914,9 @@ class Server:
         modules = []
         for module in self.app.modules.all():
             tools = self.app.modules.tools(module.id)
+            bindings = [
+                binding for binding in self.app.modules.bindings(module.id)
+            ]
             modules.append({
                 "id": module.id,
                 "kind": module.kind,
@@ -723,27 +926,48 @@ class Server:
                 "scope": module.scope,
                 "origin": module.origin,
                 "manifest": module.manifest,
+                "provenance": module.provenance,
+                "content_path": module.content_path,
                 "last_loaded_at": module.last_loaded_at,
                 "last_error": module.last_error,
                 "usage_count": module.usage_count,
                 "bound_domains": [
-                    binding.domain_id
-                    for binding in self.app.modules.bindings(module.id)
+                    binding.domain_id for binding in bindings
                     if binding.enabled
+                ],
+                "bindings": [
+                    {"domain_id": binding.domain_id,
+                     "enabled": binding.enabled,
+                     "risk_override": binding.risk_override}
+                    for binding in bindings
                 ],
                 "tools": [
                     {"name": tool.tool_name, "risk": tool.risk,
                      "side_effects": tool.side_effects,
-                     "read_only": tool.read_only}
+                     "read_only": tool.read_only,
+                     "last_seen": tool.last_seen}
                     for tool in tools
                 ],
                 "health": self.app.modules.status.get(module.id, ""),
             })
+        budget = int(
+            self.app.config.get("modules.tool_schema_budget_tokens", 0)
+        )
+        selection = self.app.tools.schemas_for(
+            None,
+            budget_tokens=budget,
+            eligible_modules=self.app.modules.eligible_module_ids(None),
+        )
         return {
             "modules": modules,
-            "schema_budget_tokens": int(
-                self.app.config.get("modules.tool_schema_budget_tokens", 0)
-            ),
+            "schema_budget_tokens": budget,
+            "schema_budget": {
+                "tokens": selection["tokens"],
+                "budget_tokens": selection["budget_tokens"],
+                "tool_count": len(selection["names"]),
+                "names": selection["names"],
+                "exclusions": selection["exclusions"],
+            },
         }
 
     async def modules_reload(self, request: Request) -> Response:
@@ -755,6 +979,36 @@ class Server:
         except Exception as exc:
             return _err(f"{type(exc).__name__}: {exc}", 500)
         return _json({"report": report})
+
+    async def module_bindings(self, request: Request) -> Response:
+        """Enable or disable one domain binding for a module."""
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        module_id = request.path_params["module_id"]
+        module = self.app.modules.get(module_id)
+        if module is None:
+            return _err("no such module", 404)
+        body = await self._body(request)
+        domain_id = str(body.get("domain_id", "")).strip()
+        if not domain_id or self.app.domains.get(domain_id) is None:
+            return _err("no such domain", 404)
+        enabled = bool(body.get("enabled", True))
+        await run_in_threadpool(
+            self.app.modules.set_binding,
+            ModuleBinding(
+                module_id=module_id, domain_id=domain_id, enabled=enabled,
+            ),
+        )
+        fresh = self.app.modules.get(module_id)
+        return _json({"module": {
+            "id": module_id,
+            "bound_domains": [
+                binding.domain_id
+                for binding in self.app.modules.bindings(module_id)
+                if binding.enabled
+            ],
+            "status": fresh.status if fresh else module.status,
+        }})
 
     async def module_action(self, request: Request) -> Response:
         if not self._authorized(request):
@@ -807,6 +1061,114 @@ class Server:
                 self.app.config.get("skills.auto_draft", True)
             ),
             "max_body_chars": self.app.modules.skills.max_body_chars(),
+        }
+
+    async def skill_detail(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        skill_id = request.path_params["skill_id"]
+        module = self.app.modules.skills.get(skill_id)
+        if module is None:
+            return _err("no such skill", 404)
+        return _json({
+            "skill": self.app.modules.skills.describe(module),
+            "body": self.app.modules.skills.body(module),
+        })
+
+    async def skills_create(self, request: Request) -> Response:
+        """Create or revise a skill as a draft from the UI."""
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        body = await self._body(request)
+        try:
+            module = await run_in_threadpool(
+                self.app.modules.skills.create_draft,
+                name=body.get("name"),
+                description=body.get("description", ""),
+                preconditions=body.get("preconditions"),
+                domains=body.get("domains"),
+                body=body.get("body", ""),
+                origin="user",
+                provenance={"source": "web"},
+                created_by="user",
+                reason=str(body.get("reason") or "created in the web UI"),
+            )
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        return _json({"skill": self.app.modules.skills.describe(module)})
+
+    async def skills_delete(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        skill_id = request.path_params["skill_id"]
+        try:
+            outcome = await run_in_threadpool(
+                self.app.modules.skills.delete, skill_id
+            )
+        except ValueError as exc:
+            return _err(str(exc), 409)
+        return _json(outcome)
+
+    async def consolidations_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json({
+            "consolidations": self.app.consolidation.list_runs(limit=20),
+            "schedule_interval_s": self.app.config.get(
+                "consolidation.schedule_interval_s"
+            ),
+        })
+
+    async def backups_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json({"backups": self._backups_payload()})
+
+    def _backups_payload(self) -> list[dict[str, Any]]:
+        directory = self.app.data_dir / "backups"
+        if not directory.is_dir():
+            return []
+        items = []
+        for path in sorted(
+            directory.glob("*.zip"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            stat = path.stat()
+            items.append({
+                "name": path.name,
+                "path": str(path),
+                "size": stat.st_size,
+                "mtime_ms": int(stat.st_mtime * 1000),
+            })
+        return items
+
+    async def system_overview(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json(await run_in_threadpool(self._system_payload))
+
+    def _system_payload(self) -> dict[str, Any]:
+        app = self.app
+        summary = self._summary_payload()
+        return {
+            "counts": summary["counts"],
+            "working_task": summary["working_task"],
+            "scheduler": summary["scheduler"],
+            "domains": summary["domains"],
+            "module_health": app.modules.status,
+            "modules": [
+                {"id": m.id, "name": m.name, "kind": m.kind,
+                 "status": m.status, "last_error": m.last_error,
+                 "health": app.modules.status.get(m.id, "")}
+                for m in app.modules.all()
+            ],
+            "model": {
+                "base_url": app.config.get("model.base_url"),
+                "name": app.config.get("model.name"),
+            },
+            "now": util.iso(),
+            "system_timezone": util.system_tz_name(),
         }
 
     async def tools_list(self, request: Request) -> Response:
@@ -895,11 +1257,15 @@ class Server:
             Route("/", self.page, methods=["GET"]),
             Route("/assets/{name}", self.asset, methods=["GET"]),
             Route("/api/state", self.state, methods=["GET"]),
+            Route("/api/summary", self.summary, methods=["GET"]),
+            Route("/api/messages", self.messages, methods=["GET"]),
             Route("/api/events", self.events, methods=["GET"]),
             Route("/api/message", self.message, methods=["POST"]),
+            Route("/api/tasks", self.tasks_list, methods=["GET"]),
             Route("/api/tasks/{task_id}", self.task_detail, methods=["GET"]),
             Route("/api/tasks/{task_id}/{action}", self.task_action,
                   methods=["POST"]),
+            Route("/api/approvals", self.approvals_list, methods=["GET"]),
             Route("/api/approvals/{approval_id}/{decision}",
                   self.approval_decide, methods=["POST"]),
             Route("/api/schedules", self.schedules_list, methods=["GET"]),
@@ -923,6 +1289,10 @@ class Server:
             Route("/api/memories/search", self.memory_search, methods=["POST"]),
             Route("/api/memories/{memory_id}", self.memory_detail,
                   methods=["GET"]),
+            Route("/api/memories/{memory_id}", self.memory_update,
+                  methods=["PATCH"]),
+            Route("/api/memories/{memory_id}", self.memory_delete,
+                  methods=["DELETE"]),
             Route("/api/memories/{memory_id}/{action}", self.memory_action,
                   methods=["POST"]),
             Route("/api/domains", self.domains_list, methods=["GET"]),
@@ -931,16 +1301,27 @@ class Server:
                   methods=["PATCH"]),
             Route("/api/heartbeat", self.heartbeat, methods=["POST"]),
             Route("/api/consolidate", self.consolidate, methods=["POST"]),
+            Route("/api/consolidations", self.consolidations_list,
+                  methods=["GET"]),
             Route("/api/modules", self.modules_list, methods=["GET"]),
             Route("/api/modules/reload", self.modules_reload, methods=["POST"]),
+            Route("/api/modules/{module_id}/bindings", self.module_bindings,
+                  methods=["POST"]),
             Route("/api/modules/{module_id}/{action}", self.module_action,
                   methods=["POST"]),
             Route("/api/skills", self.skills_list, methods=["GET"]),
+            Route("/api/skills", self.skills_create, methods=["POST"]),
+            Route("/api/skills/{skill_id}", self.skill_detail,
+                  methods=["GET"]),
+            Route("/api/skills/{skill_id}", self.skills_delete,
+                  methods=["DELETE"]),
             Route("/api/tools", self.tools_list, methods=["GET"]),
+            Route("/api/system", self.system_overview, methods=["GET"]),
             Route("/api/endpoint-probe", self.endpoint_probe, methods=["GET"]),
             Route("/api/config", self.config_get, methods=["GET"]),
             Route("/api/config", self.config_update, methods=["POST"]),
             Route("/api/backup", self.backup, methods=["POST"]),
+            Route("/api/backups", self.backups_list, methods=["GET"]),
             Route("/api/restore", self.restore, methods=["POST"]),
         ]
         return Starlette(routes=routes)

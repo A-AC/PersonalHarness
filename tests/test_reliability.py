@@ -339,9 +339,19 @@ def test_web_page_exposes_every_panel(make_app, client):
     page = http.get("/")
     assert page.status_code == 200
     assert "text/html" in page.headers["content-type"]
-    for tab in ("chat", "tasks", "approvals", "domains", "persona",
-                "settings", "schedules", "inbox", "memory", "system"):
-        assert f'data-tab="{tab}"' in page.text, tab
+    # Phase 6 groups the sidebar; every panel keeps its original tab id so
+    # bookmarks and the CLI's /api/state contract stay stable.
+    groups = {
+        "Conversation": ("chat",),
+        "Work": ("tasks", "approvals", "schedules", "inbox", "automations"),
+        "Knowledge": ("memory", "domains", "skills", "consolidation"),
+        "System": ("modules", "tools", "events", "system", "persona",
+                   "settings", "backup", "guard"),
+    }
+    for group, tabs in groups.items():
+        assert f'navlabel">{group}' in page.text, group
+        for tab in tabs:
+            assert f'data-tab="{tab}"' in page.text, tab
     # The shell is static; the client code and styles are authenticated
     # assets, not Python string literals.
     script = http.get("/assets/app.js")
@@ -350,10 +360,14 @@ def test_web_page_exposes_every_panel(make_app, client):
     style = http.get("/assets/style.css")
     assert style.status_code == 200
     assert "text/css" in style.headers["content-type"]
-    # The page must talk to the same API the CLI uses, not a second store.
-    assert "/api/state" in script.text
-    assert "/api/config" in script.text
-    assert "/api/domains" in script.text
+    # The UI talks to the same per-panel API the server exposes, and polls
+    # only the active panel instead of one monolithic state call.
+    for endpoint in ("/api/summary", "/api/messages", "/api/tasks",
+                     "/api/approvals", "/api/domains", "/api/config",
+                     "/api/memories", "/api/modules", "/api/skills",
+                     "/api/system"):
+        assert endpoint in script.text, endpoint
+    assert "setInterval" in script.text
 
 
 def test_cancel_task_cancels_approvals_and_stops_its_run(make_app, client):

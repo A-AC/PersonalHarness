@@ -85,10 +85,15 @@ terminal CLI that are two views of the same runtime.
   become unknown, never success. Unknown outcomes are surfaced and
   reconciled instead of silently retried. Runs paused by limits stay paused
   until the user or scheduler resumes them deliberately.
-- **Web UI + terminal CLI.** A polling chat page with panels for tasks,
-  approvals, domains, persona, settings, schedules, inbox, memory, tools,
-  events, and configuration; a CLI that talks to the same HTTP API. No second
-  runtime, no separate history.
+- **Web UI + terminal CLI.** A polling chat page with grouped navigation:
+  *Conversation* (chat and the live working-task strip), *Work* (tasks with a
+  detail drawer and sub-agent tree, approvals, schedules, inbox, automations),
+  *Knowledge* (memory, domains, skills, consolidation), and *System* (status,
+  modules, tools, events, persona, config, backup, guard). It polls
+  `/api/summary` for badges plus only the active panel's endpoint, while the
+  chat poll stays on `/api/messages`; `/api/state` remains a compatibility
+  aggregate for the CLI. A CLI talks to the same HTTP API. No second runtime,
+  no separate history, no build step.
 
 ## Architecture at a glance
 
@@ -711,7 +716,11 @@ Everything important is inspectable without exposing chain-of-thought:
 - `memory_revisions` rows: before/after, changed-by, reason
 - `memory_access` rows: which memory was disclosed to which run, and when
 - The CLI `events`, `tasks ID`, and `memories` commands and the web UI's
-  panels read this state directly; the browser holds nothing of its own.
+  grouped panels read this state directly; every view is rendered from an API
+  response and the browser holds nothing of its own. Panel mutations (memory
+  edit/retract, skill draft/delete, module bindings, domain edits, schedule and
+  automation changes) all go through the same authenticated endpoints as the
+  CLI.
 
 Structured logs go to stdout and `data/logs/harness.log`.
 

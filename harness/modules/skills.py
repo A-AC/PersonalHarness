@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -699,6 +700,38 @@ class SkillManager:
             },
         )
         return self.registry.get(module_id) or updated
+
+    def delete(self, module_id: str) -> dict[str, Any]:
+        """Delete a non-active skill row and its versioned body files.
+
+        Active skills must be disabled first: deleting the currently disclosed
+        procedure while it is live would make the UI lie about what the agent
+        can use. The audit event records the identity and version that went
+        away.
+        """
+        module = self._require(module_id)
+        if module.status == "active":
+            raise ValueError(
+                f"skill {module_id} is active; disable it before deleting"
+            )
+        self.db.execute(
+            "DELETE FROM module_bindings WHERE module_id=?", (module_id,)
+        )
+        self.db.execute(
+            "DELETE FROM module_tools WHERE module_id=?", (module_id,)
+        )
+        self.db.execute("DELETE FROM modules WHERE id=?", (module_id,))
+        shutil.rmtree(self._skill_dir(module_id), ignore_errors=True)
+        self.events.record(
+            "skill.deleted",
+            data={
+                "module_id": module_id,
+                "name": module.name,
+                "version": module.version,
+                "status": module.status,
+            },
+        )
+        return {"deleted": module_id, "name": module.name}
 
     def reload(self, module_id: str) -> dict[str, Any]:
         module = self._require(module_id)

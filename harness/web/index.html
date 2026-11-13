@@ -11,22 +11,46 @@
   <span class="title" id="who">Assistant</span>
   <span class="meta" id="statusmeta">connecting...</span>
   <nav id="nav">
-    <button data-tab="chat" class="active">Chat</button>
-    <button data-tab="tasks">Tasks</button>
-    <button data-tab="approvals">Approvals</button>
-    <button data-tab="domains">Domains</button>
-    <button data-tab="persona">Persona</button>
-    <button data-tab="settings">Settings</button>
-    <button data-tab="schedules">Schedules</button>
-    <button data-tab="inbox">Inbox</button>
-    <button data-tab="memory">Memory</button>
-    <button data-tab="system">System</button>
+    <div class="navgroup">
+      <span class="navlabel">Conversation</span>
+      <button data-tab="chat" class="active">Chat</button>
+    </div>
+    <div class="navgroup">
+      <span class="navlabel">Work</span>
+      <button data-tab="tasks">Tasks</button>
+      <button data-tab="approvals">Approvals</button>
+      <button data-tab="schedules">Schedules</button>
+      <button data-tab="inbox">Inbox</button>
+      <button data-tab="automations">Automations</button>
+    </div>
+    <div class="navgroup">
+      <span class="navlabel">Knowledge</span>
+      <button data-tab="memory">Memory</button>
+      <button data-tab="domains">Domains</button>
+      <button data-tab="skills">Skills</button>
+      <button data-tab="consolidation">Consolidation</button>
+    </div>
+    <div class="navgroup">
+      <span class="navlabel">System</span>
+      <button data-tab="system">Status</button>
+      <button data-tab="modules">Modules</button>
+      <button data-tab="tools">Tools</button>
+      <button data-tab="events">Events</button>
+      <button data-tab="persona">Persona</button>
+      <button data-tab="settings">Config</button>
+      <button data-tab="backup">Backup</button>
+      <button data-tab="guard">Guard</button>
+    </div>
   </nav>
 </header>
 <div id="banner"></div>
 <main>
   <div id="chatwrap">
     <div id="chat"></div>
+    <div id="working" hidden>
+      <div id="workingtext" class="workingtext"></div>
+      <button id="workingdetails">Task details</button>
+    </div>
     <div id="composer">
       <textarea id="input" rows="2"
         placeholder="Message the assistant... (Enter sends, Shift+Enter adds a line)"></textarea>
@@ -40,6 +64,13 @@
   </div>
   <div id="side"></div>
 </main>
+<aside id="drawer" hidden>
+  <div class="drawerhead">
+    <h2 id="drawertitle">Task detail</h2>
+    <button id="drawerclose">Close</button>
+  </div>
+  <div id="drawerbody"></div>
+</aside>
 <div id="toast"></div>
 <script src="/assets/app.js"></script>
 </body>
