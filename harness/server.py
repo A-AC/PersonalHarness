@@ -22,6 +22,7 @@ from starlette.routing import Route
 from . import util
 from .app import App
 from .config import EDITABLE_KEYS, ConfigError, save_config, validate_group_update
+from .inbox import InboxError, InboxTooLarge
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 # Assets are served through the same authenticated handler as the page. No
@@ -130,6 +131,9 @@ class Server:
         )
         memories = app.memory.list(limit=50)
         archived_memories = app.memory.list(status="archived", limit=50)
+        inbox_events = app.inbox.list_events(limit=60)
+        automations = app.inbox.list_automations()
+        automation_fires = app.inbox.list_fires(limit=40)
         return {
             "messages": app.messages.list_visible(limit=300),
             "tasks": tasks,
@@ -149,6 +153,9 @@ class Server:
             "config": app.config.redacted(),
             "persona": app.config.get("persona", {}),
             "consolidations": app.consolidation.list_runs(limit=5),
+            "inbox_events": inbox_events,
+            "automations": automations,
+            "automation_fires": automation_fires,
             "counts": {
                 "open_tasks": len(open_tasks),
                 "pending_approvals": len(approvals),
@@ -156,6 +163,10 @@ class Server:
                 "paused": len([t for t in tasks if t["status"] == "paused"]),
                 "memories": len(memories),
                 "archived_memories": len(archived_memories),
+                "inbox_new": len([e for e in inbox_events
+                                  if e["status"] == "new"]),
+                "inbox_events": len(inbox_events),
+                "automations": len(automations),
             },
             "scheduler": {
                 "last_tick": app.db.meta_get("scheduler.last_tick"),
@@ -347,6 +358,187 @@ class Server:
         if action == "delete":
             self.app.scheduler.delete_schedule(schedule_id)
             return _json({"deleted": schedule_id})
+        return _err("invalid action")
+
+    # -- inbox / automations -----------------------------------------------------
+
+    @staticmethod
+    def _inbox_status(exc: InboxError) -> int:
+        return int(getattr(exc, "status_code", 400) or 400)
+
+    async def inbox_receive(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        # Bound the request before parsing JSON. Body content is checked again
+        # by the manager so a missing Content-Length cannot bypass the limit.
+        try:
+            length = int(request.headers.get("content-length", "0") or 0)
+        except ValueError:
+            length = 0
+        max_body = max(1, int(self.app.config.get(
+            "inbox.max_body_chars", 12000
+        )))
+        if length > max_body * 2 + 20000:
+            return _err(
+                f"request exceeds inbox.max_body_chars ({max_body})", 413
+            )
+        body = await self._body(request)
+        try:
+            outcome = await run_in_threadpool(
+                self.app.inbox.receive,
+                source=body.get("source"),
+                external_id=body.get("external_id"),
+                title=body.get("title"),
+                body=body.get("body", ""),
+                kind=body.get("kind", "event"),
+                severity=body.get("severity", "info"),
+                meta=body.get("meta"),
+            )
+        except InboxTooLarge as exc:
+            return _err(str(exc), 413)
+        except InboxError as exc:
+            return _err(str(exc), self._inbox_status(exc))
+        except Exception as exc:
+            return _err(f"{type(exc).__name__}: {exc}", 500)
+        event = await run_in_threadpool(
+            self.app.inbox.get_event, outcome["id"]
+        )
+        return _json({**outcome, "event": event})
+
+    async def inbox_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        status = request.query_params.get("status") or None
+        try:
+            limit = int(request.query_params.get("limit", 100))
+        except ValueError:
+            return _err("limit must be an integer")
+        try:
+            events = await run_in_threadpool(
+                self.app.inbox.list_events, status, limit
+            )
+        except InboxError as exc:
+            return _err(str(exc), self._inbox_status(exc))
+        automations = await run_in_threadpool(
+            self.app.inbox.list_automations
+        )
+        fires = await run_in_threadpool(
+            self.app.inbox.list_fires, 80
+        )
+        return _json({
+            "events": events,
+            "automations": automations,
+            "fires": fires,
+            "counts": {
+                "new": len([e for e in events if e["status"] == "new"]),
+            },
+        })
+
+    async def inbox_ignore(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        event_id = request.path_params["event_id"]
+        body = await self._body(request)
+        try:
+            event = await run_in_threadpool(
+                self.app.inbox.ignore, event_id,
+                reason=body.get("reason"), by="web",
+            )
+        except KeyError as exc:
+            return _err(str(exc), 404)
+        except InboxError as exc:
+            return _err(str(exc), self._inbox_status(exc))
+        return _json({"event": event})
+
+    async def inbox_triage(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        report = await run_in_threadpool(self.app.inbox.triage)
+        return _json({"report": report})
+
+    async def automations_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        automations = await run_in_threadpool(
+            self.app.inbox.list_automations
+        )
+        fires = await run_in_threadpool(self.app.inbox.list_fires, 80)
+        return _json({"automations": automations, "fires": fires})
+
+    async def automations_create(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        body = await self._body(request)
+        try:
+            automation = await run_in_threadpool(
+                self.app.inbox.create_automation,
+                name=body.get("name"),
+                enabled=bool(body.get("enabled", True)),
+                source=body.get("source"),
+                kind=body.get("kind"),
+                match_keywords=body.get("match_keywords"),
+                match_regex=body.get("match_regex"),
+                action=body.get("action"),
+                prompt_template=body.get("prompt_template", ""),
+                domain_id=body.get("domain_id"),
+                cooldown_s=body.get("cooldown_s", 0),
+                max_per_hour=body.get("max_per_hour"),
+                meta=body.get("meta"),
+            )
+        except InboxTooLarge as exc:
+            return _err(str(exc), 413)
+        except InboxError as exc:
+            return _err(str(exc), self._inbox_status(exc))
+        return _json({"automation": automation})
+
+    async def automation_update(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        automation_id = request.path_params["automation_id"]
+        body = await self._body(request)
+        try:
+            automation = await run_in_threadpool(
+                self.app.inbox.update_automation,
+                automation_id, **body,
+            )
+        except KeyError as exc:
+            return _err(str(exc), 404)
+        except InboxTooLarge as exc:
+            return _err(str(exc), 413)
+        except InboxError as exc:
+            return _err(str(exc), self._inbox_status(exc))
+        except (TypeError, ValueError) as exc:
+            return _err(str(exc), 400)
+        return _json({"automation": automation})
+
+    async def automation_action(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        automation_id = request.path_params["automation_id"]
+        action = request.path_params["action"]
+        automation = self.app.inbox.get_automation(automation_id)
+        if automation is None:
+            return _err("no such automation", 404)
+        try:
+            if action == "enable":
+                updated = await run_in_threadpool(
+                    self.app.inbox.set_automation_enabled,
+                    automation_id, True,
+                )
+                return _json({"automation": updated})
+            if action == "disable":
+                updated = await run_in_threadpool(
+                    self.app.inbox.set_automation_enabled,
+                    automation_id, False,
+                )
+                return _json({"automation": updated})
+            if action == "delete":
+                await run_in_threadpool(
+                    self.app.inbox.delete_automation, automation_id
+                )
+                return _json({"deleted": automation_id})
+        except KeyError as exc:
+            return _err(str(exc), 404)
         return _err("invalid action")
 
     # -- memories ---------------------------------------------------------------
@@ -714,6 +906,19 @@ class Server:
             Route("/api/schedules", self.schedules_create, methods=["POST"]),
             Route("/api/schedules/{schedule_id}/{action}",
                   self.schedule_action, methods=["POST"]),
+            Route("/api/inbox", self.inbox_receive, methods=["POST"]),
+            Route("/api/inbox", self.inbox_list, methods=["GET"]),
+            Route("/api/inbox/triage", self.inbox_triage, methods=["POST"]),
+            Route("/api/inbox/{event_id}/ignore", self.inbox_ignore,
+                  methods=["POST"]),
+            Route("/api/automations", self.automations_create,
+                  methods=["POST"]),
+            Route("/api/automations", self.automations_list,
+                  methods=["GET"]),
+            Route("/api/automations/{automation_id}",
+                  self.automation_update, methods=["PATCH"]),
+            Route("/api/automations/{automation_id}/{action}",
+                  self.automation_action, methods=["POST"]),
             Route("/api/memories", self.memories_list, methods=["GET"]),
             Route("/api/memories/search", self.memory_search, methods=["POST"]),
             Route("/api/memories/{memory_id}", self.memory_detail,

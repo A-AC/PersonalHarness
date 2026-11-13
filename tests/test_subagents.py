@@ -313,7 +313,7 @@ def test_subagent_schema_v5_migration_adds_parent_columns(tmp_path):
         version = reopened.query_one(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         )["value"]
-        assert int(version) == SCHEMA_VERSION == 5
+        assert int(version) == SCHEMA_VERSION == 6
         task_columns = {
             row["name"] for row in reopened.query("PRAGMA table_info(tasks)")
         }

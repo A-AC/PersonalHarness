@@ -71,7 +71,7 @@ def test_schema_migration_from_v3_adds_lifetime_columns(tmp_path):
         version = db.query_one(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         )["value"]
-        assert int(version) == SCHEMA_VERSION == 5
+        assert int(version) == SCHEMA_VERSION == 6
         columns = {
             row["name"] for row in db.query("PRAGMA table_info(memories)")
         }

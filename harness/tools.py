@@ -83,6 +83,7 @@ class ToolContext:
     messages: Messages | None = None
     skills: Any = None
     subagents: Any = None
+    scheduler: Any = None
     role: str = "user"
 
 
@@ -754,6 +755,74 @@ class ToolRegistry:
             handler=self._tool_use_domain,
         ))
         self.register(ToolSpec(
+            name="schedule_task",
+            description=(
+                "Create a durable schedule that submits a prompt to the normal "
+                "runtime later. Use only for recurring or delayed work the "
+                "user wants. It requires approval, is bound to this task, and "
+                "is capped by scheduler.max_schedules_per_task and "
+                "scheduler.max_schedule_depth."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short schedule name.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Instruction submitted when due.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "once | interval | daily | weekly",
+                    },
+                    "at_ts": {
+                        "type": "string",
+                        "description": "For once: ISO date/time.",
+                    },
+                    "interval_s": {
+                        "type": "number",
+                        "description": "For interval: seconds between runs.",
+                    },
+                    "time_of_day": {
+                        "type": "string",
+                        "description": "For daily/weekly: HH:MM local time.",
+                    },
+                    "weekday": {
+                        "type": "string",
+                        "description": "For weekly: mon..sun (or a full name).",
+                    },
+                    "tz": {
+                        "type": "string",
+                        "description": "System or IANA timezone. Defaults to "
+                            "the configured timezone.",
+                    },
+                },
+                "required": ["name", "prompt", "kind"],
+            },
+            risk=RISK_CONFIRM,
+            handler=self._tool_schedule_task,
+        ))
+        self.register(ToolSpec(
+            name="cancel_schedule",
+            description=(
+                "Cancel a schedule previously created by this task. It never "
+                "cancels a schedule owned by another task. Requires approval."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "schedule_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["schedule_id"],
+            },
+            risk=RISK_CONFIRM,
+            handler=self._tool_cancel_schedule,
+        ))
+        self.register(ToolSpec(
             name="delegate_task",
             description=(
                 "Delegate one bounded sub-problem to a sequential sub-agent "
@@ -963,6 +1032,44 @@ class ToolRegistry:
             "name": domain["name"],
             "previous_domain_id": previous_domain,
             "reason": args.get("reason") or "",
+        }
+
+    def _tool_schedule_task(
+        self, ctx: ToolContext, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        assert ctx.scheduler is not None
+        schedule = ctx.scheduler.create_for_task(
+            ctx.task_id,
+            run_id=ctx.run_id,
+            name=args["name"],
+            prompt=args["prompt"],
+            kind=args["kind"],
+            at_ts=args.get("at_ts"),
+            interval_s=args.get("interval_s"),
+            time_of_day=args.get("time_of_day"),
+            weekday=args.get("weekday"),
+            tz=args.get("tz"),
+        )
+        return {
+            "schedule_id": schedule["id"],
+            "name": schedule["name"],
+            "kind": schedule["kind"],
+            "next_due_at": schedule["next_due_at"],
+            "enabled": bool(schedule["enabled"]),
+        }
+
+    def _tool_cancel_schedule(
+        self, ctx: ToolContext, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        assert ctx.scheduler is not None
+        schedule = ctx.scheduler.cancel_for_task(
+            ctx.task_id, args["schedule_id"], reason=args.get("reason")
+        )
+        return {
+            "schedule_id": schedule["id"],
+            "name": schedule["name"],
+            "enabled": bool(schedule["enabled"]),
+            "cancelled": True,
         }
 
     def _tool_delegate_task(

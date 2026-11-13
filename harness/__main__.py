@@ -222,6 +222,111 @@ def cmd_schedules(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_inbox(args: argparse.Namespace) -> None:
+    client = Client(_base_url(args), _token(args))
+    if args.add:
+        try:
+            body = json.loads(args.add)
+        except ValueError as exc:
+            raise SystemExit(f"--add expects a JSON object: {exc}") from exc
+        if not isinstance(body, dict):
+            raise SystemExit("--add expects a JSON object")
+        out = client.call("POST", "/api/inbox", body)
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.ignore:
+        out = client.call(
+            "POST", f"/api/inbox/{urllib.parse.quote(args.ignore, safe='')}"
+            "/ignore", {}
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.triage:
+        out = client.call("POST", "/api/inbox/triage", {})
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.status:
+        out = client.call("GET", f"/api/inbox?status={args.status}")
+    else:
+        out = client.call("GET", "/api/inbox")
+    for event in out.get("events", []):
+        print(
+            f"{event['id']}  [{event['status']}/{event['trust']}] "
+            f"{event['source']}: {event['title'][:80]}"
+        )
+        print(
+            f"    kind={event['kind']} severity={event['severity']} "
+            f"received={_local_time(event['received_at'])}"
+        )
+        if event.get("body"):
+            print(f"    {event['body'][:160]}")
+    if not out.get("events"):
+        print("(no inbox events)")
+    print(f"automations={len(out.get('automations') or [])}")
+
+
+def cmd_automations(args: argparse.Namespace) -> None:
+    client = Client(_base_url(args), _token(args))
+    if args.add:
+        try:
+            body = json.loads(args.add)
+        except ValueError as exc:
+            raise SystemExit(f"--add expects a JSON object: {exc}") from exc
+        if not isinstance(body, dict):
+            raise SystemExit("--add expects a JSON object")
+        out = client.call("POST", "/api/automations", body)
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.update:
+        automation_id, raw = args.update
+        try:
+            body = json.loads(raw)
+        except ValueError as exc:
+            raise SystemExit(f"--update expects a JSON object: {exc}") from exc
+        if not isinstance(body, dict):
+            raise SystemExit("--update expects a JSON object")
+        out = client.call(
+            "PATCH",
+            f"/api/automations/{urllib.parse.quote(automation_id, safe='')}",
+            body,
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.action:
+        automation_id, action = args.action
+        out = client.call(
+            "POST",
+            f"/api/automations/{urllib.parse.quote(automation_id, safe='')}"
+            f"/{action}", {},
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
+    out = client.call("GET", "/api/automations")
+    for rule in out.get("automations", []):
+        print(
+            f"{rule['id']}  {'on ' if rule['enabled'] else 'off'} "
+            f"[{rule['action']}] {rule['name']}"
+        )
+        keywords = ", ".join(rule.get("match_keywords") or []) or "-"
+        print(
+            f"    source={rule.get('source') or '*'} "
+            f"kind={rule.get('kind') or '*'} keywords={keywords} "
+            f"cooldown={rule.get('cooldown_s')} "
+            f"max/hour={rule.get('max_per_hour')}"
+        )
+        if rule.get("disabled_reason"):
+            print(f"    disabled: {rule['disabled_reason']}")
+    if not out.get("automations"):
+        print("(no automations)")
+    fires = out.get("fires") or []
+    for fire in fires[:20]:
+        print(
+            f"    fire {_local_time(fire['fired_at'])} "
+            f"{fire.get('automation_name') or '(default)'} "
+            f"{fire['status']} {fire.get('reason') or ''}"
+        )
+
+
 def cmd_memories(args: argparse.Namespace) -> None:
     client = Client(_base_url(args), _token(args))
     action_id = (
@@ -521,6 +626,27 @@ def build_parser() -> argparse.ArgumentParser:
                         '"time_of_day":"09:00"}')
     p.add_argument("--action", nargs=2, metavar=("ID", "enable|disable|delete"))
     p.set_defaults(func=cmd_schedules)
+
+    p = sub.add_parser("inbox", help="list, add, ignore, or triage inbox events")
+    common(p)
+    p.add_argument("--add", metavar="JSON", default=None,
+                   help='push an event, e.g. {"source":"mail",'
+                        '"external_id":"42","title":"..."}')
+    p.add_argument("--ignore", metavar="ID", default=None)
+    p.add_argument("--triage", action="store_true")
+    p.add_argument("--status", choices=["new", "triaged", "promoted",
+                                        "ignored", "deduped"], default=None)
+    p.set_defaults(func=cmd_inbox)
+
+    p = sub.add_parser("automations", help="list or manage inbox automations")
+    common(p)
+    p.add_argument("--add", metavar="JSON", default=None,
+                   help='create a rule, e.g. {"name":"mail",'
+                        '"source":"mail","action":"notify"}')
+    p.add_argument("--update", nargs=2, metavar=("ID", "JSON"),
+                   help='patch fields, e.g. {"enabled":false}')
+    p.add_argument("--action", nargs=2, metavar=("ID", "enable|disable|delete"))
+    p.set_defaults(func=cmd_automations)
 
     p = sub.add_parser("memories", help="list, search, archive, or restore memories")
     common(p)

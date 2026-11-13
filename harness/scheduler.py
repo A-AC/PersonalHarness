@@ -125,6 +125,7 @@ class Scheduler:
         time_of_day: str | None = None,
         weekday: str | None = None,
         domain_id: str | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if kind not in ("once", "interval", "daily", "weekly"):
             raise ValueError(f"unknown schedule kind: {kind}")
@@ -144,6 +145,7 @@ class Scheduler:
             "interval_s": interval_s, "time_of_day": time_of_day,
             "weekday": weekday, "tz": tz, "enabled": 1,
             "created_at": ts, "updated_at": ts, "next_due_at": None,
+            "meta": util.dumps(meta or {}),
         }
         if kind == "once":
             if not at_ts:
@@ -156,11 +158,12 @@ class Scheduler:
         self.db.execute(
             "INSERT INTO schedules(id, name, prompt, domain_id, kind, at_ts,"
             " interval_s, time_of_day, weekday, tz, enabled, created_at,"
-            " updated_at, next_due_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " updated_at, next_due_at, meta)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             tuple(schedule[key] for key in (
                 "id", "name", "prompt", "domain_id", "kind", "at_ts",
                 "interval_s", "time_of_day", "weekday", "tz", "enabled",
-                "created_at", "updated_at", "next_due_at",
+                "created_at", "updated_at", "next_due_at", "meta",
             )),
         )
         self.events.record(
@@ -169,6 +172,96 @@ class Scheduler:
                   "next_due_at": schedule["next_due_at"]},
         )
         return self.get_schedule(schedule_id)  # type: ignore[return-value]
+
+    def create_for_task(
+        self,
+        task_id: str,
+        *,
+        run_id: str | None = None,
+        name: str,
+        prompt: str,
+        kind: str,
+        at_ts: str | None = None,
+        interval_s: float | None = None,
+        time_of_day: str | None = None,
+        weekday: str | None = None,
+        tz: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a schedule owned by one task, with durable bounds.
+
+        Both limits are enforced here rather than in the tool handler so a
+        direct API call cannot bypass them: at most
+        ``scheduler.max_schedules_per_task`` schedules may name this task as
+        owner, and a schedule chain may not exceed
+        ``scheduler.max_schedule_depth``.
+        """
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise ValueError(f"no such task: {task_id}")
+        if (task.get("role") or "user") == "subagent":
+            raise ValueError("sub-agents cannot create schedules")
+        meta = self.tasks.meta(task_id)
+        depth = int(meta.get("schedule_depth", 0) or 0) + 1
+        max_depth = max(0, int(
+            self.config.get("scheduler.max_schedule_depth", 2)
+        ))
+        if depth > max_depth:
+            raise ValueError(
+                f"schedule depth limit reached ({max_depth}); this task "
+                "cannot schedule more work"
+            )
+        owned = [
+            schedule for schedule in self.list_schedules()
+            if util.loads(schedule.get("meta") or "{}", {}).get(
+                "parent_task_id"
+            ) == task_id
+        ]
+        cap = max(0, int(
+            self.config.get("scheduler.max_schedules_per_task", 5)
+        ))
+        if cap and len(owned) >= cap:
+            raise ValueError(
+                f"this task already owns {len(owned)} schedule(s); the "
+                f"per-task cap is {cap}"
+            )
+        return self.create_schedule(
+            name=name,
+            prompt=prompt,
+            kind=kind,
+            tz=tz,
+            at_ts=at_ts,
+            interval_s=interval_s,
+            time_of_day=time_of_day,
+            weekday=weekday,
+            domain_id=task.get("domain_id"),
+            meta={
+                "parent_task_id": task_id,
+                "parent_run_id": run_id,
+                "schedule_depth": depth,
+                "created_by": "task",
+            },
+        )
+
+    def cancel_for_task(
+        self, task_id: str, schedule_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        schedule = self.get_schedule(schedule_id)
+        if schedule is None:
+            raise ValueError(f"no such schedule: {schedule_id}")
+        meta = util.loads(schedule.get("meta") or "{}", {})
+        if meta.get("parent_task_id") != task_id:
+            raise ValueError(
+                "that schedule is not owned by this task; use the Schedules "
+                "panel or CLI to manage it"
+            )
+        updated = self.set_enabled(schedule_id, False)
+        self.events.record(
+            "schedule.cancelled", schedule_id=schedule_id, task_id=task_id,
+            data={"reason": util.clip(
+                str(reason or "cancelled by its task"), 300
+            )},
+        )
+        return updated
 
     def get_schedule(self, schedule_id: str) -> dict[str, Any] | None:
         row = self.db.query_one(
@@ -287,6 +380,15 @@ class Scheduler:
         """
         occ_id = self._occurrence_id(schedule["id"], due)
         due_iso = util.iso(due)
+        schedule_meta = util.loads(schedule.get("meta") or "{}", {})
+        task_meta: dict[str, Any] = {
+            "notes": "",
+            "schedule_id": schedule["id"],
+        }
+        if schedule_meta.get("schedule_depth"):
+            task_meta["schedule_depth"] = int(schedule_meta["schedule_depth"])
+        if schedule_meta.get("parent_task_id"):
+            task_meta["scheduled_by_task_id"] = schedule_meta["parent_task_id"]
         created = False
         with self.db.transaction() as conn:
             existing = conn.execute(
@@ -320,7 +422,7 @@ class Scheduler:
                     objective=schedule["prompt"],
                     domain_id=schedule.get("domain_id"),
                     origin="schedule", origin_ref=occ_id,
-                    meta={"notes": ""},
+                    meta=task_meta,
                 )
                 created = True
                 task_status = "active"
@@ -418,6 +520,31 @@ class Scheduler:
                 self.events.record(
                     "module.unavailable", level="warn",
                     data={"error": util.clip(str(exc), 500)},
+                )
+
+            # 0c. Inbox triage runs before clock work. An external event is
+            #     urgent; a schedule that happens to be due can wait a tick.
+            #     The shared run budget keeps background model work bounded.
+            try:
+                inbox_budget = (
+                    None if max_runs == 0
+                    else max(0, max_runs - runs_started)
+                )
+                inbox_report = self.app.inbox.triage(
+                    now, max_runs=inbox_budget
+                )
+                report["inbox"] = inbox_report
+                runs_started += int(inbox_report.get("runs_started", 0))
+            except Exception as exc:
+                report["inbox"] = {
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                self.events.record(
+                    "inbox.triage_failed", level="error",
+                    data={"error": util.clip(
+                        f"{type(exc).__name__}: {exc}", 500
+                    )},
                 )
 
             # 1. Due schedules (idempotent occurrence submission).

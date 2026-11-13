@@ -340,7 +340,7 @@ def test_web_page_exposes_every_panel(make_app, client):
     assert page.status_code == 200
     assert "text/html" in page.headers["content-type"]
     for tab in ("chat", "tasks", "approvals", "domains", "persona",
-                "settings", "schedules", "memory", "system"):
+                "settings", "schedules", "inbox", "memory", "system"):
         assert f'data-tab="{tab}"' in page.text, tab
     # The shell is static; the client code and styles are authenticated
     # assets, not Python string literals.

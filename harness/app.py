@@ -25,6 +25,7 @@ from .config import Config, load_config
 from .consolidation import Consolidation
 from .context import ContextBuilder
 from .db import Database, rows_to_dicts
+from .inbox import InboxManager
 from .logging import get_logger, setup_logging
 from .memory import MemoryManager
 from .model import Model, ModelClient, ScriptedModel
@@ -152,6 +153,7 @@ class App:
             self.memory, self.artifacts_dir, modules=self.modules,
         )
         self.runtime = AgentRuntime(self)
+        self.inbox = InboxManager(self)
         self.subagents = SubAgentManager(self)
         self.scheduler = Scheduler(self)
         self.consolidation = Consolidation(self)
@@ -562,7 +564,7 @@ class App:
             run_id=run_id, task_id=task_id, domain_id=domain_id,
             memory=self.memory, domains=self.domains, tasks=self.tasks,
             messages=self.messages, skills=self.modules.skills,
-            subagents=self.subagents, role=role,
+            subagents=self.subagents, scheduler=self.scheduler, role=role,
         )
 
     # ------------------------------------------------------------------

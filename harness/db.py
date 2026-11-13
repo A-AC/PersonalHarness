@@ -21,7 +21,7 @@ from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Phase 3 memory lifetime: additive columns on ``memories`` plus a small
 # access table. ``archived_at`` marks an archived row without touching the
@@ -70,6 +70,69 @@ SUBAGENT_RUN_COLUMNS = (
 SUBAGENT_INDEX_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
+"""
+
+# Phase 5: durable external wake-ups and the declarative rules that act on
+# them. The unique key is the idempotency contract; the fire table is both the
+# visible history (Phase 6) and the durable half of the hourly loop breaker.
+INBOX_SCHEMA = """
+CREATE TABLE IF NOT EXISTS inbox_events (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'event',
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  received_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'new'
+    CHECK(status IN ('new','triaged','promoted','ignored','deduped')),
+  severity TEXT NOT NULL DEFAULT 'info',
+  meta TEXT,
+  trust TEXT NOT NULL DEFAULT 'untrusted',
+  UNIQUE(source, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_inbox_status
+  ON inbox_events(status, received_at);
+CREATE INDEX IF NOT EXISTS idx_inbox_received
+  ON inbox_events(received_at);
+
+CREATE TABLE IF NOT EXISTS automations (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  source TEXT,
+  kind TEXT,
+  match_keywords TEXT,
+  match_regex TEXT,
+  action TEXT NOT NULL DEFAULT 'notify'
+    CHECK(action IN ('task','notify','ignore')),
+  prompt_template TEXT NOT NULL DEFAULT '',
+  domain_id TEXT,
+  cooldown_s REAL NOT NULL DEFAULT 0,
+  max_per_hour INTEGER NOT NULL DEFAULT 6,
+  last_fired_at TEXT,
+  disabled_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  meta TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_automations_enabled
+  ON automations(enabled, created_at);
+
+CREATE TABLE IF NOT EXISTS automation_fires (
+  id TEXT PRIMARY KEY,
+  automation_id TEXT,
+  inbox_event_id TEXT NOT NULL,
+  fired_at TEXT NOT NULL,
+  status TEXT NOT NULL
+    CHECK(status IN ('fired','suppressed','disabled')),
+  task_id TEXT,
+  reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_automation_fires_rule
+  ON automation_fires(automation_id, fired_at);
+CREATE INDEX IF NOT EXISTS idx_automation_fires_event
+  ON automation_fires(inbox_event_id);
 """
 
 MODULE_SCHEMA = """
@@ -343,7 +406,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_toolx_run ON tool_executions(run_id);
 CREATE INDEX IF NOT EXISTS idx_toolx_status ON tool_executions(status);
-""" + MODULE_SCHEMA
+""" + MODULE_SCHEMA + INBOX_SCHEMA
 
 
 class Database:
@@ -439,6 +502,10 @@ class Database:
                         self._conn.execute(
                             f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
                         )
+        if version < 6:
+            # Phase 5 adds tables only, so the migration is a pure create and
+            # keeps every existing row untouched.
+            self._conn.executescript(INBOX_SCHEMA)
         if version < SCHEMA_VERSION:
             self._conn.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",

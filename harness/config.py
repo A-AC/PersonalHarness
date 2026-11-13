@@ -149,11 +149,32 @@ DEFAULTS: dict[str, Any] = {
         "categories": "general",
         "safe_search": 1,
     },
+    "inbox": {
+        # External systems POST to /api/inbox; the API is the durable
+        # contract. Bodies are untrusted data and always taint derived runs.
+        "enabled": True,
+        "max_body_chars": 12000,
+        "max_events_per_tick": 5,
+        "dedupe_window_days": 30,
+        # Empty means no quiet period. A local-time range like 22:00-07:00
+        # postpones triage (events stay new) without dropping them.
+        "quiet_hours": "",
+    },
+    "automations": {
+        # Used when no enabled automation matches an event. Any event that is
+        # not promoted is still visible in the inbox.
+        "default_action": "notify",   # task | notify | ignore
+        "max_per_hour": 6,            # hard ceiling for every automation
+    },
     "scheduler": {
         "enabled": True,
         "tick_interval_s": 60.0,
         "max_runs_per_tick": 1,        # bound background model work per tick
         "max_retries_per_tick": 1,
+        # Phase 5 self-scheduling bounds: a task may own only a few schedules,
+        # and schedule chains stop at max_schedule_depth.
+        "max_schedules_per_task": 5,
+        "max_schedule_depth": 2,
         "missed_policy": "run_once",   # run_once | skip
         "missed_grace_s": 900.0,       # occurrences older than this coalesce/skip
         "resume_interrupted": True,
@@ -219,7 +240,7 @@ ENV_OVERRIDES = {
 EDITABLE_KEYS = {
     "persona", "limits", "context", "domains", "memory", "tools",
     "modules", "skills", "subagents", "web", "scheduler", "consolidation",
-    "approvals", "timezone",
+    "approvals", "inbox", "automations", "timezone",
 }
 
 

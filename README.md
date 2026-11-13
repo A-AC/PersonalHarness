@@ -55,9 +55,19 @@ terminal CLI that are two views of the same runtime.
   occurrence. Missed runs follow a documented policy (run_once coalesces,
   skip discards).
 - **Heartbeat.** A deterministic periodic scan that submits bounded work
-  through the normal runtime: due schedules, interrupted runs, retryable
-  model failures, one-time approval reminders, expiry sweeps. Quiet checks
-  write events, not chat messages.
+  through the normal runtime: inbox events before due schedules, interrupted
+  runs, retryable model failures, one-time approval reminders, expiry sweeps.
+  Quiet checks write events, not chat messages.
+- **Durable inbox and declarative automations.** External systems wake the
+  agent with one idempotent `POST /api/inbox`. Events are stored first and
+  triaged by the heartbeat; rules can create a task, notify, or ignore.
+  Content dedupe, per-rule cooldowns, an hourly cap with an auto-disable
+  breaker, and quiet hours bound the loop. Inbox content is always untrusted,
+  so a derived run starts tainted and side effects still need approval.
+- **Self-scheduling with durable bounds.** A task can create or cancel its
+  own schedules through confirm-risk `schedule_task` / `cancel_schedule`
+  tools. A per-task schedule cap and a schedule-depth limit stop a scheduled
+  task from recursively scheduling itself forever.
 - **Approvals with a quick confirmation path.** Confirm-risk tool calls
   (external MCP actions by default, domain creation) become approvals bound
   to the exact tool and arguments. Short replies like "yes" or "no" are
@@ -76,8 +86,8 @@ terminal CLI that are two views of the same runtime.
   reconciled instead of silently retried. Runs paused by limits stay paused
   until the user or scheduler resumes them deliberately.
 - **Web UI + terminal CLI.** A polling chat page with panels for tasks,
-  approvals, domains, persona, settings, schedules, memory, tools, events,
-  and configuration; a CLI that talks to the same HTTP API. No second
+  approvals, domains, persona, settings, schedules, inbox, memory, tools,
+  events, and configuration; a CLI that talks to the same HTTP API. No second
   runtime, no separate history.
 
 ## Architecture at a glance
@@ -257,6 +267,8 @@ value in `data/config.yaml`.
 | `tasks [ID]` | List tasks, or show one task's runs, executions, context sources |
 | `approvals [approve/reject/cancel] [ID]` | List or decide pending approvals |
 | `schedules [--add JSON] [--action ID enable/disable/delete]` | Manage schedules |
+| `inbox [--add JSON] [--status STATUS] [--ignore ID] [--triage]` | List, push, ignore, or triage durable inbox events |
+| `automations [--add JSON] [--update ID JSON] [--action ID enable/disable/delete]` | Manage declarative inbox rules |
 | `memories [--search Q] [--archived|--all] [--include-archived] [--archive ID] [--restore ID] [--pin ID] [--unpin ID]` | List, search, filter, or manage memory lifetime; reports usage counts and artifact problems |
 | `domains [--create NAME DESCRIPTION]` | List or explicitly create domains |
 | `consolidate` | Run one memory consolidation pass |
@@ -409,6 +421,58 @@ behind an active user (`scheduler.user_activity_grace_s`). It never
 auto-resumes limit-paused tasks. Overlapping ticks are prevented with a
 non-blocking lock; quiet ticks record nothing in chat.
 
+### Inbox and automations
+
+The inbox is the durable wake-up contract; there is no mailbox or messaging
+adapter in the core process. Any external pusher can call:
+
+```http
+POST /api/inbox
+Authorization: Bearer <server.token>
+Content-Type: application/json
+
+{"source":"mail","external_id":"42","title":"Invoice due",
+ "body":"...","kind":"message","severity":"info","meta":{}}
+```
+
+`(source, external_id)` is the idempotency key: a repeated insert returns the
+original id with `duplicate: true`. Bodies are bounded by
+`inbox.max_body_chars`; malformed or oversized events are rejected as `400`
+or `413`, never truncated. Stored events always have `trust: untrusted`.
+
+Triage runs inside the heartbeat, before due schedules, and is deterministic:
+
+1. a future Phase 7 guard hook may reject the event;
+2. an enabled automation matches by source, kind, keywords, and/or regex;
+3. events no rule owns are deduped by identical source/kind/title/body
+   within `inbox.dedupe_window_days`;
+4. quiet hours leave events `new` for a later tick;
+5. the rule's cooldown and hourly cap are enforced;
+6. the action runs: `task` creates an `inbox:<source>` task, `notify` writes
+   one visible system note, `ignore` records the decision.
+
+Hitting an automation's hourly cap disables that rule, records
+`automation.disabled`, and writes exactly one visible note. Inbox-derived
+runs are seeded with `tainted_sources`, so after external content enters the
+run any side-effecting tool is escalated to confirm-risk by the same Phase 1
+taint rule; read-only work continues.
+
+Rules are managed with `POST /api/automations`, `PATCH
+/api/automations/{id}`, and `POST /api/automations/{id}/enable|disable|delete`
+(or `python -m harness automations --add JSON`). Inbox events are listed and
+ignored with `GET /api/inbox`, `POST /api/inbox/{id}/ignore`, and
+`POST /api/inbox/triage` (or `python -m harness inbox`). See
+`examples/inbox_curl.sh` and `integrations/README.md` for the pusher
+contract.
+
+Self-scheduling uses the same scheduler but adds durable bounds:
+`scheduler.max_schedules_per_task` (default 5) and
+`scheduler.max_schedule_depth` (default 2). The limits are enforced in
+`Scheduler.create_for_task`, not only in the tool handler, so an API caller
+cannot bypass them. A schedule created by a task records `parent_task_id` in
+its meta; the task it later submits carries `schedule_depth`, which is how a
+chain is stopped. Sub-agents cannot create schedules.
+
 ### Recovery
 
 On startup the harness deterministically converts crash debris: in-flight
@@ -425,8 +489,9 @@ reconciliation rather than blindly retried.
 Built-in tools (all low-risk unless noted): `remember`, `update_memory`,
 `retract_memory`, `search_knowledge`, `read_artifact`,
 `update_task_notes`, `use_domain`, `delegate_task`, `create_domain`
-(confirm-risk), and `propose_skill` (confirm-risk; saves a draft only after
-approval).
+(confirm-risk), `schedule_task` / `cancel_schedule` (confirm-risk; bounded
+to schedules the task owns), and `propose_skill` (confirm-risk; saves a draft
+only after approval).
 
 There is no shell, command, or code-execution tool, and the registry
 refuses to register any tool whose name starts with bash/sh/exec/run/
@@ -616,7 +681,10 @@ Main groups:
 - `scheduler.*`: enabled, tick interval, missed policy and grace,
   interrupted-run resume, per-tick run/retry caps, retry cooldown and
   exponential backoff, permanent-failure policy, user-activity grace,
-  approval reminders
+  approval reminders, `max_schedules_per_task`, `max_schedule_depth`
+- `inbox.*`: enabled, body limit, events examined per tick, dedupe window,
+  quiet hours (`"22:00-07:00"`, local time; empty disables)
+- `automations.*`: default action when no rule matches, hourly cap
 - `approvals.*`: expiry window, classifier token budget and thinking
 - `consolidation.*`: schedule interval, bounds
 - `persona.*`: name, speaker labels, purpose, principles, style, response
@@ -657,7 +725,7 @@ python -m pytest tests -m live -o addopts="" # real-endpoint integration tests
 The deterministic suite covers the required categories: core runtime,
 unified history, domains/resumption, context/memory, scheduling/heartbeat,
 approvals/permissions, recovery/deployment, memory lifetime/archive,
-sequential sub-agents, plus the
+sequential sub-agents, durable inbox/automations/self-scheduling, plus the
 ten end-to-end acceptance scenarios (preference recall, interrupted multi-step resume,
 scheduled approval pause/resume, heartbeat-initiated work, old-history
 grounding, web+CLI shared state, inspectable failures, traceable
@@ -678,6 +746,9 @@ marked `live` and were run against the reachable endpoint
   Deep paraphrase recall can miss.
 - Scheduling is process-bound: due work is noticed on a tick while
   `serve` (or a CLI-driven heartbeat) runs. Nothing is lost when it stops.
+- The inbox has no bundled mailbox, IMAP, Telegram, or Matrix adapter. Those
+  are separate pushers outside the core process; the durable contract is the
+  authenticated API and its bounded retry/idempotency rules.
 - The quick-confirm classifier is conservative by design; anything
   non-obvious is ambiguous and becomes a normal conversation turn.
 - Tool results are bounded by size, and MCP servers pay process startup
@@ -707,6 +778,10 @@ marked `live` and were run against the reachable endpoint
   any side-effecting tool is escalated to confirm-risk and the approval
   names the untrusted source. Mark a module `read_only: true` only when it
   genuinely cannot change external state.
+- Inbox events are untrusted by definition. A run derived from one starts
+  tainted, so no inbox text can trigger an outbound side effect without the
+  same explicit approval; automations can schedule work but cannot widen
+  permissions.
 - Backups contain the full conversation and memory state; protect them.
 
 

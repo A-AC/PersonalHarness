@@ -588,6 +588,35 @@ class AgentRuntime:
             {"role": "user", "content": user_text},
         ]
         parent_run_id = trigger.get("parent_run_id") or task.get("parent_run_id")
+        run_meta: dict[str, Any] = {
+            "toolset": self._toolset_snapshot(selection),
+        }
+        # Inbox content is untrusted by definition. Seed the same taint list
+        # that untrusted tool output uses, so every later side-effecting tool
+        # is escalated to an explicit approval by the one existing rule.
+        tainted: list[dict[str, Any]] = []
+        task_meta = util.loads(task.get("meta") or "{}", {})
+        for source in (
+            list(trigger.get("tainted_sources") or [])
+            + list((task_meta or {}).get("tainted_sources") or [])
+        ):
+            if not isinstance(source, dict):
+                continue
+            entry = {
+                "tool": str(source.get("tool") or "inbox"),
+                "module": str(source.get("module") or "inbox"),
+                "origin": util.clip(str(source.get("origin") or "external"), 300),
+                "at": source.get("at") or util.iso(),
+            }
+            if any(
+                existing.get("tool") == entry["tool"]
+                and existing.get("origin") == entry["origin"]
+                for existing in tainted
+            ):
+                continue
+            tainted.append(entry)
+        if tainted:
+            run_meta["tainted_sources"] = tainted[-20:]
         self.db.execute(
             "INSERT INTO runs(id, task_id, trigger, trigger_ref, status,"
             " started_at, iterations, tool_calls, transcript, context_sources,"
@@ -596,8 +625,7 @@ class AgentRuntime:
                 run_id, task["id"], trigger["kind"],
                 str(trigger_message_id) if trigger_message_id else None,
                 "running", util.iso(), 0, 0, util.dumps(transcript),
-                util.dumps(sources), parent_run_id,
-                util.dumps({"toolset": self._toolset_snapshot(selection)}),
+                util.dumps(sources), parent_run_id, util.dumps(run_meta),
             ),
         )
         self.events.record(

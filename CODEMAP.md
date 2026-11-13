@@ -12,7 +12,7 @@ tests under the `live` marker.
 | --- | --- |
 | `harness/util.py` | UTC timestamps, ids, JSON helpers, keyword extraction, clipping |
 | `harness/config.py` | Defaults, YAML load/validate, env overrides, save; unknown keys fail fast |
-| `harness/db.py` | SQLite schema (WAL), FTS5 external-content tables + triggers, transactions, schema version (v5 sub-agent tree), online backup |
+| `harness/db.py` | SQLite schema (WAL), FTS5 external-content tables + triggers, transactions, schema version (v6 inbox/automations), online backup |
 | `harness/logging.py` | Structured stdout + rotating file logs |
 | `harness/model.py` | `ModelClient` (OpenAI-compatible chat completions, native tool calls, Hermes fallback parsing, bounded retries, probe); `ScriptedModel` for tests |
 | `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + deterministic routing), `Tasks` (statuses, resume-candidate scoring, parent/child tree relationships) |
@@ -22,7 +22,8 @@ tests under the `live` marker.
 | `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired), expiry sweep, name-keyed proposal dedupe, quick-confirm classification (keyword + tiny model call) |
 | `harness/runtime.py` | `AgentRuntime`: the single bounded loop; capability snapshots; trust/taint escalation; routing/resume entry point; approval/question/interrupt/limit pause and resume; transcript persistence; child budgets, role-aware tool denial, and hidden child messages |
 | `harness/subagents.py` | `SubAgentManager`: bounded sequential delegation, goal-hash dedupe/reuse, child task/run creation, blocked-outcome closing, durable result artifacts, and sub-agent events |
-| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, module health refresh, heartbeat checks including the bounded skill builder and memory-lifetime sweep, scheduler thread |
+| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, self-scheduling bounds (`create_for_task`/`cancel_for_task`), inbox-before-schedule heartbeat ordering, module health refresh, bounded skill builder and memory-lifetime sweep, scheduler thread |
+| `harness/inbox.py` | `InboxManager`: idempotent external event intake with bounded bodies, trust marking, quiet hours, content dedupe, declarative automation CRUD/matching, cooldown + hourly loop breaker, task/notify/ignore actions, fire history, promoted-task recovery and tainted run triggers |
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract; applied via `MemoryManager` with revisions; markdown change log per run |
 | `harness/modules/types.py` | `Module`, `ModuleBinding`, `ModuleTool` value objects over the v3 tables |
 | `harness/modules/registry.py` | Module persistence, domain eligibility, lazy skill manager, and the loader seam (`load_all`, `reload`, `set_enabled`, `health_tick`); skill imports and reloads route here |
@@ -30,19 +31,21 @@ tests under the `live` marker.
 | `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions) and `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
 | `harness/modules/web/server.py` | Shipped web-search stdio MCP server over SearXNG JSON; bounded results, no `web_fetch` |
 | `harness/app.py` | `App` composition root, startup recovery, `ProcessLock` (single writer), backup/restore, graceful shutdown; `build_app` test helper |
-| `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; module list/reload/enable/disable endpoints, skill list/draft lifecycle endpoints, task detail with the child tree (children hidden from the top-level task list); authenticated static UI assets |
+| `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; module list/reload/enable/disable endpoints, skill list/draft lifecycle endpoints, inbox receive/list/ignore/triage and automation CRUD/action endpoints, task detail with the child tree (children hidden from the top-level task list); authenticated static UI assets |
 | `harness/web/` | Zero-build UI: `index.html`, `app.js`, `style.css` (served only through the authenticated handler) |
-| `harness/__main__.py` | CLI: `serve`, `endpoint-check`, `msg`, `status`, `tasks`, `approvals`, `schedules`, `memories`, `domains`, `consolidate`, `events`, `modules`, `skills`, `tools`, `backup`, `restore`, `config` |
+| `harness/__main__.py` | CLI: `serve`, `endpoint-check`, `msg`, `status`, `tasks`, `approvals`, `schedules`, `inbox`, `automations`, `memories`, `domains`, `consolidate`, `events`, `modules`, `skills`, `tools`, `backup`, `restore`, `config` |
 | `scripts/container_check.py` | Build + start the compose stack, verify health/auth/API/endpoint, tear down |
 | `examples/mcp/echo_server.py` | Dependency-free stdio MCP echo/add server (also the test fixture) |
 | `examples/mcp_servers.yaml` | MCP server manifest/import example (stdio, scope, tool filters) |
 | `examples/skills/weekly-review/SKILL.md` | Adaptive skill format example with preconditions |
+| `examples/inbox_curl.sh` | Authenticated `POST /api/inbox` example and duplicate/idempotency check |
+| `integrations/README.md` | Pusher contract for future mailbox/messaging bridges; no adapter ships in the core process |
 
 ## Turn data flow
 
 ```text
-web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
-  -> AgentRuntime.submit_user_message / resume_*
+web POST /api/message | CLI msg | schedule due | inbox triage | heartbeat | approval decision
+  -> AgentRuntime.submit_user_message / start_run / resume_*
   -> quick confirmation? classify (keyword | tiny model call); decide exactly
      one pending approval; resume that run
   -> else: record user message (source, visible)
@@ -78,12 +81,32 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
   -> transcript + counters persisted at every step
 ```
 
+Inbox flow (one deterministic heartbeat pass, before due schedules):
+
+```text
+POST /api/inbox -> receive: validate + bound body; insert with
+                   UNIQUE(source, external_id), trust=untrusted
+heartbeat -> inbox.triage(new events, oldest first)
+             guard seam (Phase 7)
+             automation match (source, kind, keywords, regex)
+             content dedupe only when no rule owns the event
+             quiet hours? leave status=new; return
+             cooldown / effective hourly cap
+               cap hit -> disable rule + automation.disabled + one note
+             task -> inbox_events.status=promoted + task origin=inbox:<source>
+                     + meta.inbox_event_id + meta.tainted_sources
+                     -> start_run (shared scheduler.max_runs_per_tick budget)
+             notify -> one visible system note; status=triaged
+             ignore -> status=ignored
+          -> then submit_due schedules with the remaining run budget
+```
+
 ## Persistence layout
 
 | Path under data dir | Contents |
 | --- | --- |
 | `config.yaml` | Materialized configuration (created with defaults) |
-| `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks` (+ parent/role tree columns), `runs` (+ `parent_run_id`), `memories` (+FTS5, lifetime columns), `memory_revisions`, `memory_access`, `schedules`, `schedule_occurrences`, `approvals`, `tool_executions`, `modules`, `module_bindings`, `module_tools`, `schema_meta` |
+| `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks` (+ parent/role tree columns), `runs` (+ `parent_run_id`), `memories` (+FTS5, lifetime columns), `memory_revisions`, `memory_access`, `schedules`, `schedule_occurrences`, `inbox_events`, `automations`, `automation_fires`, `approvals`, `tool_executions`, `modules`, `module_bindings`, `module_tools`, `schema_meta` |
 | `artifacts/memories/<id>.md` | Long memory notes referenced from rows |
 | `artifacts/consolidation/<run>.md` | Per-run change logs |
 | `artifacts/skills/<run>.md` | Skill builder prompt/report logs (bounded) |
@@ -130,5 +153,6 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | `tests/test_skills.py` | Front-matter import, global/domain/adaptive disclosure, proposal approval lifecycle, bounded validation, dedupe, taint refusal, builder batching/limits/failure, skills API |
 | `tests/test_tools_mcp.py` | Registry-backed MCP discovery/risk/round trip/bounded results/unavailable servers, domain scope and refusal, reload, schema budget priority, web search stub (bounded/untrusted/malformed), taint escalation with source provenance, skill disclosure |
 | `tests/test_subagents.py` | Parent delegation/result return, child context isolation, reduced toolset/depth/confirm refusal, blocked limits, goal-hash reuse, child budgets/caps, crash-mid-child unknown recovery, v5 migration, task-detail child tree |
+| `tests/test_inbox.py` | Inbox idempotency/API bounds, dedupe, automation task/cooldown, hourly breaker, tainted run approval, quiet hours, self-scheduling caps/depth, inbox-before-schedule ordering, v6 migration |
 | `tests/test_scenarios.py` | The ten end-to-end acceptance scenarios |
 | `tests/test_live_endpoint.py` | Real-endpoint integration (marked `live`): models list, plain completion, native tool-call protocol, multi-step round trip, one full live turn |

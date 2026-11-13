@@ -161,7 +161,8 @@ function renderSide(force) {
   const builders = {
     tasks: renderTasks, approvals: renderApprovals, domains: renderDomains,
     persona: renderPersona, settings: renderSettings,
-    schedules: renderSchedules, memory: renderMemory, system: renderSystem,
+    schedules: renderSchedules, inbox: renderInbox, memory: renderMemory,
+    system: renderSystem,
   };
   (builders[tab] || (() => {}))(side);
   side.scrollTop = scroll;
@@ -522,7 +523,8 @@ function renderPersona(side) {
 /* --------------------------------------------------------------- settings */
 
 const SETTING_GROUPS = ['limits', 'context', 'domains', 'memory', 'tools',
-                        'scheduler', 'consolidation', 'approvals'];
+                        'scheduler', 'consolidation', 'approvals', 'inbox',
+                        'automations'];
 
 function renderSettings(side) {
   if (!configMeta) {
@@ -734,6 +736,179 @@ function renderSchedules(side) {
     };
     btns.appendChild(toggle); btns.appendChild(del);
     card.appendChild(btns);
+    side.appendChild(card);
+  }
+}
+
+/* ------------------------------------------------------------------ inbox */
+
+function renderInbox(side) {
+  const events = state.inbox_events || [];
+  const rules = state.automations || [];
+  const fires = state.automation_fires || [];
+  const counts = state.counts || {};
+
+  const head = el('div', 'card');
+  head.appendChild(el('h3', null, 'Inbox'));
+  const grid = el('div', 'split');
+  for (const [k, v] of [['new', counts.inbox_new || 0],
+                        ['events', counts.inbox_events || 0],
+                        ['automations', counts.automations || 0]]) {
+    const stat = el('div', 'stat');
+    stat.appendChild(el('div', 'n', pct(v)));
+    stat.appendChild(el('div', 'k', k));
+    grid.appendChild(stat);
+  }
+  head.appendChild(grid);
+  head.appendChild(el('div', 'small',
+    'External events are untrusted data. A matching rule may create a task; ' +
+    'otherwise the default action applies. Quiet hours postpone triage and ' +
+    'keep events queued.'));
+  const headBtns = el('div', 'btns');
+  const triage = el('button', null, 'Triage now');
+  triage.onclick = async () => {
+    triage.disabled = true;
+    const out = await api('/api/inbox/triage', {method: 'POST'});
+    if (out && out.report) {
+      const r = out.report;
+      toast('Inbox: ' + (r.promoted || []).length + ' promoted, ' +
+        (r.notified || 0) + ' notified, ' + (r.deduped || 0) + ' deduped, ' +
+        (r.runs_started || 0) + ' run(s).');
+    }
+    refresh(true);
+  };
+  headBtns.appendChild(triage);
+  head.appendChild(headBtns);
+  side.appendChild(head);
+
+  const form = el('div', 'card');
+  form.appendChild(el('h3', null, 'New automation'));
+  const name = el('input'); name.placeholder = 'name';
+  const source = el('input'); source.placeholder = 'source (blank = any)';
+  const kind = el('input'); kind.placeholder = 'kind (blank = any)';
+  const keywords = el('input');
+  keywords.placeholder = 'match keywords, comma separated';
+  const action = el('select');
+  for (const a of ['notify', 'task', 'ignore']) {
+    const o = el('option', null, a); o.value = a; action.appendChild(o);
+  }
+  const cooldown = el('input'); cooldown.type = 'number'; cooldown.value = '0';
+  cooldown.placeholder = 'cooldown seconds';
+  const cap = el('input'); cap.type = 'number';
+  cap.value = String((state.config.automations || {}).max_per_hour || 6);
+  cap.placeholder = 'max per hour';
+  const template = el('textarea'); template.rows = 2;
+  template.placeholder = 'task prompt template ({title}, {body}, {source})';
+  for (const [label, node] of [
+    ['name', name], ['source', source], ['kind', kind],
+    ['keywords', keywords], ['action', action],
+    ['cooldown s', cooldown], ['max/hour', cap],
+  ]) {
+    const row = el('div', 'field');
+    row.appendChild(el('label', null, label));
+    row.appendChild(node);
+    form.appendChild(row);
+  }
+  form.appendChild(el('div', 'small', 'Task prompt template'));
+  form.appendChild(template);
+  const add = el('button', 'ok', 'Add automation');
+  add.onclick = async () => {
+    const body = {
+      name: name.value.trim(),
+      source: source.value.trim() || null,
+      kind: kind.value.trim() || null,
+      match_keywords: keywords.value.trim() || null,
+      action: action.value,
+      cooldown_s: Number(cooldown.value || 0),
+      max_per_hour: Number(cap.value || 0),
+      prompt_template: template.value,
+    };
+    if (!body.name) { toast('An automation needs a name.'); return; }
+    const out = await api('/api/automations', {method: 'POST', body});
+    if (out) { toast('Automation added.'); refresh(true); }
+  };
+  const fbtns = el('div', 'btns'); fbtns.appendChild(add);
+  form.appendChild(fbtns);
+  side.appendChild(form);
+
+  if (!rules.length) {
+    side.appendChild(el('h4', null, 'Automations'));
+    empty(side, 'No automation rules. The default action is ' +
+      ((state.config.automations || {}).default_action || 'notify') + '.');
+  }
+  for (const rule of rules) {
+    const card = el('div', 'card');
+    card.appendChild(el('h3', null,
+      rule.name + ' [' + rule.action + ']' + (rule.enabled ? '' : ' (off)')));
+    const keywordsText = (rule.match_keywords || []).join(', ') || '*';
+    card.appendChild(el('div', 'small',
+      'source ' + (rule.source || '*') + '  |  kind ' + (rule.kind || '*') +
+      '  |  keywords ' + keywordsText + '  |  cooldown ' +
+      rule.cooldown_s + 's  |  max/hour ' + rule.max_per_hour));
+    if (rule.prompt_template) {
+      card.appendChild(el('div', 'small',
+        'prompt: ' + rule.prompt_template.slice(0, 220)));
+    }
+    if (rule.disabled_reason) {
+      card.appendChild(el('div', 'small',
+        'disabled: ' + rule.disabled_reason));
+    }
+    const btns = el('div', 'btns');
+    const toggle = el('button', null, rule.enabled ? 'Disable' : 'Enable');
+    toggle.onclick = async () => {
+      await api('/api/automations/' + encodeURIComponent(rule.id) + '/' +
+        (rule.enabled ? 'disable' : 'enable'), {method: 'POST'});
+      refresh(true);
+    };
+    const del = el('button', 'no', 'Delete');
+    del.onclick = async () => {
+      if (!confirm('Delete this automation?')) return;
+      await api('/api/automations/' + encodeURIComponent(rule.id) + '/delete',
+                {method: 'POST'});
+      refresh(true);
+    };
+    btns.appendChild(toggle); btns.appendChild(del);
+    card.appendChild(btns);
+    side.appendChild(card);
+  }
+
+  side.appendChild(el('h4', null, 'Events (' + events.length + ')'));
+  if (!events.length) { empty(side, 'No inbox events.'); }
+  for (const e of events) {
+    const card = el('div', 'card');
+    card.appendChild(el('h3', null, e.source + ': ' + e.title));
+    const row = el('div', 'row');
+    row.appendChild(pill(e.status));
+    row.appendChild(el('span', 'pill trust', e.trust || 'untrusted'));
+    row.appendChild(el('span', 'small', e.kind + '  |  ' + e.severity));
+    row.appendChild(el('span', 'small', short(e.received_at)));
+    card.appendChild(row);
+    if (e.body) card.appendChild(el('div', 'small', e.body.slice(0, 900)));
+    card.appendChild(el('div', 'small', e.id +
+      '  |  external ' + e.external_id));
+    if (e.status !== 'promoted' && e.status !== 'ignored') {
+      const btns = el('div', 'btns');
+      const ignore = el('button', 'no', 'Ignore');
+      ignore.onclick = async () => {
+        const out = await api('/api/inbox/' + encodeURIComponent(e.id) +
+          '/ignore', {method: 'POST', body: {reason: 'ignored in UI'}});
+        if (out) { toast('Event ignored.'); refresh(true); }
+      };
+      btns.appendChild(ignore);
+      card.appendChild(btns);
+    }
+    side.appendChild(card);
+  }
+
+  if (fires.length) {
+    const card = el('div', 'card');
+    card.appendChild(el('h3', null, 'Fire history'));
+    for (const f of fires.slice(0, 20)) {
+      card.appendChild(el('div', 'small',
+        short(f.fired_at) + '  ' + (f.automation_name || '(default)') + '  ' +
+        f.status + '  ' + (f.event_title || f.inbox_event_id) +
+        (f.reason ? '  |  ' + f.reason : '')));
+    }
     side.appendChild(card);
   }
 }

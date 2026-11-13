@@ -1,6 +1,6 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phase 4 complete)
+Status: in progress (Phase 5 complete)
 Last updated: 2026-11-13
 Scope: capability modules (skills + MCP + web), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture.
@@ -906,6 +906,13 @@ UI) and update this plan. Do not mix phases.
 | 2026-11-13 | Same normalized goal reuses the existing child by `parent_task_id:goal_hash` | Prevents duplicate children and duplicate side effects |
 | 2026-11-13 | Child budgets are recorded on `tasks.meta` and applied by `_loop` | A config change mid-delegation cannot silently widen a running child |
 | 2026-11-13 | Cancelling a parent cancels its open children | A cancelled tree must not leave resumable child work behind |
+| 2026-11-13 | Add `automation_fires` as a third v6 table | Durable fire history is the visible audit trail and the hourly loop breaker; in-memory counters would reset on restart |
+| 2026-11-13 | Content dedupe applies only when no enabled automation matches, and only against events already out of the `new` queue | Rule-driven recurring mail must reach its cooldown/cap, while two pending copies must not dedupe each other |
+| 2026-11-13 | Quiet hours leave events `new` instead of consuming or ignoring them | Postponing triage must not lose an external wake-up |
+| 2026-11-13 | Hitting `max_per_hour` disables the rule and writes one visible note | The breaker must survive restarts and stop an email-storm loop without spamming chat |
+| 2026-11-13 | Schedule bounds are enforced in `Scheduler.create_for_task`, not the tool handler | Direct API callers must not bypass the per-task cap or chain-depth limit |
+| 2026-11-13 | Schedule chains carry `schedule_depth` in schedule/task meta and the parent task id in schedule meta | A scheduled task can be bounded without adding mutable state to the schedule row |
+| 2026-11-13 | Inbox triage shares the scheduler run budget and runs before due schedules | Urgent external work wins the tick while background model work stays bounded |
 
 ---
 
