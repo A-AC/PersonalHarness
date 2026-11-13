@@ -5,7 +5,8 @@
 let state = {
   summary: {}, counts: {}, config: { persona: {} }, domains: [],
   messages: [], tasks: [], open_tasks: [], approvals: [], schedules: [],
-  memories_all: [], memory_counts: {}, artifact_problems: [],
+  memories_all: [], memory_counts: {}, memory_kinds: [],
+  artifact_problems: [],
   skills: [], modules: [], schema_budget: null, tools: [], events: [],
   inbox_events: [], automations: [], automation_fires: [],
   consolidations: [], backups: [], system: null,
@@ -21,7 +22,8 @@ let memoryFilter = 'active';
 let eventLevel = 'all';
 let openSkillId = null;
 let skillDetails = {};
-let skillPrefill = null;
+let skillEditId = null;
+let showSubagents = false;
 let configMeta = null;
 let toastTimer = null;
 
@@ -125,7 +127,7 @@ function applyConfig(data) {
 
 const PANELS = {
   tasks: {
-    url: () => '/api/tasks',
+    url: () => '/api/tasks' + (showSubagents ? '?include_subagents=1' : ''),
     apply: (d) => {
       state.tasks = d.tasks || [];
       state.open_tasks = d.open_tasks || [];
@@ -163,6 +165,7 @@ const PANELS = {
     apply: (d) => {
       state.memories_all = d.memories || [];
       state.memory_counts = d.counts || {};
+      state.memory_kinds = d.kinds || state.memory_kinds;
       state.artifact_problems = d.artifact_problems || [];
     },
   },
@@ -391,6 +394,17 @@ function renderTasks(side) {
   head.appendChild(el('div', 'small',
     'Every task keeps its own runs, transcript, tool calls, context sources, ' +
     'and sub-agent tree. Details opens the full record.'));
+  const subLabel = el('label', 'small', ' include sub-agent tasks');
+  const subToggle = el('input');
+  subToggle.type = 'checkbox';
+  subToggle.checked = showSubagents;
+  subToggle.onchange = () => {
+    showSubagents = subToggle.checked;
+    state.tasks = [];
+    refresh(true);
+  };
+  subLabel.prepend(subToggle);
+  head.appendChild(subLabel);
   side.appendChild(head);
 
   if (!tasks.length) { empty(side, 'No tasks yet.'); return; }
@@ -400,6 +414,9 @@ function renderTasks(side) {
       (t.objective || '(no objective)').slice(0, 110)));
     const row = el('div', 'row');
     row.appendChild(pill(t.status));
+    if ((t.role || 'user') === 'subagent') {
+      row.appendChild(el('span', 'tag', 'sub-agent'));
+    }
     row.appendChild(el('span', 'small', domainName(t.domain_id)));
     row.appendChild(el('span', 'small', 'origin ' + (t.origin || '?')));
     row.appendChild(el('span', 'small', 'updated ' + short(t.updated_at)));
@@ -409,6 +426,11 @@ function renderTasks(side) {
         (t.next_retry_at ? ' | next ' + short(t.next_retry_at) : '')));
     }
     card.appendChild(row);
+    if (t.parent_task_id) {
+      card.appendChild(el('div', 'small',
+        'parent task ' + t.parent_task_id +
+        (t.depth != null ? '  |  depth ' + t.depth : '')));
+    }
     if (t.status_reason) card.appendChild(el('div', 'small', t.status_reason));
     card.appendChild(el('div', 'small',
       'created ' + short(t.created_at) + '  |  id ' + t.id));
@@ -417,8 +439,8 @@ function renderTasks(side) {
     btns.appendChild(btn(openTaskId === t.id ? 'Hide details' : 'Details', null, () => {
       if (openTaskId === t.id) { openTaskId = null; renderSide(true); return; }
       openTaskId = t.id;
-      api('/api/tasks/' + encodeURIComponent(t.id)).then(data => {
-        if (data) { taskDetail[t.id] = data; renderSide(true); }
+      hydrateTask(t.id).then(data => {
+        if (data) renderSide(true);
       });
     }));
     btns.appendChild(btn('Open drawer', null, () => openTask(t.id)));
@@ -473,7 +495,8 @@ function renderTasks(side) {
 function transcriptBlock(detail) {
   const box = el('div', 'transcript');
   const messages = detail.messages || [];
-  box.appendChild(el('h4', null, 'Prompt and response (' + messages.length + ')'));
+  box.appendChild(el('h4', null,
+    'Visible conversation (' + messages.length + ')'));
   if (!messages.length) {
     box.appendChild(el('div', 'small', 'No visible messages recorded.'));
     return box;
@@ -489,8 +512,168 @@ function transcriptBlock(detail) {
   return box;
 }
 
-function renderTaskDetail(detail) {
-  const box = el('div');
+function modelRoleClass(role) {
+  if (role === 'system' || role === 'user' || role === 'assistant' ||
+      role === 'tool') return role;
+  return 'note';
+}
+
+function modelMessagesBlock(run, openSystem) {
+  const transcript = run.transcript || [];
+  const box = el('div', 'transcript');
+  box.appendChild(el('div', 'small',
+    'Exact messages persisted for this run (' + transcript.length + '). ' +
+    'The system message is the fully built prompt: persona, operating ' +
+    'rules, state, memories, history, and disclosed skills.'));
+  if (!transcript.length) {
+    box.appendChild(el('div', 'small', 'No model transcript recorded.'));
+    return box;
+  }
+  transcript.forEach((message, index) => {
+    const m = message || {};
+    const node = el('div', 'modelmsg ' + modelRoleClass(m.role));
+    const head = el('div', 'mmhead');
+    head.appendChild(el('span', 'tag', m.role || '?'));
+    if (m.name) head.appendChild(el('span', 'tag', m.name));
+    if (m.tool_call_id) {
+      head.appendChild(el('span', 'tag', 'call ' + m.tool_call_id));
+    }
+    head.appendChild(el('span', 'small', '#' + index));
+    node.appendChild(head);
+
+    const content = m.content == null ? ''
+      : (typeof m.content === 'string'
+        ? m.content : JSON.stringify(m.content, null, 2));
+    if (content) {
+      if (m.role === 'system') {
+        const promptBox = el('details', 'sysprompt');
+        promptBox.open = !!openSystem;
+        promptBox.appendChild(el('summary', null,
+          'Full system prompt (' + content.length + ' chars)'));
+        promptBox.appendChild(el('pre', null, content));
+        node.appendChild(promptBox);
+      } else {
+        node.appendChild(el('pre', null, content));
+      }
+    }
+    if (m.tool_calls) {
+      node.appendChild(el('div', 'small', 'tool calls'));
+      node.appendChild(el('pre', 'mono',
+        JSON.stringify(m.tool_calls, null, 2)));
+    }
+    box.appendChild(node);
+  });
+  return box;
+}
+
+function contextSourcesBlock(sources, label) {
+  const det = el('details', 'sources');
+  det.appendChild(el('summary', null,
+    label + ' (' + (sources || []).length + ')'));
+  if (!(sources || []).length) {
+    det.appendChild(el('div', 'small', 'None recorded.'));
+    return det;
+  }
+  for (const s of sources) {
+    const line = el('div', 'small');
+    line.appendChild(el('span', 'tag', s.section || '?'));
+    line.appendChild(document.createTextNode(
+      ' ' + (s.reason || 'included') +
+      (s.ref ? '  [' + s.ref + ']' : '')));
+    det.appendChild(line);
+  }
+  return det;
+}
+
+function toolsetBlock(run) {
+  const toolset = run.toolset;
+  if (!toolset) return el('div', 'small', 'No toolset snapshot recorded.');
+  const box = el('div', 'small');
+  box.appendChild(el('b', null, 'Toolset: '));
+  box.appendChild(document.createTextNode(
+    (toolset.names || []).length + ' tools, ' +
+    (toolset.tokens || 0) + '/' + (toolset.budget_tokens || 0) +
+    ' schema tokens, ' + (toolset.exclusions || []).length + ' excluded'));
+  if ((toolset.modules || []).length) {
+    box.appendChild(el('div', 'small',
+      'modules: ' + toolset.modules.join(', ') +
+      (toolset.role ? '  |  role ' + toolset.role : '')));
+  }
+  for (const name of (toolset.names || [])) {
+    box.appendChild(el('span', 'tag', name));
+  }
+  for (const ex of (toolset.exclusions || [])) {
+    box.appendChild(el('div', 'small',
+      'excluded ' + ex.tool + ': ' + ex.reason));
+  }
+  return box;
+}
+
+function runBlock(run, open) {
+  const det = el('details', 'runblock');
+  det.open = !!open;
+  const summary = el('summary');
+  summary.appendChild(pill(run.status));
+  summary.appendChild(document.createTextNode(
+    '  ' + short(run.started_at) + '  trigger ' + (run.trigger || '?') +
+    '  iterations ' + (run.iterations || 0) +
+    '  tools ' + (run.tool_calls || 0) +
+    (run.decision ? '  |  ' + run.decision : '')));
+  det.appendChild(summary);
+
+  if (run.error) det.appendChild(el('div', 'small', 'error: ' + run.error));
+  if (run.trigger_ref) {
+    det.appendChild(el('div', 'small', 'trigger ref: ' + run.trigger_ref));
+  }
+  if (run.parent_run_id) {
+    det.appendChild(el('div', 'small', 'parent run: ' + run.parent_run_id));
+  }
+  det.appendChild(toolsetBlock(run));
+  if ((run.tainted_sources || []).length) {
+    det.appendChild(el('div', 'small',
+      'tainted by: ' + run.tainted_sources.map(s => s.origin || s.tool)
+        .join(', ')));
+  }
+  det.appendChild(modelMessagesBlock(run, open));
+  det.appendChild(contextSourcesBlock(
+    run.context_sources || [], 'Context sources this run'));
+  return det;
+}
+
+function childBlock(child, depth) {
+  const det = el('details', 'subagent');
+  const summary = el('summary');
+  summary.appendChild(pill(child.status));
+  summary.appendChild(document.createTextNode(
+    '  ' + (child.objective || '(no objective)') + '  |  ' + child.id));
+  if (child.result) {
+    summary.appendChild(el('span', 'small',
+      '  result: ' + String(child.result).slice(0, 160)));
+  }
+  det.appendChild(summary);
+
+  if (child.blocked_reason) {
+    det.appendChild(el('div', 'small',
+      'blocked: ' + String(child.blocked_reason).slice(0, 300)));
+  }
+  if (child.result_path) {
+    det.appendChild(el('div', 'small', 'artifact: ' + child.result_path));
+  }
+  const loaded = taskDetail[child.id];
+  if (loaded && depth < 6) {
+    det.appendChild(renderTaskDetail(loaded, depth + 1));
+  } else {
+    det.appendChild(btn('Load full detail', null, async () => {
+      await hydrateTask(child.id);
+      renderSide(true);
+    }));
+  }
+  return det;
+}
+
+function renderTaskDetail(detail, depth) {
+  depth = depth || 0;
+  const box = el('div', 'taskdetail');
   const task = detail.task || {};
   if (task.parent_task_id) {
     box.appendChild(el('div', 'small',
@@ -509,76 +692,44 @@ function renderTaskDetail(detail) {
 
   box.appendChild(transcriptBlock(detail));
 
-  box.appendChild(el('h4', null, 'Sub-agents (' +
-    (detail.children || []).length + ')'));
-  if (!(detail.children || []).length) {
+  const children = detail.children || [];
+  box.appendChild(el('h4', null, 'Sub-agent tasks (' + children.length + ')'));
+  if (!children.length) {
     box.appendChild(el('div', 'small', 'No delegated work.'));
   }
-  for (const child of detail.children || []) {
-    const row = el('div', 'small');
-    row.appendChild(pill(child.status));
-    row.appendChild(document.createTextNode('  ' +
-      (child.objective || '').slice(0, 100) + '  |  ' + child.id));
-    if (child.result) {
-      row.appendChild(el('div', 'small',
-        'result: ' + String(child.result).slice(0, 500)));
-    }
-    if (child.blocked_reason) {
-      row.appendChild(el('div', 'small',
-        'blocked: ' + String(child.blocked_reason).slice(0, 300)));
-    }
-    if (child.result_path) {
-      row.appendChild(el('div', 'small', 'artifact: ' + child.result_path));
-    }
-    box.appendChild(row);
+  for (const child of children) {
+    box.appendChild(childBlock(child, depth));
   }
 
-  box.appendChild(el('h4', null, 'Runs (' + (detail.runs || []).length + ')'));
-  if (!(detail.runs || []).length) {
+  const runs = detail.runs || [];
+  box.appendChild(el('h4', null, 'Runs (' + runs.length + ')'));
+  if (!runs.length) {
     box.appendChild(el('div', 'small', 'No runs recorded.'));
+    box.appendChild(contextSourcesBlock(
+      detail.context_sources || [], 'Context sources'));
   }
-  for (const r of detail.runs || []) {
-    box.appendChild(el('div', 'small',
-      short(r.started_at) + '  ' + r.status + '  trigger ' + r.trigger +
-      '  iterations ' + r.iterations + '  tools ' + r.tool_calls +
-      (r.decision ? '  |  ' + r.decision : '') +
-      (r.error ? '  |  ' + r.error : '')));
-    const toolset = r.toolset;
-    if (toolset) {
-      const excluded = (toolset.exclusions || []).length;
-      box.appendChild(el('div', 'small',
-        'toolset ' + (toolset.names || []).length + ' tools, ' +
-        (toolset.tokens || 0) + '/' + (toolset.budget_tokens || 0) +
-        ' schema tokens' + (excluded ? ', ' + excluded + ' excluded' : '')));
-      for (const ex of (toolset.exclusions || []).slice(0, 8)) {
-        box.appendChild(el('div', 'small',
-          'excluded ' + ex.tool + ': ' + ex.reason));
-      }
-    }
-    if ((r.tainted_sources || []).length) {
-      box.appendChild(el('div', 'small',
-        'tainted by: ' + r.tainted_sources.map(s => s.origin || s.tool)
-          .join(', ')));
-    }
-  }
+  runs.forEach((run, index) => {
+    box.appendChild(
+      runBlock(run, depth === 0 && index === runs.length - 1));
+  });
 
   box.appendChild(el('h4', null, 'Tool uses (' +
     (detail.executions || []).length + ')'));
   if (!(detail.executions || []).length) {
     box.appendChild(el('div', 'small', 'No tool executions.'));
   }
-  for (const x of (detail.executions || []).slice(-40)) {
+  for (const x of (detail.executions || []).slice(-60)) {
     const line = el('div', 'small');
     line.appendChild(pill(x.status));
     line.appendChild(document.createTextNode('  ' + x.tool + '  ' +
       short(x.started_at) + (x.error ? '  ' + x.error : '')));
     if (x.arguments) {
       line.appendChild(el('div', 'small mono',
-        'args: ' + String(x.arguments).slice(0, 300)));
+        'args: ' + String(x.arguments).slice(0, 500)));
     }
     if (x.result) {
       line.appendChild(el('div', 'small',
-        'result: ' + String(x.result).slice(0, 420)));
+        'result: ' + String(x.result).slice(0, 600)));
     }
     if (x.tool === 'delegate_task' && x.result) {
       line.appendChild(el('div', 'small',
@@ -594,27 +745,22 @@ function renderTaskDetail(detail) {
         a.tool + '  ' + JSON.stringify(a.arguments)));
     }
   }
-
-  const sources = detail.context_sources || [];
-  box.appendChild(el('h4', null,
-    'Context sources (' + sources.length + ')'));
-  if (!sources.length) {
-    box.appendChild(el('div', 'small', 'No context sources recorded.'));
-  }
-  for (const s of sources.slice(0, 40)) {
-    box.appendChild(el('div', 'small',
-      (s.section || '?') + ': ' + (s.reason || 'included') +
-      (s.tokens ? '  (' + s.tokens + ' tokens)' : '')));
-  }
   return box;
 }
 
-async function loadTask(taskId) {
+async function hydrateTask(taskId) {
   if (!taskDetail[taskId]) {
     const data = await api('/api/tasks/' + encodeURIComponent(taskId));
-    if (data) taskDetail[taskId] = data;
+    if (!data) return null;
+    taskDetail[taskId] = data;
+    await Promise.all((data.children || []).map(
+      child => hydrateTask(child.id)));
   }
   return taskDetail[taskId];
+}
+
+async function loadTask(taskId) {
+  return hydrateTask(taskId);
 }
 
 async function openTask(taskId) {
@@ -1045,13 +1191,49 @@ function renderMemory(side) {
     if (m.status && m.status !== 'active') flags.push(m.status);
     card.appendChild(el('h3', null,
       m.kind + ' | ' + m.scope + (flags.length ? ' | ' + flags.join(', ') : '')));
-    card.appendChild(el('div', 'small', m.content));
+    const editable = m.status === 'active';
+    let contentBox = null;
+    let kindSelect = null;
+    let reasonInput = null;
+    if (editable) {
+      kindSelect = el('select');
+      for (const kind of (state.memory_kinds || [])) {
+        const option = el('option', null, kind);
+        option.value = kind;
+        if (kind === m.kind) option.selected = true;
+        kindSelect.appendChild(option);
+      }
+      contentBox = el('textarea');
+      contentBox.rows = 3;
+      contentBox.value = m.content || '';
+      reasonInput = el('input');
+      reasonInput.placeholder = 'reason for the edit (recorded in history)';
+      card.appendChild(field('kind', kindSelect));
+      card.appendChild(field('content', contentBox));
+      card.appendChild(field('reason', reasonInput));
+    } else {
+      card.appendChild(el('div', 'small', m.content));
+    }
     card.appendChild(el('div', 'small',
       m.id + ' rev ' + m.revision + ' | uses ' + (m.access_count || 0) +
       ' | last used ' + short(m.last_accessed_at) +
       ' | updated ' + short(m.updated_at) +
       (m.expires_at ? ' | expires ' + short(m.expires_at) : '')));
     const actions = el('div', 'btns');
+    if (editable) {
+      actions.appendChild(btn('Save', 'ok', async () => {
+        if (!contentBox.value.trim()) {
+          toast('Memory text cannot be empty.'); return;
+        }
+        const out = await api('/api/memories/' + encodeURIComponent(m.id),
+          {method: 'PATCH', body: {
+            kind: kindSelect.value,
+            content: contentBox.value.trim(),
+            reason: reasonInput.value.trim() || 'edited in the web UI',
+          }});
+        if (out) { toast('Memory updated.'); refresh(true); }
+      }));
+    }
     if (m.archived) {
       actions.appendChild(btn('Restore', 'ok', async () => {
         const out = await api('/api/memories/' + encodeURIComponent(m.id) +
@@ -1066,14 +1248,6 @@ function renderMemory(side) {
           '/archive', {method: 'POST'});
         if (out) { toast('Memory archived.'); refresh(true); }
       }));
-      actions.appendChild(btn('Edit', null, async () => {
-        const next = prompt('Edit memory', m.content);
-        if (next == null || !next.trim() || next === m.content) return;
-        const out = await api('/api/memories/' + encodeURIComponent(m.id),
-          {method: 'PATCH', body: {content: next.trim(),
-                                   reason: 'edited in the web UI'}});
-        if (out) { toast('Memory updated.'); refresh(true); }
-      }));
     }
     actions.appendChild(btn(m.pinned ? 'Unpin' : 'Pin', null, async () => {
       const out = await api('/api/memories/' + encodeURIComponent(m.id) +
@@ -1083,12 +1257,16 @@ function renderMemory(side) {
         refresh(true);
       }
     }));
-    actions.appendChild(btn('Delete', 'no', async () => {
-      if (!confirm('Retract this memory? Its revision history is kept.')) return;
-      const out = await api('/api/memories/' + encodeURIComponent(m.id),
-        {method: 'DELETE', body: {reason: 'deleted in the web UI'}});
-      if (out) { toast('Memory retracted.'); refresh(true); }
-    }));
+    if (editable) {
+      actions.appendChild(btn('Delete', 'no', async () => {
+        if (!confirm('Retract this memory? Its revision history is kept.')) {
+          return;
+        }
+        const out = await api('/api/memories/' + encodeURIComponent(m.id),
+          {method: 'DELETE', body: {reason: 'deleted in the web UI'}});
+        if (out) { toast('Memory retracted.'); refresh(true); }
+      }));
+    }
     card.appendChild(actions);
     side.appendChild(card);
   }
@@ -1193,26 +1371,23 @@ function renderSkills(side) {
     'explicit user actions.'));
   side.appendChild(head);
 
-  const prefill = skillPrefill || {};
   const form = el('div', 'card');
-  form.appendChild(el('h3', null,
-    skillPrefill && skillPrefill.id ? 'Revise skill draft' : 'New skill draft'));
-  const name = el('input'); name.value = prefill.name || '';
+  form.appendChild(el('h3', null, 'New skill draft'));
+  const name = el('input');
   name.placeholder = 'short reusable procedure name';
-  const desc = el('input'); desc.value = prefill.description || '';
+  const desc = el('input');
   desc.placeholder = 'one line: when does it apply?';
   const pre = el('input');
-  pre.value = (prefill.preconditions || []).join(', ');
   pre.placeholder = 'preconditions, comma separated';
   const domainPick = el('select');
   domainPick.multiple = true;
   for (const d of activeDomains()) {
     const o = el('option', null, d.name);
     o.value = d.id;
-    if ((prefill.domains || []).includes(d.id)) o.selected = true;
     domainPick.appendChild(o);
   }
-  const body = el('textarea'); body.rows = 8; body.value = prefill.body || '';
+  const body = el('textarea');
+  body.rows = 6;
   body.placeholder = 'Instructions only. No code, handlers, or tool schemas.';
   for (const [label, node] of [
     ['name', name], ['description', desc], ['preconditions', pre],
@@ -1220,33 +1395,25 @@ function renderSkills(side) {
   form.appendChild(el('div', 'small',
     'Bind to domains (leave empty for global or adaptive scope)'));
   form.appendChild(domainPick);
-  form.appendChild(el('div', 'small', 'Body'));
-  form.appendChild(body);
+  form.appendChild(field('body', body));
   const formBtns = el('div', 'btns');
   formBtns.appendChild(btn('Save as draft', 'ok', async () => {
     if (!name.value.trim() || !body.value.trim()) {
       toast('A skill needs a name and a body.'); return;
     }
-    const bodyPayload = {
+    const out = await api('/api/skills', {method: 'POST', body: {
       name: name.value.trim(),
       description: desc.value.trim(),
       preconditions: pre.value.split(',').map(s => s.trim()).filter(Boolean),
       domains: Array.from(domainPick.selectedOptions).map(o => o.value),
       body: body.value,
-      reason: 'edited in the web UI',
-    };
-    const out = await api('/api/skills', {method: 'POST', body: bodyPayload});
+      reason: 'created in the web UI',
+    }});
     if (out) {
       toast('Skill saved as a draft.');
-      skillPrefill = null;
       refresh(true);
     }
   }));
-  if (skillPrefill && skillPrefill.id) {
-    formBtns.appendChild(btn('Cancel revise', null, () => {
-      skillPrefill = null; renderSide(true);
-    }));
-  }
   form.appendChild(formBtns);
   side.appendChild(form);
 
@@ -1257,6 +1424,7 @@ function renderSkills(side) {
   side.appendChild(el('h4', null, 'All skills (' + skills.length + ')'));
   for (const s of skills) {
     const card = el('div', 'card');
+    card.id = 'skill-' + s.id;
     const row = el('div', 'row');
     row.appendChild(pill(s.status));
     row.appendChild(el('span', 'tag', s.scope));
@@ -1298,6 +1466,70 @@ function renderSkills(side) {
       card.appendChild(el('pre', null, detail.body || '(no body file)'));
     }
 
+    if (skillEditId === s.id) {
+      const detail = skillDetails[s.id] || {};
+      const editor = el('div', 'inlineeditor');
+      editor.appendChild(el('h4', null, 'Edit fields'));
+      editor.appendChild(el('div', 'small',
+        'Saving creates a new draft version of "' + s.name + '". The name is ' +
+        'the revision key and stays fixed.'));
+      const editDesc = el('input');
+      editDesc.value = s.description || '';
+      editDesc.placeholder = 'one line: when does it apply?';
+      const editPre = el('input');
+      editPre.value = (s.preconditions || []).join(', ');
+      editPre.placeholder = 'preconditions, comma separated';
+      const editDomains = el('select');
+      editDomains.multiple = true;
+      for (const d of activeDomains()) {
+        const o = el('option', null, d.name);
+        o.value = d.id;
+        if ((s.domains || []).includes(d.id)) o.selected = true;
+        editDomains.appendChild(o);
+      }
+      const editBody = el('textarea');
+      editBody.rows = 10;
+      editBody.value = detail.body || s.body_preview || '';
+      editBody.placeholder = 'Instructions only. No code, handlers, or tool schemas.';
+      const editReason = el('input');
+      editReason.placeholder = 'reason for this revision (recorded in history)';
+      editor.appendChild(field('description', editDesc));
+      editor.appendChild(field('preconditions', editPre));
+      editor.appendChild(el('div', 'small',
+        'Bind to domains (leave empty for global or adaptive scope)'));
+      editor.appendChild(editDomains);
+      editor.appendChild(field('body', editBody));
+      editor.appendChild(field('reason', editReason));
+      const editBtns = el('div', 'btns');
+      editBtns.appendChild(btn('Save as draft', 'ok', async () => {
+        if (!editBody.value.trim()) {
+          toast('A skill needs a body.'); return;
+        }
+        const out = await api('/api/skills', {method: 'POST', body: {
+          name: s.name,
+          description: editDesc.value.trim(),
+          preconditions: editPre.value.split(',')
+            .map(x => x.trim()).filter(Boolean),
+          domains: Array.from(editDomains.selectedOptions)
+            .map(o => o.value),
+          body: editBody.value,
+          reason: editReason.value.trim() || 'revised in the web UI',
+        }});
+        if (out) {
+          toast('Skill saved as a new draft version.');
+          skillEditId = null;
+          if (openSkillId === s.id) openSkillId = null;
+          skillDetails[s.id] = null;
+          refresh(true);
+        }
+      }));
+      editBtns.appendChild(btn('Cancel', null, () => {
+        skillEditId = null; renderSide(true);
+      }));
+      editor.appendChild(editBtns);
+      card.appendChild(editor);
+    }
+
     const btns = el('div', 'btns');
     btns.appendChild(btn(openSkillId === s.id ? 'Hide body' : 'View body',
       null, async () => {
@@ -1331,25 +1563,29 @@ function renderSkills(side) {
         if (out) { toast('Skill rolled back.'); refresh(true); }
       }));
     }
-    btns.appendChild(btn('Revise', null, async () => {
+    btns.appendChild(btn(skillEditId === s.id ? 'Close editor' : 'Revise',
+      null, async () => {
+      if (skillEditId === s.id) {
+        skillEditId = null; renderSide(true); return;
+      }
       const detail = skillDetails[s.id] ||
         await api('/api/skills/' + encodeURIComponent(s.id));
       if (!detail) return;
       skillDetails[s.id] = detail;
-      skillPrefill = {
-        id: s.id, name: s.name, description: s.description,
-        preconditions: s.preconditions || [], domains: s.domains || [],
-        body: detail.body || '',
-      };
+      skillEditId = s.id;
       renderSide(true);
-      side.scrollTop = 0;
+      const cardNode = $('skill-' + s.id);
+      if (cardNode) cardNode.scrollIntoView({block: 'start'});
     }));
     if (s.status !== 'active') {
       btns.appendChild(btn('Delete', 'no', async () => {
         if (!confirm('Delete this skill and its versioned body files?')) return;
         const out = await api('/api/skills/' + encodeURIComponent(s.id),
           {method: 'DELETE'});
-        if (out) { toast('Skill deleted.'); refresh(true); }
+        if (out) {
+          if (skillEditId === s.id) skillEditId = null;
+          toast('Skill deleted.'); refresh(true);
+        }
       }));
     }
     card.appendChild(btns);

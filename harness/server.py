@@ -23,6 +23,7 @@ from . import util
 from .app import App
 from .config import EDITABLE_KEYS, ConfigError, save_config, validate_group_update
 from .inbox import InboxError, InboxTooLarge
+from .memory import KINDS as MEMORY_KINDS
 from .modules.types import ModuleBinding
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -115,23 +116,35 @@ class Server:
 
     # -- panel payloads -----------------------------------------------------
 
-    def _visible_tasks(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Open work first, then recent history; children stay off the list."""
+    def _visible_tasks(
+        self, include_subagents: bool = False
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Open work first, then recent history.
+
+        Children stay off the default list; ``include_subagents`` exposes the
+        tree as flat rows so delegated work can be inspected from the UI.
+        """
         app = self.app
+
+        def visible(task: dict[str, Any]) -> bool:
+            return include_subagents or (
+                (task.get("role") or "user") != "subagent"
+            )
+
         open_tasks = [
-            task for task in app.tasks.list_open()
-            if (task.get("role") or "user") != "subagent"
+            task for task in app.tasks.list_open() if visible(task)
         ]
         seen = {task["id"] for task in open_tasks}
         tasks = open_tasks + [
             task for task in app.tasks.list_recent(limit=60)
-            if task["id"] not in seen
-            and (task.get("role") or "user") != "subagent"
+            if task["id"] not in seen and visible(task)
         ]
         return open_tasks, tasks
 
-    def _tasks_payload(self) -> dict[str, Any]:
-        open_tasks, tasks = self._visible_tasks()
+    def _tasks_payload(
+        self, include_subagents: bool = False
+    ) -> dict[str, Any]:
+        open_tasks, tasks = self._visible_tasks(include_subagents)
         return {
             "tasks": tasks,
             "open_tasks": open_tasks,
@@ -139,6 +152,10 @@ class Server:
                 "open_tasks": len(open_tasks),
                 "paused": len(
                     [task for task in tasks if task["status"] == "paused"]
+                ),
+                "subagents": len(
+                    [task for task in tasks
+                     if (task.get("role") or "user") == "subagent"]
                 ),
             },
         }
@@ -306,7 +323,10 @@ class Server:
     async def tasks_list(self, request: Request) -> Response:
         if not self._authorized(request):
             return _err("unauthorized", 401)
-        return _json(await run_in_threadpool(self._tasks_payload))
+        include = request.query_params.get("include_subagents", "").lower()
+        return _json(await run_in_threadpool(
+            self._tasks_payload, include in ("1", "true", "yes")
+        ))
 
     async def approvals_list(self, request: Request) -> Response:
         if not self._authorized(request):
@@ -357,8 +377,9 @@ class Server:
         if task is None:
             return _err("no such task", 404)
         runs = self.app.db.query(
-            "SELECT id, status, trigger, started_at, ended_at, iterations,"
-            " tool_calls, decision, error, meta FROM runs WHERE task_id=?"
+            "SELECT id, status, trigger, trigger_ref, started_at, ended_at,"
+            " iterations, tool_calls, decision, error, parent_run_id,"
+            " transcript, context_sources, meta FROM runs WHERE task_id=?"
             " ORDER BY started_at",
             (task_id,),
         )
@@ -369,6 +390,15 @@ class Server:
             meta = util.loads(item.pop("meta", None) or "{}", {})
             item["toolset"] = meta.get("toolset")
             item["tainted_sources"] = meta.get("tainted_sources", [])
+            # The full model request is the persisted transcript: system
+            # prompt, user turn, assistant/tool turns, and tool results. The
+            # UI shows it verbatim instead of an abstracted summary.
+            item["transcript"] = util.loads(
+                item.pop("transcript", None) or "[]", []
+            )
+            item["context_sources"] = util.loads(
+                item.pop("context_sources", None) or "[]", []
+            )
             if item["toolset"]:
                 latest_toolset = item["toolset"]
             runs_payload.append(item)
@@ -715,6 +745,7 @@ class Server:
             "artifact_problems": self.app.memory.check_artifacts(),
             "counts": self._memory_counts(),
             "filter": status,
+            "kinds": list(MEMORY_KINDS),
         }
 
     async def memory_detail(self, request: Request) -> Response:

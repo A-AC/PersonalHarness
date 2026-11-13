@@ -348,3 +348,16 @@ def test_task_detail_returns_child_tree_and_hides_children_from_state(
         (task.get("role") or "user") != "subagent"
         for task in state["tasks"]
     )
+    # The child's own record is directly analyzable: full run transcript,
+    # context sources, and its own sub-agent slot.
+    child_detail = http.get(f"/api/tasks/{child['id']}").json()
+    assert child_detail["task"]["role"] == "subagent"
+    assert child_detail["runs"][0]["transcript"][0]["role"] == "system"
+    assert child_detail["runs"][0]["transcript"][1]["content"]
+    assert "context_sources" in child_detail["runs"][0]
+    # The UI can opt into flat sub-agent rows without changing /api/state.
+    default_list = http.get("/api/tasks").json()
+    assert child["id"] not in {t["id"] for t in default_list["tasks"]}
+    expanded = http.get("/api/tasks?include_subagents=1").json()
+    assert child["id"] in {t["id"] for t in expanded["tasks"]}
+    assert expanded["counts"]["subagents"] == 1

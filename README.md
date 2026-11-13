@@ -87,7 +87,8 @@ terminal CLI that are two views of the same runtime.
   until the user or scheduler resumes them deliberately.
 - **Web UI + terminal CLI.** A polling chat page with grouped navigation:
   *Conversation* (chat and the live working-task strip), *Work* (tasks with a
-  detail drawer and sub-agent tree, approvals, schedules, inbox, automations),
+  detail drawer showing the full persisted model transcript, context sources,
+  and sub-agent tree, plus approvals, schedules, inbox, automations),
   *Knowledge* (memory, domains, skills, consolidation), and *System* (status,
   modules, tools, events, persona, config, backup, guard). It polls
   `/api/summary` for badges plus only the active panel's endpoint, while the
@@ -720,7 +721,11 @@ Everything important is inspectable without exposing chain-of-thought:
   response and the browser holds nothing of its own. Panel mutations (memory
   edit/retract, skill draft/delete, module bindings, domain edits, schedule and
   automation changes) all go through the same authenticated endpoints as the
-  CLI.
+  CLI. The task drawer exposes each run's persisted model transcript — the
+  fully built system prompt, the user turn, assistant/tool turns, tool
+  results — plus the context sources that fed it. Sub-agent tasks can be shown
+  in the task list and expanded recursively with their own runs and
+  transcripts.
 
 Structured logs go to stdout and `data/logs/harness.log`.
 

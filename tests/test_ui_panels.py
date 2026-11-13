@@ -65,19 +65,26 @@ def test_messages_panel_contract(make_app, client):
 
 def test_tasks_panel_contract(make_app, client):
     app = make_app.build(default="ok")
-    task = app.tasks.create(objective="panel task", origin="user")
+    result = app.runtime.submit_user_message("panel task")
+    task = app.tasks.get(result.task_id)
     http = client(app)
 
     listing = http.get("/api/tasks").json()
     assert [t["id"] for t in listing["tasks"]] == [task["id"]]
-    assert [t["id"] for t in listing["open_tasks"]] == [task["id"]]
-    assert listing["counts"]["open_tasks"] == 1
+    assert listing["counts"]["open_tasks"] == 0
+    assert listing["counts"]["subagents"] == 0
 
     detail = http.get(f"/api/tasks/{task['id']}").json()
     assert detail["task"]["id"] == task["id"]
-    assert detail["runs"] == []
-    assert detail["toolset"] is None
     assert {"children", "executions", "approvals"} <= set(detail)
+    assert len(detail["runs"]) == 1
+    run = detail["runs"][0]
+    # The detail drawer gets the exact persisted model request, not a summary.
+    assert run["transcript"][0]["role"] == "system"
+    assert "Operating rules" in run["transcript"][0]["content"]
+    assert run["transcript"][1] == {"role": "user", "content": "panel task"}
+    assert run["context_sources"]
+    assert isinstance(run["toolset"]["names"], list)
 
 
 def test_approvals_panel_contract(make_app, client):
@@ -153,6 +160,7 @@ def test_memory_panel_contract_and_mutations(make_app, client):
     assert memory["id"] in {item["id"] for item in listing["memories"]}
     assert listing["filter"] == "any"
     assert listing["counts"]["active"] == 1
+    assert "fact" in listing["kinds"]
     assert isinstance(listing["artifact_problems"], list)
 
     edited = http.patch(f"/api/memories/{memory['id']}", json={

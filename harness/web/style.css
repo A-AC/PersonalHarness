@@ -143,3 +143,25 @@
     cursor:pointer; font-size:12px; }
   #drawerbody .card { background:#11171d; }
   .transcript .msg { max-width:100%; margin:4px 0; }
+  details { border:1px solid var(--line); border-radius:5px; padding:5px 7px;
+            margin:6px 0; background:#0f141a; }
+  details > summary { cursor:pointer; font-size:12px; color:var(--dim);
+                      overflow-wrap:anywhere; }
+  details[open] > summary { color:var(--text); margin-bottom:5px; }
+  .runblock { border-color:#31404f; }
+  .subagent { border-color:#3a4a3c; }
+  .sources { border-color:#2b333d; }
+  .taskdetail .taskdetail { border-left:2px solid #31404f; padding-left:8px;
+                            margin-left:4px; }
+  .modelmsg { border-top:1px dotted #232a32; padding:4px 0; }
+  .modelmsg:first-of-type { border-top:none; }
+  .modelmsg .mmhead { display:flex; gap:5px; align-items:center;
+                      flex-wrap:wrap; margin-bottom:2px; }
+  .modelmsg.system { border-left:2px solid var(--warn); padding-left:7px; }
+  .modelmsg.user { border-left:2px solid #3f6f96; padding-left:7px; }
+  .modelmsg.assistant { border-left:2px solid var(--accent); padding-left:7px; }
+  .modelmsg.tool { border-left:2px solid #4a4a2f; padding-left:7px; }
+  .modelmsg pre { max-height:420px; overflow:auto; }
+  .inlineeditor { border:1px solid #31404f; border-radius:5px; padding:8px;
+                  margin-top:8px; background:#0f141a; }
+  .inlineeditor h4 { margin-top:0; }
