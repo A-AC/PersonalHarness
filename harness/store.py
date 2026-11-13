@@ -413,16 +413,21 @@ class Tasks:
         origin_ref: str | None = None,
         meta: dict[str, Any] | None = None,
         task_id: str | None = None,
+        parent_task_id: str | None = None,
+        parent_run_id: str | None = None,
+        role: str = "user",
     ) -> dict[str, Any]:
         with self.db.transaction() as conn:
             task_id = self.create_in_transaction(
                 conn, objective=objective, domain_id=domain_id,
                 origin=origin, origin_ref=origin_ref, meta=meta,
-                task_id=task_id,
+                task_id=task_id, parent_task_id=parent_task_id,
+                parent_run_id=parent_run_id, role=role,
             )
         self.events.record(
             "task.created", task_id=task_id, domain_id=domain_id,
-            data={"objective": objective[:200], "origin": origin},
+            data={"objective": objective[:200], "origin": origin,
+                  "role": role, "parent_task_id": parent_task_id},
         )
         return self.get(task_id)  # type: ignore[return-value]
 
@@ -436,17 +441,24 @@ class Tasks:
         origin_ref: str | None = None,
         meta: dict[str, Any] | None = None,
         task_id: str | None = None,
+        parent_task_id: str | None = None,
+        parent_run_id: str | None = None,
+        role: str = "user",
     ) -> str:
         """Insert a task inside an existing transaction; return its id."""
         task_id = task_id or util.new_id("tsk")
         ts = util.iso()
+        if role not in ("user", "subagent"):
+            raise ValueError("task role must be 'user' or 'subagent'")
         conn.execute(
             "INSERT INTO tasks(id, domain_id, objective, status, origin,"
-            " origin_ref, created_at, updated_at, last_activity_at, meta)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " origin_ref, created_at, updated_at, last_activity_at,"
+            " parent_task_id, parent_run_id, role, meta)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 task_id, domain_id, objective, "active", origin, origin_ref,
-                ts, ts, ts, util.dumps(meta or {"notes": ""}),
+                ts, ts, ts, parent_task_id, parent_run_id, role,
+                util.dumps(meta or {"notes": ""}),
             ),
         )
         return task_id
@@ -579,6 +591,24 @@ class Tasks:
             )
         return self.list_by_status(ACTIVE_STATUSES)
 
+    def children(self, parent_task_id: str) -> list[dict[str, Any]]:
+        """Sub-agent tasks delegated by one parent task, oldest first."""
+        return rows_to_dicts(
+            self.db.query(
+                "SELECT * FROM tasks WHERE parent_task_id=? ORDER BY created_at",
+                (parent_task_id,),
+            )
+        )
+
+    def find_by_origin_ref(self, origin_ref: str) -> list[dict[str, Any]]:
+        """Tasks with an exact origin reference (sub-agent dedupe)."""
+        return rows_to_dicts(
+            self.db.query(
+                "SELECT * FROM tasks WHERE origin_ref=? ORDER BY created_at",
+                (origin_ref,),
+            )
+        )
+
     def find_resume_candidate(
         self,
         text: str,
@@ -606,6 +636,10 @@ class Tasks:
         now = util.now_utc()
         scored: list[tuple[float, dict[str, Any]]] = []
         for task in pool[:20]:
+            # Sub-agent work belongs to its parent; a user message must never
+            # resume a child task directly.
+            if task.get("role") == "subagent":
+                continue
             overlap = len(words & set(util.keywords(task["objective"])))
             score = float(overlap)
             same_domain = bool(domain_id) and task.get("domain_id") == domain_id

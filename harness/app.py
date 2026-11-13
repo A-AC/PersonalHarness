@@ -33,6 +33,7 @@ from .modules.skills import SkillBuilder
 from .runtime import AgentRuntime
 from .scheduler import Scheduler
 from .store import Domains, Events, Messages, Tasks
+from .subagents import SubAgentManager
 from .tools import ToolContext, ToolRegistry
 
 log = get_logger("app")
@@ -151,6 +152,7 @@ class App:
             self.memory, self.artifacts_dir, modules=self.modules,
         )
         self.runtime = AgentRuntime(self)
+        self.subagents = SubAgentManager(self)
         self.scheduler = Scheduler(self)
         self.consolidation = Consolidation(self)
         self.skill_builder = SkillBuilder(self)
@@ -554,10 +556,13 @@ class App:
     def tool_context(
         self, run_id: str, task_id: str, domain_id: str | None
     ) -> ToolContext:
+        task = self.tasks.get(task_id)
+        role = (task.get("role") if task else None) or "user"
         return ToolContext(
             run_id=run_id, task_id=task_id, domain_id=domain_id,
             memory=self.memory, domains=self.domains, tasks=self.tasks,
             messages=self.messages, skills=self.modules.skills,
+            subagents=self.subagents, role=role,
         )
 
     # ------------------------------------------------------------------

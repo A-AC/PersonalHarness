@@ -21,7 +21,7 @@ from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Phase 3 memory lifetime: additive columns on ``memories`` plus a small
 # access table. ``archived_at`` marks an archived row without touching the
@@ -52,6 +52,24 @@ CREATE INDEX IF NOT EXISTS idx_memory_access_mem
 # never trips over a missing ``archived_at`` while the base schema runs.
 MEMORY_LIFETIME_INDEX_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_memories_archive ON memories(archived_at);
+"""
+
+# Phase 4 sub-agents: additive parent/role columns. Depth and counters stay in
+# ``tasks.meta``; the columns are only the durable tree relationship.
+SUBAGENT_TASK_COLUMNS = (
+    ("parent_task_id", "TEXT"),
+    ("parent_run_id", "TEXT"),
+    ("role", "TEXT NOT NULL DEFAULT 'user'"),
+)
+
+SUBAGENT_RUN_COLUMNS = (
+    ("parent_run_id", "TEXT"),
+)
+
+# Created after the additive v5 columns exist, for upgraded and fresh databases.
+SUBAGENT_INDEX_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
 """
 
 MODULE_SCHEMA = """
@@ -170,6 +188,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   status_reason TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0,
   next_retry_at TEXT,
+  parent_task_id TEXT,
+  parent_run_id TEXT,
+  role TEXT NOT NULL DEFAULT 'user',
   meta TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_domain ON tasks(domain_id);
@@ -191,6 +212,7 @@ CREATE TABLE IF NOT EXISTS runs (
   transcript TEXT NOT NULL DEFAULT '[]',
   context_sources TEXT,
   error TEXT,
+  parent_run_id TEXT,
   meta TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
@@ -367,6 +389,7 @@ class Database:
             # Safe for both fresh and upgraded databases: the column exists by
             # the time this runs.
             self._conn.executescript(MEMORY_LIFETIME_INDEX_SCHEMA)
+            self._conn.executescript(SUBAGENT_INDEX_SCHEMA)
 
     def _migrate_to(self, version: int) -> None:
         """Apply additive migrations from ``version`` to SCHEMA_VERSION."""
@@ -399,6 +422,23 @@ class Database:
                         f"ALTER TABLE memories ADD COLUMN {name} {ddl}"
                     )
             self._conn.executescript(MEMORY_ACCESS_SCHEMA)
+        if version < 5:
+            # Additive sub-agent tree columns; never rebuild a table and never
+            # alter an existing CHECK constraint.
+            for table, columns in (
+                ("tasks", SUBAGENT_TASK_COLUMNS),
+                ("runs", SUBAGENT_RUN_COLUMNS),
+            ):
+                existing = {
+                    row["name"] for row in self._conn.execute(
+                        f"PRAGMA table_info({table})"
+                    )
+                }
+                for name, ddl in columns:
+                    if name not in existing:
+                        self._conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
+                        )
         if version < SCHEMA_VERSION:
             self._conn.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",

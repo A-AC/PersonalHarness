@@ -12,15 +12,16 @@ tests under the `live` marker.
 | --- | --- |
 | `harness/util.py` | UTC timestamps, ids, JSON helpers, keyword extraction, clipping |
 | `harness/config.py` | Defaults, YAML load/validate, env overrides, save; unknown keys fail fast |
-| `harness/db.py` | SQLite schema (WAL), FTS5 external-content tables + triggers, transactions, schema version (v4 memory lifetime), online backup |
+| `harness/db.py` | SQLite schema (WAL), FTS5 external-content tables + triggers, transactions, schema version (v5 sub-agent tree), online backup |
 | `harness/logging.py` | Structured stdout + rotating file logs |
 | `harness/model.py` | `ModelClient` (OpenAI-compatible chat completions, native tool calls, Hermes fallback parsing, bounded retries, probe); `ScriptedModel` for tests |
-| `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + deterministic routing), `Tasks` (statuses, resume-candidate scoring) |
+| `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + deterministic routing), `Tasks` (statuses, resume-candidate scoring, parent/child tree relationships) |
 | `harness/memory.py` | `MemoryManager`: capture with conflict supersession, scopes/kinds, revisions + provenance, FTS retrieval with scope priority and recency, usage accounting with per-run dedupe, deterministic lifetime sweep, archive/restore/pin, expiry, merge, bounded artifact reads, artifact consistency checks |
-| `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules, state, memories, recent + retrieved history, registry-driven skill disclosure), inclusion/exclusion sources |
-| `harness/tools.py` | `ToolRegistry` (builtin tools including `propose_skill`, JSON-schema-lite validation, risk classes, trust flags, banned-name refusal, execution records, budgeted per-run schema selection scoped by eligible modules), minimal MCP stdio JSON-RPC client |
+| `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules, state, memories, recent + retrieved history, registry-driven skill disclosure), sub-agent mode (goal + parent brief + domain memories, no parent history), inclusion/exclusion sources |
+| `harness/tools.py` | `ToolRegistry` (builtin tools including `delegate_task` and `propose_skill`, JSON-schema-lite validation, risk classes, trust flags, banned-name refusal, execution records, budgeted per-run schema selection scoped by eligible modules and role), minimal MCP stdio JSON-RPC client |
 | `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired), expiry sweep, name-keyed proposal dedupe, quick-confirm classification (keyword + tiny model call) |
-| `harness/runtime.py` | `AgentRuntime`: the single bounded loop; capability snapshots; trust/taint escalation; routing/resume entry point; approval/question/interrupt/limit pause and resume; transcript persistence |
+| `harness/runtime.py` | `AgentRuntime`: the single bounded loop; capability snapshots; trust/taint escalation; routing/resume entry point; approval/question/interrupt/limit pause and resume; transcript persistence; child budgets, role-aware tool denial, and hidden child messages |
+| `harness/subagents.py` | `SubAgentManager`: bounded sequential delegation, goal-hash dedupe/reuse, child task/run creation, blocked-outcome closing, durable result artifacts, and sub-agent events |
 | `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, module health refresh, heartbeat checks including the bounded skill builder and memory-lifetime sweep, scheduler thread |
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract; applied via `MemoryManager` with revisions; markdown change log per run |
 | `harness/modules/types.py` | `Module`, `ModuleBinding`, `ModuleTool` value objects over the v3 tables |
@@ -29,7 +30,7 @@ tests under the `live` marker.
 | `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions) and `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
 | `harness/modules/web/server.py` | Shipped web-search stdio MCP server over SearXNG JSON; bounded results, no `web_fetch` |
 | `harness/app.py` | `App` composition root, startup recovery, `ProcessLock` (single writer), backup/restore, graceful shutdown; `build_app` test helper |
-| `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; module list/reload/enable/disable endpoints, skill list/draft lifecycle endpoints; authenticated static UI assets |
+| `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; module list/reload/enable/disable endpoints, skill list/draft lifecycle endpoints, task detail with the child tree (children hidden from the top-level task list); authenticated static UI assets |
 | `harness/web/` | Zero-build UI: `index.html`, `app.js`, `style.css` (served only through the authenticated handler) |
 | `harness/__main__.py` | CLI: `serve`, `endpoint-check`, `msg`, `status`, `tasks`, `approvals`, `schedules`, `memories`, `domains`, `consolidate`, `events`, `modules`, `skills`, `tools`, `backup`, `restore`, `config` |
 | `scripts/container_check.py` | Build + start the compose stack, verify health/auth/API/endpoint, tear down |
@@ -68,6 +69,10 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
                         else           -> execute; record outcome; append
                                           observation to transcript
                                           untrusted output? -> taint run
+                        delegate_task? -> child task/run (goal hash, depth 1)
+                                          reduced context + low-risk snapshot
+                                          completed -> artifact + parent result
+                                          blocked   -> child closed + reason
          final reply? -> ask_user marker? task waiting_user
                         else task completed; assistant message recorded
   -> transcript + counters persisted at every step
@@ -78,10 +83,11 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | Path under data dir | Contents |
 | --- | --- |
 | `config.yaml` | Materialized configuration (created with defaults) |
-| `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks`, `runs`, `memories` (+FTS5, lifetime columns), `memory_revisions`, `memory_access`, `schedules`, `schedule_occurrences`, `approvals`, `tool_executions`, `modules`, `module_bindings`, `module_tools`, `schema_meta` |
+| `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks` (+ parent/role tree columns), `runs` (+ `parent_run_id`), `memories` (+FTS5, lifetime columns), `memory_revisions`, `memory_access`, `schedules`, `schedule_occurrences`, `approvals`, `tool_executions`, `modules`, `module_bindings`, `module_tools`, `schema_meta` |
 | `artifacts/memories/<id>.md` | Long memory notes referenced from rows |
 | `artifacts/consolidation/<run>.md` | Per-run change logs |
 | `artifacts/skills/<run>.md` | Skill builder prompt/report logs (bounded) |
+| `artifacts/subagents/<task_id>.md` | Completed child result, goal, parent-supplied brief, and run reference |
 | `artifacts/domains/…` | Reserved for future domain notes |
 | `modules/skills/<id>/v<n>.md` | Versioned skill bodies owned by `kind=skill` module rows; directory imports are one source, rows are authoritative |
 | `modules/mcp/<id>.yaml` | Reserved export/backup mirror for MCP manifests (rows remain authoritative; not written yet) |
@@ -94,8 +100,11 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 - The database is authoritative; artifacts are rendered bodies whose
   identity/revision is owned by the referencing row.
 - `messages` is the single interaction history; `source` distinguishes
-  web/cli/schedule/heartbeat/system, `visible` keeps maintenance out of
-  chat without hiding it from inspection.
+  web/cli/schedule/heartbeat/system, `visible` keeps maintenance and
+  sub-agent messages out of chat without hiding them from inspection.
+- A delegated child is a normal task/run with `role='subagent'` and parent
+  ids. It never inherits the parent transcript or approvals; its result is
+  the only thing that crosses back, through the parent's tool result.
 - Approvals are immutable once created; execution binds back through the
   awaiting `tool_executions` row, so stale approvals can never execute.
 - Occurrence ids are `(schedule_id, due_time)`; submission is INSERT-or-
@@ -120,5 +129,6 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | `tests/test_modules_foundations.py` | UI shell/assets, registry loader, v3 schema migration, backup/restore of `modules/`, module API/toggle/reload, heartbeat health, tool-schema budget and run snapshots |
 | `tests/test_skills.py` | Front-matter import, global/domain/adaptive disclosure, proposal approval lifecycle, bounded validation, dedupe, taint refusal, builder batching/limits/failure, skills API |
 | `tests/test_tools_mcp.py` | Registry-backed MCP discovery/risk/round trip/bounded results/unavailable servers, domain scope and refusal, reload, schema budget priority, web search stub (bounded/untrusted/malformed), taint escalation with source provenance, skill disclosure |
+| `tests/test_subagents.py` | Parent delegation/result return, child context isolation, reduced toolset/depth/confirm refusal, blocked limits, goal-hash reuse, child budgets/caps, crash-mid-child unknown recovery, v5 migration, task-detail child tree |
 | `tests/test_scenarios.py` | The ten end-to-end acceptance scenarios |
 | `tests/test_live_endpoint.py` | Real-endpoint integration (marked `live`): models list, plain completion, native tool-call protocol, multi-step round trip, one full live turn |

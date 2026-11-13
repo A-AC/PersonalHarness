@@ -120,14 +120,49 @@ class AgentRuntime:
             self.config.get("modules.tool_schema_budget_tokens", 2400)
         ))
 
+    def _limits_for(self, task: dict[str, Any]) -> tuple[int, int, float]:
+        """Iteration, tool-call, and wall-clock budgets for this task.
+
+        A child run always gets the tighter sub-agent budget recorded on its
+        task meta (with config as the fallback), never the parent's budget.
+        """
+        if (task.get("role") or "user") == "subagent":
+            meta = util.loads(task.get("meta") or "{}", {})
+            budget = meta.get("budget") if isinstance(meta, dict) else {}
+            budget = budget if isinstance(budget, dict) else {}
+            return (
+                int(budget.get(
+                    "max_iterations",
+                    self.config.get("subagents.max_iterations", 8),
+                )),
+                int(budget.get(
+                    "max_tool_calls",
+                    self.config.get("subagents.max_tool_calls", 12),
+                )),
+                float(budget.get(
+                    "max_seconds",
+                    self.config.get("subagents.max_seconds", 180.0),
+                )),
+            )
+        return (
+            int(self.config.get("limits.max_iterations", 16)),
+            int(self.config.get("limits.max_tool_calls", 24)),
+            float(self.config.get("limits.max_run_seconds", 600)),
+        )
+
+    @staticmethod
+    def _visible(task: dict[str, Any] | None) -> bool:
+        """Child messages stay inspectable but out of the ordinary chat."""
+        return bool(task) and (task.get("role") or "user") != "subagent"
+
     @staticmethod
     def _toolset_snapshot(selection: dict[str, Any]) -> dict[str, Any]:
         """The durable part of a capability selection (never the schemas)."""
         return {
             key: selection[key]
             for key in (
-                "domain_id", "names", "modules", "exclusions", "tokens",
-                "budget_tokens",
+                "domain_id", "role", "names", "modules", "exclusions",
+                "tokens", "budget_tokens",
             )
         }
 
@@ -148,12 +183,21 @@ class AgentRuntime:
         names = self._toolset(run_id).get("names")
         return set(names) if isinstance(names, list) else None
 
-    def _select_tools(self, domain_id: str | None) -> dict[str, Any]:
+    def _select_tools(
+        self, domain_id: str | None, role: str = "user"
+    ) -> dict[str, Any]:
         """Resolve eligible modules, then apply the schema budget."""
+        exclude = (
+            {"delegate_task"}
+            if not bool(self.config.get("subagents.enabled", True))
+            else None
+        )
         return self.tools.schemas_for(
             domain_id,
             budget_tokens=self._schema_budget(),
             eligible_modules=self.app.modules.eligible_module_ids(domain_id),
+            role=role,
+            exclude_names=exclude,
         )
 
     def _save_toolset(
@@ -214,15 +258,16 @@ class AgentRuntime:
         a context source. Older runs without a snapshot get one on first use.
         """
         domain_id = task.get("domain_id") if task else None
+        role = (task.get("role") if task else None) or "user"
         snapshot = self._toolset(run["id"])
         if isinstance(snapshot.get("names"), list):
             if snapshot.get("domain_id") != domain_id:
-                selection = self._select_tools(domain_id)
+                selection = self._select_tools(domain_id, role)
                 self._save_toolset(run["id"], selection)
                 self._record_toolset_change(run["id"], snapshot, selection)
                 return selection["schemas"]
             return self.tools.schemas_for_names(snapshot["names"])
-        selection = self._select_tools(domain_id)
+        selection = self._select_tools(domain_id, role)
         self._save_toolset(run["id"], selection)
         return selection["schemas"]
 
@@ -524,7 +569,8 @@ class AgentRuntime:
             if task.get("domain_id") else None,
             trigger=trigger, pending_approvals=pending, run_id=run_id,
         )
-        selection = self._select_tools(task.get("domain_id"))
+        role = task.get("role") or "user"
+        selection = self._select_tools(task.get("domain_id"), role)
         sources = list(built["sources"])
         for exclusion in selection["exclusions"]:
             sources.append({
@@ -541,15 +587,16 @@ class AgentRuntime:
             {"role": "system", "content": built["system"]},
             {"role": "user", "content": user_text},
         ]
+        parent_run_id = trigger.get("parent_run_id") or task.get("parent_run_id")
         self.db.execute(
             "INSERT INTO runs(id, task_id, trigger, trigger_ref, status,"
             " started_at, iterations, tool_calls, transcript, context_sources,"
-            " meta) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " parent_run_id, meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 run_id, task["id"], trigger["kind"],
                 str(trigger_message_id) if trigger_message_id else None,
                 "running", util.iso(), 0, 0, util.dumps(transcript),
-                util.dumps(sources),
+                util.dumps(sources), parent_run_id,
                 util.dumps({"toolset": self._toolset_snapshot(selection)}),
             ),
         )
@@ -705,7 +752,7 @@ class AgentRuntime:
         outcome = self.tools.execute(
             call, ctx, run_id=run["id"], task_id=task["id"],
             execution_id=execution_id, approval_id=approval["id"],
-            allowed_names=allowed,
+            allowed_names=allowed, role=task.get("role") or "user",
         )
         if outcome.get("status") == "succeeded":
             spec = self.tools.resolve_optional(call.name)
@@ -797,6 +844,13 @@ class AgentRuntime:
                 error="task cancelled by user",
             )
         self.tasks.set_status(task_id, "cancelled", reason="cancelled by user")
+        # Child work belongs to this task; leaving a paused child behind would
+        # make the cancelled parent look unfinished and could be resumed.
+        for child in self.tasks.children(task_id):
+            if (child.get("role") or "user") != "subagent":
+                continue
+            if child["status"] not in ("completed", "failed", "cancelled"):
+                self.cancel_task(child["id"])
         self.events.record(
             "task.cancelled", task_id=task_id,
             data={"approvals_cancelled": cancelled},
@@ -873,12 +927,10 @@ class AgentRuntime:
     # ------------------------------------------------------------------
 
     def _loop(self, run: dict[str, Any], trigger: dict[str, Any]) -> RunResult:
-        max_iterations = int(self.config.get("limits.max_iterations", 16))
-        max_tool_calls = int(self.config.get("limits.max_tool_calls", 24))
-        max_seconds = float(self.config.get("limits.max_run_seconds", 600))
         started_monotonic = time.monotonic()
         run_id = run["id"]
         task = self.tasks.get(run["task_id"])
+        max_iterations, max_tool_calls, max_seconds = self._limits_for(task)
         self.tasks.clear_retry(task["id"], reset_count=False)
         # One controlled recovery is allowed for an over-long prompt; the
         # model client owns empty-reply recovery. Nothing else is retried here.
@@ -1006,6 +1058,27 @@ class AgentRuntime:
                         outcome.get("approval_id"),
                     )
                     self._save_run(run_id, tool_calls=tool_calls + 1)
+                    if (
+                        outcome.get("status") == "blocked"
+                        and (task.get("role") or "user") == "subagent"
+                    ):
+                        reason = str(
+                            outcome.get("error") or "sub-agent action blocked"
+                        )
+                        meta = self.tasks.meta(task["id"])
+                        meta["blocked_reason"] = util.clip(reason, 600)
+                        self.tasks.set_meta(task["id"], meta)
+                        self._finish_run(
+                            run_id, "failed", f"blocked: {util.clip(reason, 200)}"
+                        )
+                        self.tasks.set_status(
+                            task["id"], "failed",
+                            reason=f"blocked: {util.clip(reason, 200)}",
+                        )
+                        return RunResult(
+                            "blocked", run_id, task["id"],
+                            message=reason, detail=reason,
+                        )
                 continue
 
             # --- final reply --------------------------------------------
@@ -1029,6 +1102,7 @@ class AgentRuntime:
                 note_id = self.messages.record(
                     "assistant", content, source="agent", task_id=task["id"],
                     run_id=run_id, domain_id=task.get("domain_id"),
+                    visible=self._visible(task),
                 )
             live = self.app.approvals.live_for_run(run_id)
             if live is not None:
@@ -1065,11 +1139,23 @@ class AgentRuntime:
         self, run: dict[str, Any], task: dict[str, Any], call: ToolCall
     ) -> dict[str, Any]:
         run_id, task_id = run["id"], task["id"]
+        role = task.get("role") or "user"
+        # A sub-agent asking for a confirm-risk or parent-only tool gets an
+        # explicit blocked result for its parent instead of an approval.
+        known = self.tools.resolve_optional(call.name)
+        restriction = (
+            self.tools.role_restriction(known, role) if known else None
+        )
+        if restriction is not None:
+            self.tools.record_rejected(
+                call, run_id=run_id, task_id=task_id, error=restriction
+            )
+            return {"status": "blocked", "error": restriction}
         # Visibility is enforced here as well as in the prompt: a call by name
         # for a tool outside this run's snapshot is denied, not executed.
         allowed = self._allowed_tool_names(run_id)
         try:
-            spec = self.tools.resolve(call.name, allowed=allowed)
+            spec = self.tools.resolve(call.name, allowed=allowed, role=role)
         except Exception as exc:
             self.tools.record_rejected(
                 call, run_id=run_id, task_id=task_id, error=str(exc)
@@ -1179,7 +1265,9 @@ class AgentRuntime:
                              f"({pending['tool']}); wait for that decision.",
                 }
             try:
-                arguments = self.tools.validate(call, allowed=allowed)
+                arguments = self.tools.validate(
+                    call, allowed=allowed, role=role
+                )
             except Exception as exc:
                 return {"status": "denied", "error": str(exc)}
             if call.name == "propose_skill":
@@ -1258,7 +1346,7 @@ class AgentRuntime:
                 )
             self.messages.record(
                 "note", note, source="system", task_id=task_id, run_id=run_id,
-                domain_id=task.get("domain_id"),
+                domain_id=task.get("domain_id"), visible=self._visible(task),
             )
             return {
                 "status": "awaiting_approval",
@@ -1269,7 +1357,7 @@ class AgentRuntime:
         ctx = self.app.tool_context(run_id, task_id, task.get("domain_id"))
         outcome = self.tools.execute(
             call, ctx, run_id=run_id, task_id=task_id,
-            allowed_names=allowed,
+            allowed_names=allowed, role=role,
         )
         if outcome.get("status") == "succeeded" and spec.untrusted_output:
             self._mark_tainted(
@@ -1373,6 +1461,7 @@ class AgentRuntime:
         self.messages.record(
             "note", note, source="system", task_id=task["id"],
             run_id=run["id"], domain_id=task.get("domain_id"),
+            visible=self._visible(task),
         )
         return RunResult(
             "waiting_approval", run["id"], task["id"], message=message,
@@ -1414,7 +1503,7 @@ class AgentRuntime:
             f"Paused: this run reached its {reason}. The work is saved and "
             "can be resumed by sending a message like 'continue'.",
             source="system", task_id=task["id"], run_id=run["id"],
-            domain_id=task.get("domain_id"),
+            domain_id=task.get("domain_id"), visible=self._visible(task),
         )
         return RunResult(
             "limit_reached", run["id"], task["id"], assistant_message_id=note_id,
@@ -1466,7 +1555,7 @@ class AgentRuntime:
         note_id = self.messages.record(
             "note", note_text,
             source="system", task_id=task["id"], run_id=run["id"],
-            domain_id=task.get("domain_id"),
+            domain_id=task.get("domain_id"), visible=self._visible(task),
         )
         return RunResult(
             "failed", run["id"], task["id"], assistant_message_id=note_id,

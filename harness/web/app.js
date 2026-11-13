@@ -275,6 +275,32 @@ function renderTasks(side) {
 
 function renderTaskDetail(detail) {
   const box = el('div');
+  if (detail.task && detail.task.parent_task_id) {
+    box.appendChild(el('div', 'small',
+      'Sub-agent of task ' + detail.task.parent_task_id));
+  }
+  box.appendChild(el('h4', null, 'Sub-agents'));
+  if (!(detail.children || []).length) {
+    box.appendChild(el('div', 'small', 'No delegated work.'));
+  }
+  for (const child of detail.children || []) {
+    const row = el('div', 'small');
+    row.appendChild(el('span', null,
+      child.status + '  ' + (child.objective || '').slice(0, 90) +
+      '  |  ' + child.id));
+    if (child.result) {
+      row.appendChild(el('div', 'small',
+        'result: ' + String(child.result).slice(0, 220)));
+    }
+    if (child.blocked_reason) {
+      row.appendChild(el('div', 'small',
+        'blocked: ' + String(child.blocked_reason).slice(0, 220)));
+    }
+    if (child.result_path) {
+      row.appendChild(el('div', 'small', 'artifact: ' + child.result_path));
+    }
+    box.appendChild(row);
+  }
   box.appendChild(el('h4', null, 'Runs'));
   if (!(detail.runs || []).length) {
     box.appendChild(el('div', 'small', 'No runs recorded.'));
@@ -289,9 +315,14 @@ function renderTaskDetail(detail) {
     box.appendChild(el('div', 'small', 'No tool executions.'));
   }
   for (const x of (detail.executions || []).slice(-12)) {
-    box.appendChild(el('div', 'small',
+    const line = el('div', 'small',
       x.tool + '  ' + x.status + '  ' + short(x.started_at) +
-      (x.error ? '  ' + x.error : '')));
+      (x.error ? '  ' + x.error : ''));
+    if (x.tool === 'delegate_task' && x.result) {
+      line.appendChild(el('div', 'small',
+        'delegated: ' + String(x.result).slice(0, 260)));
+    }
+    box.appendChild(line);
   }
   if ((detail.approvals || []).length) {
     box.appendChild(el('h4', null, 'Pending approvals'));

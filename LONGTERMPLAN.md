@@ -1,6 +1,6 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phase 3 complete)
+Status: in progress (Phase 4 complete)
 Last updated: 2026-11-13
 Scope: capability modules (skills + MCP + web), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture.
@@ -529,6 +529,8 @@ is spent on retention.
 
 ### Phase 4 - Sequential sub-agents
 
+**Status:** complete (2026-11-13).
+
 **Goal:** the agent can delegate a bounded sub-problem and get a result back,
 without changing the single-loop, single-writer model.
 
@@ -581,6 +583,9 @@ subagents:
   max_result_chars: 4000
   allow_confirm_risk: false
 ```
+
+`allow_confirm_risk` is reserved and inert in v1: the child toolset is always
+low-risk-only, and a confirm attempt returns `blocked`.
 
 **Tests**
 
@@ -895,6 +900,12 @@ UI) and update this plan. Do not mix phases.
 | 2026-11-13 | Per-run access dedupe is a durable `memory_access(memory_id, run_id)` row, not in-memory state | Restarts and repeated context builds must never inflate usage counts |
 | 2026-11-13 | `include_archived` restores every row it returns, with `changed_by=retrieval` | Explicit retrieval is the only un-archive path, and it must be auditable |
 | 2026-11-13 | The archive index is created after the additive v4 columns, not in the base schema | A v3 database must upgrade without the base script touching a missing column |
+| 2026-11-13 | A child is a normal task/run with parent ids, not a separate execution model | Reuses exact approvals, transcripts, limits, and crash recovery with one `RLock` |
+| 2026-11-13 | A child gets the goal, the parent-supplied brief, and domain memories, never the parent transcript | Isolation keeps the child bounded and prevents conversation-wide leakage |
+| 2026-11-13 | Child confirm-risk tools return `blocked` and end the child run | A sub-agent must never create an approval or leave the parent waiting |
+| 2026-11-13 | Same normalized goal reuses the existing child by `parent_task_id:goal_hash` | Prevents duplicate children and duplicate side effects |
+| 2026-11-13 | Child budgets are recorded on `tasks.meta` and applied by `_loop` | A config change mid-delegation cannot silently widen a running child |
+| 2026-11-13 | Cancelling a parent cancels its open children | A cancelled tree must not leave resumable child work behind |
 
 ---
 

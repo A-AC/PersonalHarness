@@ -127,6 +127,18 @@ DEFAULTS: dict[str, Any] = {
         "max_drafts_per_day": 2,
         "max_body_chars": 6000,
     },
+    "subagents": {
+        # Sequential, depth-one delegation. Children get a low-risk-only
+        # toolset and their own tighter budgets; they never share approvals.
+        "enabled": True,
+        "max_depth": 1,
+        "max_children_per_run": 3,
+        "max_iterations": 8,
+        "max_tool_calls": 12,
+        "max_seconds": 180.0,
+        "max_result_chars": 4000,
+        "allow_confirm_risk": False,
+    },
     "web": {
         # The shipped web module is a stdio MCP server using SearXNG's JSON
         # API. Results are untrusted data and taint the run.
@@ -206,8 +218,8 @@ ENV_OVERRIDES = {
 # Keys a user may edit through the UI/CLI without a restart hazard.
 EDITABLE_KEYS = {
     "persona", "limits", "context", "domains", "memory", "tools",
-    "modules", "skills", "web", "scheduler", "consolidation", "approvals",
-    "timezone",
+    "modules", "skills", "subagents", "web", "scheduler", "consolidation",
+    "approvals", "timezone",
 }
 
 

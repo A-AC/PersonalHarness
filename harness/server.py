@@ -109,11 +109,17 @@ class Server:
         app = self.app
         # Open work must never fall out of the UI because history is long:
         # show every open task first, then the most recent history.
-        open_tasks = app.tasks.list_open()
+        # Child tasks belong inside their parent's detail view, never in the
+        # top-level work list.
+        open_tasks = [
+            task for task in app.tasks.list_open()
+            if (task.get("role") or "user") != "subagent"
+        ]
         seen = {task["id"] for task in open_tasks}
         tasks = open_tasks + [
             task for task in app.tasks.list_recent(limit=60)
             if task["id"] not in seen
+            and (task.get("role") or "user") != "subagent"
         ]
         approvals = app.approvals.pending()
         for approval in approvals:
@@ -214,8 +220,18 @@ class Server:
             " started_at",
             (task_id,),
         )
+        children = []
+        for child in self.app.tasks.children(task_id):
+            meta = util.loads(child.get("meta") or "{}", {})
+            payload = dict(child)
+            payload["result"] = meta.get("result")
+            payload["result_path"] = meta.get("result_path")
+            payload["blocked_reason"] = meta.get("blocked_reason")
+            payload["goal_hash"] = meta.get("goal_hash")
+            children.append(payload)
         return _json({
             "task": task,
+            "children": children,
             "domain": self.app.domains.get(task.get("domain_id"))
             if task.get("domain_id") else None,
             "runs": [dict(r) for r in runs],

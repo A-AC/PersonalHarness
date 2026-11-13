@@ -64,6 +64,13 @@ terminal CLI that are two views of the same runtime.
   classified affirmatively/negatively/ambiguously — by keyword or a tiny
   constrained model call — and resolve exactly one approval. Ambiguous
   replies never approve.
+- **Sequential, bounded sub-agents.** A parent task can delegate one
+  self-contained sub-problem through `delegate_task`. The child is a normal
+  durable task and run with a reduced context (goal, parent-supplied brief,
+  domain memories), a low-risk-only toolset, and tighter budgets. It cannot
+  ask the user, create domains, or perform approval-gated actions; those
+  return `blocked` to the parent. Re-delegating the same goal reuses the
+  existing child instead of duplicating work.
 - **Honest recovery.** In-flight tool executions interrupted by a crash
   become unknown, never success. Unknown outcomes are surfaced and
   reconciled instead of silently retried. Runs paused by limits stay paused
@@ -95,6 +102,7 @@ web UI / CLI / schedule / heartbeat / approval decision
 | Composition root, recovery, backup | `harness/app.py` |
 | Model client + scripted test model | `harness/model.py` |
 | Agent loop | `harness/runtime.py` |
+| Sequential sub-agents | `harness/subagents.py` |
 | Context builder | `harness/context.py` |
 | Messages, events, domains, tasks | `harness/store.py` |
 | Memory + artifacts | `harness/memory.py` |
@@ -416,8 +424,9 @@ reconciliation rather than blindly retried.
 
 Built-in tools (all low-risk unless noted): `remember`, `update_memory`,
 `retract_memory`, `search_knowledge`, `read_artifact`,
-`update_task_notes`, `use_domain`, `create_domain` (confirm-risk), and
-`propose_skill` (confirm-risk; saves a draft only after approval).
+`update_task_notes`, `use_domain`, `delegate_task`, `create_domain`
+(confirm-risk), and `propose_skill` (confirm-risk; saves a draft only after
+approval).
 
 There is no shell, command, or code-execution tool, and the registry
 refuses to register any tool whose name starts with bash/sh/exec/run/
@@ -504,6 +513,28 @@ it was configured low or auto-approved. A module must opt into
 `read_only` explicitly; unknown provenance is treated as side-effecting.
 The Phase 7 guard can add friction on top of this policy, never remove it.
 
+**Sub-agents.** `delegate_task(goal, context?, expected_output?)` creates a
+child task with `tasks.role='subagent'`, `tasks.parent_task_id`, and
+`tasks.parent_run_id`; the child run records `runs.parent_run_id`. The child
+gets its own system prompt built from the goal, the parent-supplied context,
+and domain memories — never the parent transcript. Child messages are stored
+but hidden from the ordinary chat view, and the child tree appears in the
+parent's task detail.
+
+The child toolset is low-risk only: `delegate_task`, `create_domain`, and
+every confirm-risk tool are excluded from its schema snapshot and refused by
+name. If the child needs an approval-gated action, asks a question, or hits
+a budget, its result is `blocked`, the child is closed, and the parent
+continues normally. The child result is written to
+`artifacts/subagents/<task_id>.md` and returned in the parent's tool result.
+Re-delegating the same normalized goal reuses the existing child by
+`origin_ref = parent_task_id:goal_hash` instead of spawning duplicates.
+Crash recovery is the normal one: an in-flight delegation becomes `unknown`
+for the parent and is never retried blindly.
+
+Depth is one; parallel children are deliberately deferred. Budgets live
+under `subagents.*` and are recorded on the child task's meta.
+
 **Skills.** Set `tools.skills_dir` to a folder of `<name>/SKILL.md` files
 with optional front matter (`name`, `description`, `preconditions`,
 `domains`). Imported skills are `kind=skill` module rows; the directory is
@@ -577,6 +608,9 @@ Main groups:
   budget, default MCP risk, lazy startup
 - `skills.*`: enabled, auto-draft, successful-task threshold, daily draft
   cap, maximum body characters
+- `subagents.*`: enabled, max depth, children per run, child iteration/
+  tool-call/seconds budgets, result size, and the reserved
+  `allow_confirm_risk` flag (always false in v1: children stay low-risk)
 - `web.*`: enabled, `searxng_url`, `max_results`, `timeout_s`,
   `categories`, `safe_search`
 - `scheduler.*`: enabled, tick interval, missed policy and grace,
@@ -600,7 +634,8 @@ Everything important is inspectable without exposing chain-of-thought:
 
 - `event_log` rows for routing, tasks, runs, model calls, tool outcomes,
   approvals, schedules, heartbeat actions, module load/reload/health,
-  trust taint/escalation, recovery, consolidation
+  trust taint/escalation, sub-agent started/completed/blocked/reused,
+  recovery, consolidation
 - `tool_executions` rows: status (including `unknown`), arguments,
   bounded results, errors, approval links, durations
 - `runs` rows: status, decision ("why it stopped"), iterations, tool-call
@@ -621,7 +656,8 @@ python -m pytest tests -m live -o addopts="" # real-endpoint integration tests
 
 The deterministic suite covers the required categories: core runtime,
 unified history, domains/resumption, context/memory, scheduling/heartbeat,
-approvals/permissions, recovery/deployment, memory lifetime/archive, plus the
+approvals/permissions, recovery/deployment, memory lifetime/archive,
+sequential sub-agents, plus the
 ten end-to-end acceptance scenarios (preference recall, interrupted multi-step resume,
 scheduled approval pause/resume, heartbeat-initiated work, old-history
 grounding, web+CLI shared state, inspectable failures, traceable
@@ -648,6 +684,9 @@ marked `live` and were run against the reachable endpoint
   latency per call. Discovery is cached; calls still launch one process.
 - Web search covers SearXNG results only. `web_fetch`/browsing is deferred
   because it adds SSRF and injection surface.
+- Sub-agents are sequential and depth-one. Parallel children would require
+  per-run locks, a worker pool, and concurrent approval semantics, so they
+  are deferred until sequential delegation is measured to be too slow.
 - The harness and SearXNG both default to port 8080; use a different
   `HARNESS_PORT` (or `server.port`) when they share a host.
 - The waiting-for-user marker is an instructed convention; if a model

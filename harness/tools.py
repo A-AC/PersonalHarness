@@ -29,6 +29,10 @@ from .store import Domains, Events, Messages, Tasks
 RISK_LOW = "low"
 RISK_CONFIRM = "confirm"
 
+# Sub-agents may only use low-risk tools and may never delegate again or create
+# domains. Progress is reported to the parent as a normal tool result.
+SUBAGENT_BLOCKED_NAMES = frozenset({"delegate_task", "create_domain"})
+
 # No tool with one of these name patterns can ever be registered.
 _BANNED = re.compile(
     r"^(bash|sh|shell|cmd|command|exec|execute|run|powershell|pwsh|python|"
@@ -78,6 +82,8 @@ class ToolContext:
     tasks: Tasks | None = None
     messages: Messages | None = None
     skills: Any = None
+    subagents: Any = None
+    role: str = "user"
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +194,28 @@ class ToolRegistry:
             self._tools.pop(name, None)
         return names
 
+    @staticmethod
+    def role_restriction(spec: ToolSpec, role: str | None) -> str | None:
+        """Why this tool is unavailable to a sub-agent, or ``None``.
+
+        The schema snapshot already hides these tools; this second check makes
+        a call by name fail closed instead of bypassing the child's reduced
+        toolset.
+        """
+        if (role or "user") != "subagent":
+            return None
+        if spec.name in SUBAGENT_BLOCKED_NAMES:
+            return f"tool '{spec.name}' is unavailable to sub-agents"
+        if spec.risk != RISK_LOW:
+            return (
+                f"tool '{spec.name}' is confirmation-gated and unavailable "
+                "to sub-agents; report blocked instead"
+            )
+        return None
+
     def resolve(
-        self, name: str, *, allowed: set[str] | frozenset[str] | None = None
+        self, name: str, *, allowed: set[str] | frozenset[str] | None = None,
+        role: str | None = None,
     ) -> ToolSpec:
         spec = self._tools.get(name)
         if spec is None:
@@ -205,6 +231,9 @@ class ToolRegistry:
             raise ToolDenied(
                 f"tool '{name}' is not available in this run"
             )
+        restriction = self.role_restriction(spec, role)
+        if restriction is not None:
+            raise ToolDenied(restriction)
         return spec
 
     def names(self) -> list[str]:
@@ -239,6 +268,8 @@ class ToolRegistry:
         *,
         budget_tokens: int | None = None,
         eligible_modules: set[str] | frozenset[str] | None = None,
+        role: str = "user",
+        exclude_names: set[str] | frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Select this run's tool schemas under a token budget.
 
@@ -254,7 +285,29 @@ class ToolRegistry:
         budget = max(0, int(budget_tokens or 0))
         entries = []
         exclusions: list[dict[str, Any]] = []
+        excluded = set(exclude_names or ())
         for index, spec in enumerate(self._tools.values()):
+            if spec.name in excluded:
+                exclusions.append({
+                    "tool": spec.name,
+                    "module": spec.module,
+                    "risk": spec.risk,
+                    "tokens": 0,
+                    "reason": "disabled",
+                    "detail": "disabled by configuration for this run",
+                })
+                continue
+            restriction = self.role_restriction(spec, role)
+            if restriction is not None:
+                exclusions.append({
+                    "tool": spec.name,
+                    "module": spec.module,
+                    "risk": spec.risk,
+                    "tokens": 0,
+                    "reason": "subagent_restricted",
+                    "detail": restriction,
+                })
+                continue
             if (
                 eligible_modules is not None
                 and spec.module != "builtin"
@@ -315,6 +368,7 @@ class ToolRegistry:
         exclusions.sort(key=lambda item: (item["tool"], item["reason"]))
         return {
             "domain_id": domain_id,
+            "role": role,
             "schemas": [entry["schema"] for entry in kept],
             "names": [entry["spec"].name for entry in kept],
             "modules": sorted({entry["spec"].module for entry in kept}),
@@ -356,9 +410,10 @@ class ToolRegistry:
     def validate(
         self, call: ToolCall, *,
         allowed: set[str] | frozenset[str] | None = None,
+        role: str | None = None,
     ) -> dict[str, Any]:
         """Public validation used by the runtime before creating approvals."""
-        spec = self.resolve(call.name, allowed=allowed)
+        spec = self.resolve(call.name, allowed=allowed, role=role)
         return validate_arguments(spec, call.arguments)
 
     def record_rejected(
@@ -389,6 +444,7 @@ class ToolRegistry:
         execution_id: str | None = None,
         approval_id: str | None = None,
         allowed_names: set[str] | frozenset[str] | None = None,
+        role: str | None = None,
     ) -> dict[str, Any]:
         """Validate + dispatch + record. Never raises for tool-level problems;
         those are captured as status='failed'/'denied'. When ``execution_id``
@@ -399,7 +455,9 @@ class ToolRegistry:
         started_monotonic = time.monotonic()
         execution_id = execution_id or util.new_id("ex")
         try:
-            spec = self.resolve(call.name, allowed=allowed_names)
+            spec = self.resolve(
+                call.name, allowed=allowed_names, role=role
+            )
             arguments = validate_arguments(spec, call.arguments)
         except (ToolError, ToolDenied) as exc:
             self._record(
@@ -696,6 +754,38 @@ class ToolRegistry:
             handler=self._tool_use_domain,
         ))
         self.register(ToolSpec(
+            name="delegate_task",
+            description=(
+                "Delegate one bounded sub-problem to a sequential sub-agent "
+                "and receive its result. Use for self-contained research, "
+                "summarisation, or drafting work where the parent does not "
+                "need to see every step. The child cannot ask the user, "
+                "create domains, or perform approval-gated actions; it "
+                "returns blocked instead. Do not delegate the whole task."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "One concrete, self-contained goal.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Background the child needs. The "
+                            "parent transcript is never shared.",
+                    },
+                    "expected_output": {
+                        "type": "string",
+                        "description": "Shape/length of the result wanted.",
+                    },
+                },
+                "required": ["goal"],
+            },
+            risk=RISK_LOW,
+            handler=self._tool_delegate_task,
+        ))
+        self.register(ToolSpec(
             name="propose_skill",
             description=(
                 "Propose a reusable procedural skill for the user to review. "
@@ -874,6 +964,12 @@ class ToolRegistry:
             "previous_domain_id": previous_domain,
             "reason": args.get("reason") or "",
         }
+
+    def _tool_delegate_task(
+        self, ctx: ToolContext, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        assert ctx.subagents is not None
+        return ctx.subagents.delegate(ctx, args)
 
     def _tool_propose_skill(
         self, ctx: ToolContext, args: dict[str, Any]
