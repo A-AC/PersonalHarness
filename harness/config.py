@@ -94,7 +94,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "modules": {
         # Capability records (skills, MCP, web) share one registry. MCP and
-        # web are authoritative in Phase 1; skills follow in Phase 2.
+        # web register tools; skills contribute disclosure text only.
         "enabled": True,
         "dir": "modules",              # relative to the data dir
         "health_interval_s": 300.0,
@@ -105,6 +105,15 @@ DEFAULTS: dict[str, Any] = {
         # Register a lazy module from cached discovery; discover once when
         # there is no cache yet so a fresh install is immediately usable.
         "lazy_start": True,
+    },
+    "skills": {
+        # Imported and drafted skills are instruction text only. Drafts never
+        # activate automatically; approval creates status=draft.
+        "enabled": True,
+        "auto_draft": True,
+        "draft_after_successful_tasks": 5,
+        "max_drafts_per_day": 2,
+        "max_body_chars": 6000,
     },
     "web": {
         # The shipped web module is a stdio MCP server using SearXNG's JSON
@@ -185,7 +194,8 @@ ENV_OVERRIDES = {
 # Keys a user may edit through the UI/CLI without a restart hazard.
 EDITABLE_KEYS = {
     "persona", "limits", "context", "domains", "memory", "tools",
-    "modules", "web", "scheduler", "consolidation", "approvals", "timezone",
+    "modules", "skills", "web", "scheduler", "consolidation", "approvals",
+    "timezone",
 }
 
 

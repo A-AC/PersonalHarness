@@ -1,7 +1,7 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phase 1 complete)
-Last updated: 2026-11-09
+Status: in progress (Phase 2 complete)
+Last updated: 2026-11-10
 Scope: capability modules (skills + MCP + web), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture.
 
@@ -68,9 +68,9 @@ These come from the existing design and must survive every phase.
 | `harness/app.py` | Composition root; `mcp.load()` at construction | Replace with `modules.load_all()` |
 | `harness/runtime.py` | One `RLock`-serialized loop; `self.tools.schemas()` per turn | Add per-run capability snapshot + schema budget |
 | `harness/tools.py` | Flat `ToolRegistry`, builtins + MCP; `McpServer` launches per call | Add module metadata, side-effect/trust flags, visibility enforcement |
-| `harness/context.py` | Fixed sections; `_skills_block` reads a directory | Replace with registry-driven skill disclosure |
+| `harness/context.py` | Fixed sections; skills read from a directory | Registry-driven skill disclosure (complete) |
 | `harness/memory.py` | FTS5, scopes, revisions, `expires_at`, retraction | Add usage counters, `archived_at`, archive/restore |
-| `harness/scheduler.py` | Deterministic heartbeat; idempotent occurrences | Add memory sweep, inbox triage, skill draft pass |
+| `harness/scheduler.py` | Deterministic heartbeat; idempotent occurrences | Add memory sweep, inbox triage, skill draft pass (skill pass complete) |
 | `harness/db.py` | `SCHEMA_VERSION = 3`; additive `_migrate_to` | Add v4..v7 migrations, one per phase |
 | `harness/server.py` | Monolithic `/api/state`; thin endpoints | Add module/inbox/guard endpoints; split state later |
 | `harness/web/` | Static `index.html`, `app.js`, `style.css` behind auth | Add panels incrementally in Phase 6 |
@@ -400,6 +400,8 @@ content without approval.
 ---
 
 ### Phase 2 - Skill modules and self-building skills
+
+**Status:** complete (2026-11-10).
 
 **Goal:** skills are modules with domain/adaptive scoping, and the agent can
 propose new skills as reviewable drafts.
@@ -882,6 +884,12 @@ UI) and update this plan. Do not mix phases.
 | 2026-11-09 | The web module starts lazily and reuses cached discovery | Avoids launching a subprocess for every app construction while still refreshing on demand |
 | 2026-11-09 | Taint escalation applies to any side-effecting, non-read-only tool, not only MCP tools | Phase 1 already exposes external content; the rule must hold for every future side-effecting capability |
 | 2026-11-09 | Approval reasons name the first recorded untrusted origin (URL, source, or tool) | The user needs the source in the prompt to authorize with context |
+| 2026-11-10 | Keep schema version 3; skill drafts reuse module rows | Phase 2 needs no new tables, and one record shape keeps the UI/API uniform |
+| 2026-11-10 | Imported skills map to `global`, `domain`, or `adaptive` from front matter | The scope is the disclosure rule; domains bind, preconditions match |
+| 2026-11-10 | Re-proposing a skill name revises the same row and writes a new version | Prevents near-duplicate rows and makes rollback a property of one skill |
+| 2026-11-10 | `version_history` stores rollback snapshots; `revisions` is a bounded audit list | Rollback needs full prior state, while the audit trail stays small |
+| 2026-11-10 | Auto-draft consumes each completed run once via `schema_meta` | A failed or empty pass must not retry the same batch forever |
+| 2026-11-10 | A tainted run is refused for skill proposals and marked seen | Skills must never encode text derived from untrusted content |
 
 ---
 

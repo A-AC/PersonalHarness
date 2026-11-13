@@ -21,23 +21,6 @@ from .model import ASK_USER_TAG
 from .store import Domains, Messages, Tasks
 
 
-def _read_simple_front_matter(text: str) -> tuple[dict[str, str], str]:
-    """Parse a minimal YAML-ish front matter block from a skill file."""
-    if not text.startswith("---"):
-        return {}, text
-    lines = text.splitlines()
-    try:
-        end = lines[1:].index("---") + 1
-    except ValueError:
-        return {}, text
-    meta: dict[str, str] = {}
-    for line in lines[1:end]:
-        if ":" in line:
-            key, _, value = line.partition(":")
-            meta[key.strip()] = value.strip()
-    return meta, "\n".join(lines[end + 1 :]).strip()
-
-
 class ContextBuilder:
     def __init__(
         self,
@@ -47,6 +30,7 @@ class ContextBuilder:
         messages: Messages,
         memory,
         artifacts_dir: Path,
+        modules=None,
     ):
         self.config = config
         self.domains = domains
@@ -54,6 +38,7 @@ class ContextBuilder:
         self.messages = messages
         self.memory = memory
         self.artifacts_dir = artifacts_dir
+        self.modules = modules
 
     # -- public ------------------------------------------------------------
 
@@ -84,7 +69,10 @@ class ContextBuilder:
         sections.append(
             ("history", self._history_block(task, objective, sources), 2)
         )
-        sections.append(("skills", self._skills_block(objective, sources), 3)
+        sections.append(
+            ("skills", self._skills_block(
+                task.get("domain_id"), objective, sources
+            ), 3)
         )
 
         total_budget = self._total_budget_chars()
@@ -372,47 +360,21 @@ class ContextBuilder:
         return "\n".join(lines)
 
     def _skills_block(
-        self, objective: str, sources: list[dict[str, Any]]
+        self,
+        domain_id: str | None,
+        objective: str,
+        sources: list[dict[str, Any]],
     ) -> str:
-        skills_dir_text = str(self.config.get("tools.skills_dir", "") or "")
-        if not skills_dir_text:
+        """Disclose active skills through the registry, not the directory.
+
+        The directory remains an import source only. Domain-bound skills need
+        an enabled binding; adaptive skills need matching preconditions; global
+        skills are always disclosed. Every exclusion is recorded with a reason.
+        """
+        if self.modules is None:
             return ""
-        path = Path(skills_dir_text)
-        if not path.is_absolute():
-            path = self.artifacts_dir.parent / path
-        if not path.is_dir():
-            return ""
-        words = set(util.keywords(objective))
-        blocks: list[str] = []
-        for skill_dir in sorted(path.iterdir()):
-            skill_file = skill_dir / "SKILL.md"
-            if not skill_file.is_file():
-                continue
-            try:
-                text = skill_file.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            meta, body = _read_simple_front_matter(text)
-            preconditions = [
-                token for token in (meta.get("preconditions") or "").split(",")
-                if token.strip()
-            ]
-            if preconditions and not any(
-                token.strip().lower() in words for token in preconditions
-            ):
-                sources.append({
-                    "section": "skills", "ref": f"skill:{skill_dir.name}",
-                    "reason": "not applicable: preconditions not in objective",
-                })
-                continue
-            blocks.append(
-                f"## Skill: {meta.get('name', skill_dir.name)}\n"
-                f"{util.clip(body, 1500)}"
-            )
-            sources.append({
-                "section": "skills", "ref": f"skill:{skill_dir.name}",
-                "reason": "skill preconditions matched the objective",
-            })
-        if not blocks:
-            return ""
-        return "# Applicable skills (instructions; effects still require tools and permissions)\n" + "\n".join(blocks)
+        text, skill_sources = self.modules.skills.disclose(
+            domain_id, objective
+        )
+        sources.extend(skill_sources)
+        return text

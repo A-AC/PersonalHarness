@@ -77,6 +77,7 @@ class ToolContext:
     domains: Domains | None = None
     tasks: Tasks | None = None
     messages: Messages | None = None
+    skills: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +690,48 @@ class ToolRegistry:
             risk=RISK_LOW,
             handler=self._tool_use_domain,
         ))
+        self.register(ToolSpec(
+            name="propose_skill",
+            description=(
+                "Propose a reusable procedural skill for the user to review. "
+                "A skill is instruction text only: no code, handlers, or tool "
+                "schemas. The proposal becomes a draft only after explicit "
+                "approval, and drafts are never activated automatically."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short reusable procedure name.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One line describing when it applies.",
+                    },
+                    "preconditions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Short keywords that indicate when "
+                            "the skill applies.",
+                    },
+                    "domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Existing domain ids to bind to; [] "
+                            "means a global/adaptive skill.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Instructions only, bounded by "
+                            "skills.max_body_chars.",
+                    },
+                },
+                "required": ["name", "description", "body"],
+            },
+            risk=RISK_CONFIRM,
+            handler=self._tool_propose_skill,
+        ))
 
     # handlers -------------------------------------------------------------
 
@@ -813,6 +856,34 @@ class ToolRegistry:
             "name": domain["name"],
             "previous_domain_id": previous_domain,
             "reason": args.get("reason") or "",
+        }
+
+    def _tool_propose_skill(
+        self, ctx: ToolContext, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        assert ctx.skills is not None
+        module = ctx.skills.create_draft(
+            name=args["name"],
+            description=args["description"],
+            preconditions=args.get("preconditions"),
+            domains=args.get("domains"),
+            body=args["body"],
+            origin="agent",
+            provenance={
+                "source": "model",
+                "run_id": ctx.run_id,
+                "task_id": ctx.task_id,
+            },
+            created_by="model",
+            reason="proposed by the model and approved by the user",
+        )
+        return {
+            "skill_id": module.id,
+            "name": module.name,
+            "version": module.version,
+            "status": module.status,
+            "scope": module.scope,
+            "note": "saved as a draft; activate it explicitly when ready",
         }
 
 

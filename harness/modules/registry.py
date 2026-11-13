@@ -1,9 +1,9 @@
 """Module registry: persistence, eligibility, and the loader seam.
 
-MCP and web modules are authoritative in Phase 1: ``load_all`` imports the
-legacy servers file, creates the shipped web module, discovers tools, caches
-them in ``module_tools``, and registers callable specs. Skills still load
-through their directory until Phase 2.
+``load_all`` imports the legacy MCP servers file, creates the shipped web
+module, discovers/caches tools, registers callable specs, and imports
+``SKILL.md`` skills into ``kind=skill`` rows. Skills contribute disclosure
+text only; they never register tools.
 
 The registry is also the single place that answers "which modules are active
 for this domain?", so the runtime never re-implements binding rules.
@@ -40,6 +40,7 @@ class ModuleRegistry:
         # Keep the tool registry off the ``tools()`` read method's name.
         self.tool_registry = tools
         self._loader = None
+        self._skills = None
 
     # -- loading ----------------------------------------------------------
 
@@ -54,19 +55,58 @@ class ModuleRegistry:
         return self._loader
 
     @property
+    def skills(self):
+        """The skill manager, constructed lazily to avoid a cycle."""
+        if self._skills is None:
+            from .skills import SkillManager
+
+            self._skills = SkillManager(self)
+        return self._skills
+
+    @property
     def status(self) -> dict[str, str]:
         """Per-module human status for diagnostics (``/api/tools``)."""
         return self.loader.status
 
     def load_all(self) -> dict[str, Any]:
         """Import, discover, and register every eligible capability module."""
-        return self.loader.load_all()
+        report = self.loader.load_all()
+        try:
+            imported = self.skills.import_configured()
+        except Exception as exc:  # a broken skill never blocks startup
+            imported = []
+            report.setdefault("errors", []).append({
+                "kind": "skill",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        if imported:
+            report.setdefault("skills_imported", []).extend(imported)
+        return report
 
     def reload(self, module_id: str | None = None) -> dict[str, Any]:
         """Reload one module or all modules without a process restart."""
-        return self.loader.reload(module_id)
+        if module_id:
+            module = self.get(module_id)
+            if module is not None and module.kind == "skill":
+                return self.skills.reload(module_id)
+            return self.loader.reload(module_id)
+        report = self.loader.reload(None)
+        try:
+            imported = self.skills.import_configured()
+        except Exception as exc:
+            imported = []
+            report.setdefault("errors", []).append({
+                "kind": "skill",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        if imported:
+            report.setdefault("skills_imported", []).extend(imported)
+        return report
 
     def set_enabled(self, module_id: str, enabled: bool) -> Module:
+        module = self.get(module_id)
+        if module is not None and module.kind == "skill":
+            return self.skills.set_enabled(module_id, enabled)
         return self.loader.set_enabled(module_id, enabled)
 
     def health_tick(self, now=None) -> dict[str, Any]:

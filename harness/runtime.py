@@ -1106,10 +1106,51 @@ class AgentRuntime:
                         ),
                     }
 
+        # propose_skill is approval-gated and deduped by skill name, so a
+        # model cannot queue the same draft proposal repeatedly.
+        if call.name == "propose_skill":
+            name = str((call.arguments or {}).get("name") or "").strip()
+            for approval in self.approvals.pending():
+                if approval.get("tool") != "propose_skill":
+                    continue
+                pending_name = str(
+                    (approval.get("arguments") or {}).get("name") or ""
+                ).strip().lower()
+                if name and pending_name == name.lower():
+                    return {
+                        "status": "denied",
+                        "error": (
+                            f"A propose_skill approval for '{name}' is "
+                            f"already pending (approval {approval['id']}). "
+                            "Wait for that decision; do not propose it again."
+                        ),
+                    }
+
         # Trust/taint policy: once this run has consumed untrusted content, a
         # side-effecting tool is escalated to confirm even when it is
         # configured low-risk or auto-approved. Read-only tools stay low.
         taint = self._taint_sources(run_id)
+        if call.name == "propose_skill" and taint:
+            origin = str(taint[0].get("origin") or "untrusted content")
+            self.events.record(
+                "skill.refused", level="warn", task_id=task_id, run_id=run_id,
+                source="runtime",
+                data={
+                    "reason": "untrusted provenance",
+                    "origin": util.clip(origin, 300),
+                    "name": str(
+                        (call.arguments or {}).get("name") or ""
+                    ).strip()[:120],
+                },
+            )
+            return {
+                "status": "denied",
+                "error": (
+                    "This run consumed untrusted content from "
+                    f"{util.clip(origin, 160)}, so it cannot propose a skill. "
+                    "Skills are built only from trusted work."
+                ),
+            }
         tainted_side_effect = bool(
             taint and spec.side_effects and not spec.read_only
         )
@@ -1141,6 +1182,23 @@ class AgentRuntime:
                 arguments = self.tools.validate(call, allowed=allowed)
             except Exception as exc:
                 return {"status": "denied", "error": str(exc)}
+            if call.name == "propose_skill":
+                skills = self.app.modules.skills
+                if not skills.enabled:
+                    return {
+                        "status": "denied",
+                        "error": "skills are disabled in configuration",
+                    }
+                try:
+                    arguments = skills.validate_fields(
+                        name=str(arguments.get("name") or ""),
+                        description=str(arguments.get("description") or ""),
+                        preconditions=arguments.get("preconditions"),
+                        domains=arguments.get("domains"),
+                        body=str(arguments.get("body") or ""),
+                    )
+                except ValueError as exc:
+                    return {"status": "denied", "error": str(exc)}
             action = "create_domain" if call.name == "create_domain" else "tool"
             reason = (
                 f"untrusted content from {taint_origin} requires approval "
@@ -1182,12 +1240,22 @@ class AgentRuntime:
                 "so a side-effecting action needs your explicit approval."
                 if tainted_side_effect else ""
             )
-            note = (
-                f"I want to run **{call.name}** with "
-                f"{util.clip(util.dumps(arguments), 400)}.{provenance} This "
-                "action needs your approval (reply approve/reject, or use the "
-                "Approvals panel)."
-            )
+            if call.name == "propose_skill":
+                note = (
+                    "I want to save a **draft skill**. Review the full "
+                    "bounded body below; approval writes a draft and never "
+                    "activates it.\n\n"
+                    f"{self._skill_proposal_detail(arguments)}\n\n"
+                    "Reply approve/reject, or use the Approvals panel."
+                    f"{provenance}"
+                )
+            else:
+                note = (
+                    f"I want to run **{call.name}** with "
+                    f"{util.clip(util.dumps(arguments), 400)}.{provenance} "
+                    "This action needs your approval (reply approve/reject, "
+                    "or use the Approvals panel)."
+                )
             self.messages.record(
                 "note", note, source="system", task_id=task_id, run_id=run_id,
                 domain_id=task.get("domain_id"),
@@ -1209,6 +1277,32 @@ class AgentRuntime:
                 self._taint_origin(outcome.get("result")),
             )
         return outcome
+
+    def _skill_proposal_detail(self, arguments: dict[str, Any]) -> str:
+        """Bounded, readable approval content for a ``propose_skill`` call."""
+        def listed(key: str) -> str:
+            value = arguments.get(key)
+            if isinstance(value, (list, tuple)):
+                items = [str(item).strip() for item in value if str(item).strip()]
+            elif value:
+                items = [str(value).strip()]
+            else:
+                items = []
+            return ", ".join(items) or "(none)"
+
+        name = util.clip(str(arguments.get("name") or "").strip(), 120)
+        description = util.clip(
+            str(arguments.get("description") or "").strip(), 500
+        )
+        limit = max(1, int(self.config.get("skills.max_body_chars", 6000)))
+        body = util.clip(str(arguments.get("body") or ""), limit)
+        return (
+            f"- name: {name or '(missing)'}\n"
+            f"- description: {description or '(none)'}\n"
+            f"- preconditions: {listed('preconditions')}\n"
+            f"- domains: {listed('domains')}\n\n"
+            f"Body (limit {limit} chars):\n{body}"
+        )
 
     def _append_tool_result(
         self, run_id: str, call_id: str, outcome: dict[str, Any],

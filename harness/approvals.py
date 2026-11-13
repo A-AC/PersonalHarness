@@ -335,13 +335,13 @@ class Approvals:
         if task_id:
             rows = self.db.query(
                 "SELECT * FROM approvals WHERE status='pending' AND task_id=?"
-                " ORDER BY created_at DESC",
+                " ORDER BY created_at DESC, rowid DESC",
                 (task_id,),
             )
         else:
             rows = self.db.query(
                 "SELECT * FROM approvals WHERE status='pending'"
-                " ORDER BY created_at DESC"
+                " ORDER BY created_at DESC, rowid DESC"
             )
         return [self.get(r["id"]) for r in rows]  # type: ignore[misc]
 
@@ -360,30 +360,44 @@ class Approvals:
         if action == "create_domain":
             name = arguments.get("name") or "a new domain"
             return f"create the domain '{name}'"
+        if approval.get("tool") == "propose_skill":
+            name = arguments.get("name") or "a new skill"
+            return f"save the draft skill '{name}'"
         detail = util.dumps(arguments)
         if len(detail) > 120:
             detail = detail[:117] + "…"
         return f"run {approval.get('tool')} with {detail}"
 
     def dedupe_pending(
-        self, actions: tuple[str, ...] = ("create_domain",)
+        self, actions: tuple[str, ...] = ("create_domain", "propose_skill")
     ) -> int:
         """Cancel duplicate pending approvals for the same action+arguments.
 
         Newest wins (``pending`` is ordered newest first) so the approval a
         user is most likely looking at stays actionable. Only the listed
         virtual actions are deduped by default; external tool approvals can
-        legitimately repeat with identical arguments.
+        legitimately repeat with identical arguments. ``propose_skill`` is
+        keyed by skill name because re-proposing a name revises one row.
         """
         seen: dict[tuple[str, str, str], str] = {}
         cancelled = 0
         for approval in self.pending():
             action = (approval.get("meta") or {}).get("action", "tool")
-            if action not in actions:
+            is_proposal = (
+                approval.get("tool") == "propose_skill"
+                and "propose_skill" in actions
+            )
+            if action not in actions and not is_proposal:
                 continue
-            key = (action, str(approval.get("tool")), util.dumps(
-                approval.get("arguments") or {}
-            ))
+            arguments = approval.get("arguments") or {}
+            if is_proposal:
+                key = (
+                    action,
+                    str(approval.get("tool")),
+                    str(arguments.get("name") or "").strip().lower(),
+                )
+            else:
+                key = (action, str(approval.get("tool")), util.dumps(arguments))
             keeper = seen.get(key)
             if keeper is None:
                 seen[key] = approval["id"]

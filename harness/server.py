@@ -514,22 +514,44 @@ class Server:
                     self.app.modules.reload, module_id
                 )
                 return _json({"module": result})
-            if action in ("enable", "disable"):
+            if module.kind == "skill" and action == "rollback":
                 updated = await run_in_threadpool(
-                    self.app.modules.set_enabled, module_id,
-                    action == "enable",
+                    self.app.modules.skills.rollback, module_id
                 )
                 return _json({
-                    "module": {
-                        "id": updated.id, "status": updated.status,
-                    },
-                    "health": self.app.modules.status.get(module_id, ""),
+                    "module": self.app.modules.skills.describe(updated),
                 })
+            if action in ("enable", "activate", "disable"):
+                enabled = action != "disable"
+                updated = await run_in_threadpool(
+                    self.app.modules.set_enabled, module_id, enabled,
+                )
+                payload = {
+                    "id": updated.id, "status": updated.status,
+                    "version": updated.version, "scope": updated.scope,
+                }
+                health = self.app.modules.status.get(module_id, "")
+                return _json({"module": payload, "health": health})
         except ValueError as exc:
             return _err(str(exc), 404)
         except Exception as exc:
             return _err(f"{type(exc).__name__}: {exc}", 500)
         return _err("invalid action")
+
+    async def skills_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json(await run_in_threadpool(self._skills_payload))
+
+    def _skills_payload(self) -> dict[str, Any]:
+        return {
+            "skills": self.app.modules.skills.list_skills(),
+            "enabled": bool(self.app.modules.skills.enabled),
+            "auto_draft": bool(
+                self.app.config.get("skills.auto_draft", True)
+            ),
+            "max_body_chars": self.app.modules.skills.max_body_chars(),
+        }
 
     async def tools_list(self, request: Request) -> Response:
         if not self._authorized(request):
@@ -642,6 +664,7 @@ class Server:
             Route("/api/modules/reload", self.modules_reload, methods=["POST"]),
             Route("/api/modules/{module_id}/{action}", self.module_action,
                   methods=["POST"]),
+            Route("/api/skills", self.skills_list, methods=["GET"]),
             Route("/api/tools", self.tools_list, methods=["GET"]),
             Route("/api/endpoint-probe", self.endpoint_probe, methods=["GET"]),
             Route("/api/config", self.config_get, methods=["GET"]),

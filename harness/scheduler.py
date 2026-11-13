@@ -477,6 +477,19 @@ class Scheduler:
             report["notified"] = self._notify_pending()
             # 8. Scheduled consolidation.
             self._maybe_consolidate(now)
+            # 8b. Bounded skill drafting from successful tool-using work.
+            #     One optional draft per batch; failures change no skill.
+            try:
+                report["skills"] = self.app.skill_builder.maybe_draft(now)
+            except Exception as exc:
+                report["skills"] = {
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                self.events.record(
+                    "skill.builder_error", level="error",
+                    data={"error": util.clip(str(exc), 500)},
+                )
             # 9. Occurrences left pending by a crash between record/submit.
             self._recover_pending_occurrences(now)
             self.db.meta_set("scheduler.last_tick", util.iso())

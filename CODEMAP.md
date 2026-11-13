@@ -17,24 +17,25 @@ tests under the `live` marker.
 | `harness/model.py` | `ModelClient` (OpenAI-compatible chat completions, native tool calls, Hermes fallback parsing, bounded retries, probe); `ScriptedModel` for tests |
 | `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + deterministic routing), `Tasks` (statuses, resume-candidate scoring) |
 | `harness/memory.py` | `MemoryManager`: capture with conflict supersession, scopes/kinds, revisions + provenance, FTS retrieval with scope priority and recency, expiry, merge, bounded artifact reads, artifact consistency checks |
-| `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules, state, memories, recent + retrieved history, precondition-gated skills), inclusion/exclusion sources |
-| `harness/tools.py` | `ToolRegistry` (builtin tools, JSON-schema-lite validation, risk classes, trust flags, banned-name refusal, execution records, budgeted per-run schema selection scoped by eligible modules), minimal MCP stdio JSON-RPC client |
-| `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired), expiry sweep, quick-confirm classification (keyword + tiny model call) |
+| `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules, state, memories, recent + retrieved history, registry-driven skill disclosure), inclusion/exclusion sources |
+| `harness/tools.py` | `ToolRegistry` (builtin tools including `propose_skill`, JSON-schema-lite validation, risk classes, trust flags, banned-name refusal, execution records, budgeted per-run schema selection scoped by eligible modules), minimal MCP stdio JSON-RPC client |
+| `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired), expiry sweep, name-keyed proposal dedupe, quick-confirm classification (keyword + tiny model call) |
 | `harness/runtime.py` | `AgentRuntime`: the single bounded loop; capability snapshots; trust/taint escalation; routing/resume entry point; approval/question/interrupt/limit pause and resume; transcript persistence |
-| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, module health refresh, heartbeat checks, scheduler thread |
+| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, module health refresh, heartbeat checks including the bounded skill builder, scheduler thread |
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract; applied via `MemoryManager` with revisions; markdown change log per run |
 | `harness/modules/types.py` | `Module`, `ModuleBinding`, `ModuleTool` value objects over the v3 tables |
-| `harness/modules/registry.py` | Module persistence, domain eligibility, and the loader seam (`load_all`, `reload`, `set_enabled`, `health_tick`) |
+| `harness/modules/registry.py` | Module persistence, domain eligibility, lazy skill manager, and the loader seam (`load_all`, `reload`, `set_enabled`, `health_tick`); skill imports and reloads route here |
 | `harness/modules/mcp.py` | Registry-backed MCP/web loader: legacy import, manifests, discovery cache, per-domain visibility, reload, health, trusted/untrusted flags |
+| `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions) and `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
 | `harness/modules/web/server.py` | Shipped web-search stdio MCP server over SearXNG JSON; bounded results, no `web_fetch` |
 | `harness/app.py` | `App` composition root, startup recovery, `ProcessLock` (single writer), backup/restore, graceful shutdown; `build_app` test helper |
-| `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; module list/reload/enable/disable endpoints; authenticated static UI assets |
+| `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; module list/reload/enable/disable endpoints, skill list/draft lifecycle endpoints; authenticated static UI assets |
 | `harness/web/` | Zero-build UI: `index.html`, `app.js`, `style.css` (served only through the authenticated handler) |
-| `harness/__main__.py` | CLI: `serve`, `endpoint-check`, `msg`, `status`, `tasks`, `approvals`, `schedules`, `memories`, `domains`, `consolidate`, `events`, `modules`, `tools`, `backup`, `restore`, `config` |
+| `harness/__main__.py` | CLI: `serve`, `endpoint-check`, `msg`, `status`, `tasks`, `approvals`, `schedules`, `memories`, `domains`, `consolidate`, `events`, `modules`, `skills`, `tools`, `backup`, `restore`, `config` |
 | `scripts/container_check.py` | Build + start the compose stack, verify health/auth/API/endpoint, tear down |
 | `examples/mcp/echo_server.py` | Dependency-free stdio MCP echo/add server (also the test fixture) |
 | `examples/mcp_servers.yaml` | MCP server manifest/import example (stdio, scope, tool filters) |
-| `examples/skills/weekly-review/SKILL.md` | Skill format example with preconditions |
+| `examples/skills/weekly-review/SKILL.md` | Adaptive skill format example with preconditions |
 
 ## Turn data flow
 
@@ -59,9 +60,11 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
          tool_calls? -> resolve inside snapshot (outside -> denied record)
                         validate args (all problems at once)
                         tainted run + side effects? -> confirm escalation
+                        tainted run + propose_skill? -> refused; no draft
                         confirm-risk? -> approval + awaiting execution row;
                                           run waiting_approval; visible note
-                                          (reason names untrusted origin)
+                                          (reason names untrusted origin;
+                                           propose_skill shows bounded body)
                         else           -> execute; record outcome; append
                                           observation to transcript
                                           untrusted output? -> taint run
@@ -78,8 +81,9 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks`, `runs`, `memories` (+FTS5), `memory_revisions`, `schedules`, `schedule_occurrences`, `approvals`, `tool_executions`, `modules`, `module_bindings`, `module_tools`, `schema_meta` |
 | `artifacts/memories/<id>.md` | Long memory notes referenced from rows |
 | `artifacts/consolidation/<run>.md` | Per-run change logs |
+| `artifacts/skills/<run>.md` | Skill builder prompt/report logs (bounded) |
 | `artifacts/domains/…` | Reserved for future domain notes |
-| `modules/skills/<id>/v<n>.md` | Versioned skill bodies owned by module rows (Phase 2; import source until then) |
+| `modules/skills/<id>/v<n>.md` | Versioned skill bodies owned by `kind=skill` module rows; directory imports are one source, rows are authoritative |
 | `modules/mcp/<id>.yaml` | Reserved export/backup mirror for MCP manifests (rows remain authoritative; not written yet) |
 | `backups/harness-<ts>.zip` | DB snapshot + config + artifacts |
 | `logs/harness.log` | Rotating structured log |
@@ -113,6 +117,7 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | `tests/test_approvals.py` | Exact action binding, quick confirm (keyword/model/ambiguous), rejection/cancellation/expiry/staleness, untrusted-output immunity, no shell tools, risk override validation |
 | `tests/test_recovery.py` | Restart preservation, interrupted-run resume without repeats, unknown outcomes, graceful shutdown, backup/restore round trip, writer lock, concurrent web+CLI with one scheduler |
 | `tests/test_modules_foundations.py` | UI shell/assets, registry loader, v3 schema migration, backup/restore of `modules/`, module API/toggle/reload, heartbeat health, tool-schema budget and run snapshots |
+| `tests/test_skills.py` | Front-matter import, global/domain/adaptive disclosure, proposal approval lifecycle, bounded validation, dedupe, taint refusal, builder batching/limits/failure, skills API |
 | `tests/test_tools_mcp.py` | Registry-backed MCP discovery/risk/round trip/bounded results/unavailable servers, domain scope and refusal, reload, schema budget priority, web search stub (bounded/untrusted/malformed), taint escalation with source provenance, skill disclosure |
 | `tests/test_scenarios.py` | The ten end-to-end acceptance scenarios |
 | `tests/test_live_endpoint.py` | Real-endpoint integration (marked `live`): models list, plain completion, native tool-call protocol, multi-step round trip, one full live turn |

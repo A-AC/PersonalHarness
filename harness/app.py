@@ -29,6 +29,7 @@ from .logging import get_logger, setup_logging
 from .memory import MemoryManager
 from .model import Model, ModelClient, ScriptedModel
 from .modules.registry import ModuleRegistry
+from .modules.skills import SkillBuilder
 from .runtime import AgentRuntime
 from .scheduler import Scheduler
 from .store import Domains, Events, Messages, Tasks
@@ -147,11 +148,12 @@ class App:
         self.approvals = Approvals(self.db, self.events, self.config, self.model)
         self.context = ContextBuilder(
             self.config, self.domains, self.tasks, self.messages,
-            self.memory, self.artifacts_dir,
+            self.memory, self.artifacts_dir, modules=self.modules,
         )
         self.runtime = AgentRuntime(self)
         self.scheduler = Scheduler(self)
         self.consolidation = Consolidation(self)
+        self.skill_builder = SkillBuilder(self)
         self._lock: ProcessLock | None = None
         self.domains.ensure_defaults()
 
@@ -555,7 +557,7 @@ class App:
         return ToolContext(
             run_id=run_id, task_id=task_id, domain_id=domain_id,
             memory=self.memory, domains=self.domains, tasks=self.tasks,
-            messages=self.messages,
+            messages=self.messages, skills=self.modules.skills,
         )
 
     # ------------------------------------------------------------------

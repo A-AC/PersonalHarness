@@ -395,7 +395,8 @@ reconciliation rather than blindly retried.
 
 Built-in tools (all low-risk unless noted): `remember`, `update_memory`,
 `retract_memory`, `search_knowledge`, `read_artifact`,
-`update_task_notes`, `use_domain`, and `create_domain` (confirm-risk).
+`update_task_notes`, `use_domain`, `create_domain` (confirm-risk), and
+`propose_skill` (confirm-risk; saves a draft only after approval).
 
 There is no shell, command, or code-execution tool, and the registry
 refuses to register any tool whose name starts with bash/sh/exec/run/
@@ -482,12 +483,44 @@ it was configured low or auto-approved. A module must opt into
 `read_only` explicitly; unknown provenance is treated as side-effecting.
 The Phase 7 guard can add friction on top of this policy, never remove it.
 
-**Skills.** Set `tools.skills_dir` to a folder of
-`<name>/SKILL.md` files with optional front matter (`name`, `description`,
-`preconditions`). A skill is instruction text only — it is disclosed in
-the context when the task objective matches its preconditions, and every
-action it describes still goes through the normal tools and permissions.
-Skills become registry rows in Phase 2.
+**Skills.** Set `tools.skills_dir` to a folder of `<name>/SKILL.md` files
+with optional front matter (`name`, `description`, `preconditions`,
+`domains`). Imported skills are `kind=skill` module rows; the directory is
+an import source, and an existing row is authoritative.
+
+A skill is instruction text only — it is disclosed in the context when it
+applies, and every action it describes still goes through the normal tools
+and permissions. Skills never register tools, schemas, or code.
+
+- `scope=global` is always disclosed.
+- `scope=domain` needs an enabled binding for the task's domain; matching
+  preconditions gate it further.
+- `scope=adaptive` is disclosed when its preconditions match the objective.
+- `status=draft` and `status=disabled` are never disclosed. Every exclusion
+  is recorded as a `skill:<id>` context source with a reason.
+
+Lifecycle is `draft -> active -> disabled`. Bodies are versioned under
+`modules/skills/<id>/v<n>.md`; every change appends a revision, and
+rollback restores the previous versioned body and lifecycle state.
+
+The model can call `propose_skill` (confirm-risk) with a name, description,
+preconditions, domains, and body. The approval shows the full body bounded
+by `skills.max_body_chars`; approval writes `status=draft` and never
+activates it. A run that consumed untrusted content cannot propose a skill
+(`skill.refused`). The heartbeat may also propose at most one draft after
+`skills.draft_after_successful_tasks` completed tool-using tasks, subject
+to `skills.max_drafts_per_day`; tainted runs are refused, and a failed pass
+changes no skill. Builder logs are written under `artifacts/skills/`.
+
+```bash
+python -m harness skills                    # status, scope, versions
+python -m harness skills --activate ID      # draft/disabled -> active
+python -m harness skills --disable ID
+python -m harness skills --rollback ID      # restore previous version
+```
+
+The same actions are available as `GET /api/skills` and
+`POST /api/modules/{id}/activate|disable|rollback|reload`.
 
 ## Configuration
 
@@ -520,6 +553,8 @@ Main groups:
   overrides
 - `modules.*`: enabled, module directory, health interval, tool-schema
   budget, default MCP risk, lazy startup
+- `skills.*`: enabled, auto-draft, successful-task threshold, daily draft
+  cap, maximum body characters
 - `web.*`: enabled, `searxng_url`, `max_results`, `timeout_s`,
   `categories`, `safe_search`
 - `scheduler.*`: enabled, tick interval, missed policy and grace,

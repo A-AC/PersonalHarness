@@ -282,6 +282,62 @@ def _module_action_path(module_id: str, action: str) -> str:
     return f"/api/modules/{quoted}/{action}"
 
 
+def cmd_skills(args: argparse.Namespace) -> None:
+    client = Client(_base_url(args), _token(args))
+    if args.activate:
+        out = client.call(
+            "POST", _module_action_path(args.activate, "activate"), {}
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.disable:
+        out = client.call(
+            "POST", _module_action_path(args.disable, "disable"), {}
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.rollback:
+        out = client.call(
+            "POST", _module_action_path(args.rollback, "rollback"), {}
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if args.reload is not None:
+        path = (
+            _module_action_path(args.reload, "reload")
+            if args.reload else "/api/modules/reload"
+        )
+        out = client.call("POST", path, {})
+        print(json.dumps(out, indent=2, default=str))
+        return
+    out = client.call("GET", "/api/skills")
+    for skill in out.get("skills", []):
+        flags = []
+        if skill.get("rollback_available"):
+            flags.append("rollback")
+        if skill.get("created_by"):
+            flags.append(f"by={skill['created_by']}")
+        suffix = f"  ({', '.join(flags)})" if flags else ""
+        print(
+            f"{skill['id']}  [{skill['status']}/{skill['scope']}] "
+            f"v{skill['version']}  {skill['name']}{suffix}"
+        )
+        if skill.get("description"):
+            print(f"    {skill['description']}")
+        preconditions = ", ".join(skill.get("preconditions") or []) or "-"
+        domains = ", ".join(skill.get("domains") or []) or "-"
+        print(
+            f"    preconditions={preconditions} domains={domains} "
+            f"chars={skill.get('body_chars', 0)}"
+        )
+    if not out.get("skills"):
+        print("(no skills)")
+    print(
+        f"enabled={out.get('enabled')} auto_draft={out.get('auto_draft')} "
+        f"max_body_chars={out.get('max_body_chars')}"
+    )
+
+
 def cmd_modules(args: argparse.Namespace) -> None:
     client = Client(_base_url(args), _token(args))
     if args.reload is not None:
@@ -453,6 +509,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--enable", metavar="ID", default=None)
     p.add_argument("--disable", metavar="ID", default=None)
     p.set_defaults(func=cmd_modules)
+
+    p = sub.add_parser("skills", help="list or manage skill drafts and versions")
+    common(p)
+    p.add_argument("--activate", metavar="ID", default=None)
+    p.add_argument("--disable", metavar="ID", default=None)
+    p.add_argument("--rollback", metavar="ID", default=None)
+    p.add_argument("--reload", nargs="?", const="", metavar="ID", default=None,
+                   help="reload one skill, or every module when ID is omitted")
+    p.set_defaults(func=cmd_skills)
 
     p = sub.add_parser("tools", help="list registered tools")
     common(p); p.set_defaults(func=cmd_tools)

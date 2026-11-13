@@ -391,7 +391,7 @@ def test_taint_escalates_side_effecting_tool_and_names_the_source(
 
 
 # ---------------------------------------------------------------------------
-# Skills (unchanged until Phase 2)
+# Skills (registry-backed disclosure)
 # ---------------------------------------------------------------------------
 
 def test_skills_disclosed_by_preconditions(make_app, tmp_path):
@@ -405,6 +405,7 @@ def test_skills_disclosed_by_preconditions(make_app, tmp_path):
         encoding="utf-8",
     )
     app.config.set("tools.skills_dir", str(skills_dir))
+    app.modules.reload()
     task = app.tasks.create(objective="let us do the weekly planning review",
                             origin="user")
     built = app.context.build(task=task, domain=None, trigger={"kind": "user"})
