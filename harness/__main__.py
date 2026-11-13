@@ -224,19 +224,57 @@ def cmd_schedules(args: argparse.Namespace) -> None:
 
 def cmd_memories(args: argparse.Namespace) -> None:
     client = Client(_base_url(args), _token(args))
+    action_id = (
+        args.archive or args.restore or args.pin or args.unpin
+    )
+    if action_id:
+        action = (
+            "archive" if args.archive else
+            "restore" if args.restore else
+            "pin" if args.pin else "unpin"
+        )
+        out = client.call(
+            "POST", f"/api/memories/{urllib.parse.quote(action_id, safe='')}"
+            f"/{action}", {}
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
     if args.search:
-        out = client.call("POST", "/api/memories/search", {"query": args.search})
+        body = {"query": args.search}
+        if args.include_archived:
+            body["include_archived"] = True
+        out = client.call("POST", "/api/memories/search", body)
         for item in out.get("results", []):
-            print(f"[{item['kind']}] ({item['scope']}) {item['content']}")
-            print(f"    id={item['id']} score={item.get('score')}")
+            label = " [archived]" if item.get("archived") else ""
+            print(f"[{item['kind']}] ({item['scope']}){label} "
+                  f"{item['content']}")
+            print(
+                f"    id={item['id']} score={item.get('score')} "
+                f"uses={item.get('access_count', 0)}"
+            )
         for item in out.get("history", []):
             print(f"[history {_local_time(item['ts'])[:10]}]"
                   f" {item['content'][:100]}")
         return
-    out = client.call("GET", "/api/memories")
+    status = "archived" if args.archived else ("any" if args.all else "active")
+    out = client.call("GET", f"/api/memories?status={status}")
     for item in out.get("memories", []):
-        print(f"[{item['kind']}] ({item['scope']}) rev{item['revision']} {item['content'][:100]}")
-        print(f"    id={item['id']} updated={item['updated_at']}")
+        flags = []
+        if item.get("archived"):
+            flags.append("archived")
+        if item.get("pinned"):
+            flags.append("pinned")
+        suffix = f"  ({', '.join(flags)})" if flags else ""
+        print(
+            f"[{item['kind']}] ({item['scope']}) rev{item['revision']} "
+            f"uses={item.get('access_count', 0)}{suffix} "
+            f"{item['content'][:100]}"
+        )
+        print(
+            f"    id={item['id']} updated={item['updated_at']}"
+            + (f" last_used={item['last_accessed_at']}"
+               if item.get("last_accessed_at") else "")
+        )
     problems = out.get("artifact_problems", [])
     if problems:
         print(f"artifact problems: {json.dumps(problems)}")
@@ -484,9 +522,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--action", nargs=2, metavar=("ID", "enable|disable|delete"))
     p.set_defaults(func=cmd_schedules)
 
-    p = sub.add_parser("memories", help="list or search memories")
+    p = sub.add_parser("memories", help="list, search, archive, or restore memories")
     common(p)
     p.add_argument("--search", default=None)
+    p.add_argument("--archived", action="store_true",
+                   help="list archived memories only")
+    p.add_argument("--all", action="store_true",
+                   help="list every status, including archived")
+    p.add_argument("--include-archived", action="store_true",
+                   help="include archived rows in a search (restores them)")
+    p.add_argument("--archive", metavar="ID", default=None)
+    p.add_argument("--restore", metavar="ID", default=None)
+    p.add_argument("--pin", metavar="ID", default=None)
+    p.add_argument("--unpin", metavar="ID", default=None)
     p.set_defaults(func=cmd_memories)
 
     p = sub.add_parser("domains", help="list domains")

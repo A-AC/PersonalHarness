@@ -522,7 +522,7 @@ class AgentRuntime:
         built = self.context.build(
             task=task, domain=self.domains.get(task["domain_id"])
             if task.get("domain_id") else None,
-            trigger=trigger, pending_approvals=pending,
+            trigger=trigger, pending_approvals=pending, run_id=run_id,
         )
         selection = self._select_tools(task.get("domain_id"))
         sources = list(built["sources"])

@@ -249,7 +249,7 @@ value in `data/config.yaml`.
 | `tasks [ID]` | List tasks, or show one task's runs, executions, context sources |
 | `approvals [approve/reject/cancel] [ID]` | List or decide pending approvals |
 | `schedules [--add JSON] [--action ID enable/disable/delete]` | Manage schedules |
-| `memories [--search Q]` | List or search memories; reports artifact problems |
+| `memories [--search Q] [--archived|--all] [--include-archived] [--archive ID] [--restore ID] [--pin ID] [--unpin ID]` | List, search, filter, or manage memory lifetime; reports usage counts and artifact problems |
 | `domains [--create NAME DESCRIPTION]` | List or explicitly create domains |
 | `consolidate` | Run one memory consolidation pass |
 | `events [-N]` | Recent event-log rows |
@@ -318,10 +318,30 @@ history in `memory_revisions`. Long notes live as markdown artifacts under
 `data/artifacts/memories/`, referenced from the row; the database is
 authoritative and missing artifacts are reported, not silently read.
 
+Memory lifetime is deterministic and model-free. Every memory tracks
+`access_count` and `last_accessed_at`; a memory is counted once per run when
+it is actually included in context or returned by `search_knowledge` (raw FTS
+candidate scans never count), with a durable per-run dedupe row in
+`memory_access`. The heartbeat sweeps on `memory.lifetime.sweep_interval_s`
+and archives rows whose age since `last_accessed_at` (falling back to
+`created_at`) exceeds `clamp(base_days * (1 + access_count) ** growth,
+min_days, max_days)`. Pinned rows and `protected_kinds` are never archived,
+and `temp`/`expires_at` expiry remains a separate state.
+
+Archiving sets `archived_at` rather than changing `status`, so the existing
+`CHECK` constraint and history stay intact. Archived rows are excluded from
+context and search by default. `search(..., include_archived=True)` (and the
+tool's `include_archived` argument) returns them with a score penalty, an
+`archived` label, and a reason; an explicit retrieval also restores the row
+and records the revision. The CLI (`--archived`, `--all`, `--archive`,
+`--restore`, `--pin`, `--unpin`), the API, and the web memory panel expose the
+same state and usage counts.
+
 The `search_knowledge` tool lets the model retrieve beyond the initial
 context — bounded results from memories and older messages, with
-provenance. The `read_artifact` tool reads bounded artifacts by path, with
-traversal blocked.
+provenance; `include_archived` opts into archived rows, which are labelled
+and restored by that explicit retrieval. The `read_artifact` tool reads
+bounded artifacts by path, with traversal blocked.
 
 ### Consolidation
 
@@ -371,8 +391,9 @@ ordinary runtime with the same tools, permissions, approvals, and context.
 The heartbeat (one scheduler thread in the server process, tick interval
 `scheduler.tick_interval_s`) submits due schedules, resumes interrupted
 runs (configurable), retries model-failure pauses with exponential backoff
-within a retry budget, sweeps expired approvals and temp memories, reminds
-once about pending approvals, and runs scheduled consolidation. Background
+within a retry budget, sweeps expired approvals, temp memories, and the
+deterministic memory-lifetime archive, reminds once about pending approvals,
+and runs scheduled consolidation. Background
 model work is bounded per tick (`scheduler.max_runs_per_tick`,
 `scheduler.max_retries_per_tick`). Permanent protocol failures wait for a
 human unless `scheduler.retry_permanent` is enabled, and no retry starts
@@ -548,7 +569,8 @@ Main groups:
   recent-message window, memory and history retrieval counts, per-section
   budgets
 - `domains.*`: routing threshold, ambiguity margins
-- `memory.*`: result limits, temp expiry
+- `memory.*`: result limits, temp expiry, and `memory.lifetime.*` (enabled,
+  base/growth/min/max days, protected kinds, sweep interval and batch)
 - `tools.*`: MCP servers import file, skills dir, default MCP risk, risk
   overrides
 - `modules.*`: enabled, module directory, health interval, tool-schema
@@ -584,6 +606,7 @@ Everything important is inspectable without exposing chain-of-thought:
 - `runs` rows: status, decision ("why it stopped"), iterations, tool-call
   count, context sources with reasons
 - `memory_revisions` rows: before/after, changed-by, reason
+- `memory_access` rows: which memory was disclosed to which run, and when
 - The CLI `events`, `tasks ID`, and `memories` commands and the web UI's
   panels read this state directly; the browser holds nothing of its own.
 
@@ -598,8 +621,8 @@ python -m pytest tests -m live -o addopts="" # real-endpoint integration tests
 
 The deterministic suite covers the required categories: core runtime,
 unified history, domains/resumption, context/memory, scheduling/heartbeat,
-approvals/permissions, recovery/deployment, plus the ten end-to-end
-acceptance scenarios (preference recall, interrupted multi-step resume,
+approvals/permissions, recovery/deployment, memory lifetime/archive, plus the
+ten end-to-end acceptance scenarios (preference recall, interrupted multi-step resume,
 scheduled approval pause/resume, heartbeat-initiated work, old-history
 grounding, web+CLI shared state, inspectable failures, traceable
 consolidation, no duplicate occurrences after restart, no indirect

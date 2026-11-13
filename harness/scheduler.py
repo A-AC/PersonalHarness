@@ -473,6 +473,18 @@ class Scheduler:
             # 6. Expiries.
             self.app.approvals.expire_stale()
             self.app.memory.expire_stale()
+            # 6b. Usage-based memory lifetime sweep, bounded per pass.
+            try:
+                report["memory"] = self._maybe_sweep_memory(now)
+            except Exception as exc:
+                report["memory"] = {
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                self.events.record(
+                    "memory.sweep_error", level="error",
+                    data={"error": util.clip(str(exc), 500)},
+                )
             # 7. One-time notifications for pending approvals and paused work.
             report["notified"] = self._notify_pending()
             # 8. Scheduled consolidation.
@@ -622,6 +634,26 @@ class Scheduler:
         if last and (now - util.parse_iso(last)).total_seconds() < interval:
             return
         self.app.consolidation.run(trigger="scheduled")
+
+    def _maybe_sweep_memory(self, now: dt.datetime) -> dict[str, Any]:
+        """Run the deterministic lifetime sweep at most once per interval.
+
+        Retention is a harness decision: no model call, no consolidation
+        dependency. Archived rows remain retrievable and restorable.
+        """
+        if not bool(self.config.get("memory.lifetime.enabled", True)):
+            return {"status": "disabled", "examined": 0, "archived": []}
+        interval = float(
+            self.config.get("memory.lifetime.sweep_interval_s", 3600) or 0
+        )
+        last = self.db.meta_get("memory.lifetime.last_sweep")
+        if interval > 0 and last:
+            age = (now - util.parse_iso(last)).total_seconds()
+            if age < interval:
+                return {"status": "skipped", "examined": 0, "archived": []}
+        report = self.app.memory.sweep_lifetime(now)
+        self.db.meta_set("memory.lifetime.last_sweep", util.iso(now))
+        return report
 
     # ------------------------------------------------------------------
     # Threaded operation (server process only)

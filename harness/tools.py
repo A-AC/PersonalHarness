@@ -610,6 +610,11 @@ class ToolRegistry:
                         "type": "string",
                         "description": "Search terms or a question.",
                     },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Also search archived memories. An "
+                            "archived hit is restored and labelled.",
+                    },
                 },
                 "required": ["query"],
             },
@@ -780,7 +785,15 @@ class ToolRegistry:
         priority = ["global"]
         if ctx.domain_id:
             priority.insert(0, f"domain:{ctx.domain_id}")
-        memories = ctx.memory.search(query, scope_priority=priority)
+        memories = ctx.memory.search(
+            query, scope_priority=priority,
+            include_archived=bool(args.get("include_archived")),
+        )
+        # Explicitly returned memories count as used; this is the one bump
+        # per run, deduped by the memory manager.
+        ctx.memory.record_access(
+            [m["id"] for m in memories], run_id=ctx.run_id
+        )
         history = ctx.messages.search(query, limit=int(
             self.config.get("context.history_results", 4)
         ), exclude_task=ctx.task_id)
@@ -790,6 +803,10 @@ class ToolRegistry:
                     "id": m["id"], "kind": m["kind"], "scope": m["scope"],
                     "content": util.clip(m["content"], 500),
                     "source": "memory",
+                    "archived": bool(m.get("archived")),
+                    "restored": bool(m.get("restored")),
+                    "access_count": m.get("access_count", 0),
+                    "last_accessed_at": m.get("last_accessed_at"),
                 }
                 for m in memories
             ],

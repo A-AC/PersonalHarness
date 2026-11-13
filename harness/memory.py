@@ -72,6 +72,13 @@ class MemoryManager:
         out["provenance"] = util.loads(row.get("provenance") or "{}", {})
         out["tags"] = util.loads(row.get("tags") or "[]", [])
         out["meta"] = util.loads(row.get("meta") or "{}", {})
+        # Lifetime fields are normalized for the API/UI (SQLite stores ints).
+        out["access_count"] = int(row.get("access_count") or 0)
+        out["last_accessed_at"] = row.get("last_accessed_at")
+        out["archived_at"] = row.get("archived_at")
+        out["archived"] = bool(row.get("archived_at"))
+        out["pinned"] = bool(row.get("pinned"))
+        out["importance"] = int(row.get("importance") or 0)
         return out
 
     def _default_kind(self, content: str, kind: str | None) -> str:
@@ -117,6 +124,237 @@ class MemoryManager:
                 util.dumps(self._to_public(after)),
             ),
         )
+
+    # -- access accounting + lifetime -------------------------------------
+
+    def record_access(
+        self, ids: list[str] | tuple[str, ...], run_id: str | None = None
+    ) -> dict[str, Any]:
+        """Bump usage counters for memories that were actually disclosed.
+
+        One bump per memory per run: repeated context builds, agent searches,
+        or UI searches inside the same run never inflate the count. The
+        ``memory_access`` row makes that durable across restarts. Raw FTS
+        candidate scans must never call this; only included results do.
+        """
+        memory_ids = [str(item) for item in (ids or []) if str(item).strip()]
+        if not memory_ids:
+            return {"updated": 0, "memory_ids": []}
+        # Preserve first-seen order while removing duplicates in one call.
+        ordered = list(dict.fromkeys(memory_ids))
+        # An ad-hoc access (API search, no run) still counts, but must not
+        # collide with a real run id in the dedupe index.
+        access_key = str(run_id) if run_id else f"adhoc:{util.new_id('acc')}"
+        ts = util.iso()
+        updated: list[str] = []
+        with self.db.transaction() as conn:
+            for memory_id in ordered:
+                row = conn.execute(
+                    "SELECT id FROM memories WHERE id=?", (memory_id,)
+                ).fetchone()
+                if row is None:
+                    continue
+                already = conn.execute(
+                    "SELECT 1 FROM memory_access WHERE memory_id=? AND"
+                    " run_id=?",
+                    (memory_id, access_key),
+                ).fetchone()
+                if already is not None:
+                    continue
+                conn.execute(
+                    "INSERT INTO memory_access(memory_id, run_id, accessed_at)"
+                    " VALUES (?,?,?)",
+                    (memory_id, access_key, ts),
+                )
+                conn.execute(
+                    "UPDATE memories SET access_count=access_count+1,"
+                    " last_accessed_at=? WHERE id=?",
+                    (ts, memory_id),
+                )
+                updated.append(memory_id)
+        if updated:
+            self.events.record(
+                "memory.accessed",
+                data={
+                    "memory_ids": updated[:20],
+                    "count": len(updated),
+                    "run_id": run_id,
+                },
+            )
+        return {"updated": len(updated), "memory_ids": updated}
+
+    def lifetime_days(self, access_count: int) -> float:
+        """Deterministic retention window for a usage count."""
+        base = float(self.config.get("memory.lifetime.base_days", 30))
+        growth = float(self.config.get("memory.lifetime.growth", 0.5))
+        minimum = float(self.config.get("memory.lifetime.min_days", 14))
+        maximum = float(self.config.get("memory.lifetime.max_days", 1095))
+        days = base * (1 + max(0, int(access_count))) ** max(0.0, growth)
+        return max(minimum, min(maximum, days))
+
+    def sweep_lifetime(self, now: dt.datetime | None = None) -> dict[str, Any]:
+        """Archive memories whose retention window has elapsed.
+
+        Deterministic and model-free: the anchor is ``last_accessed_at``
+        (falling back to ``created_at``) and the window grows with the access
+        count. Pinned rows and protected kinds are never archived. Bounded by
+        ``memory.lifetime.sweep_batch`` per pass.
+        """
+        report: dict[str, Any] = {
+            "status": "disabled", "examined": 0, "archived": [],
+        }
+        if not bool(self.config.get("memory.lifetime.enabled", True)):
+            return report
+        now = now or util.now_utc()
+        batch = max(1, int(self.config.get("memory.lifetime.sweep_batch", 200)))
+        protected = {
+            str(kind) for kind in (
+                self.config.get("memory.lifetime.protected_kinds", []) or []
+            )
+        }
+        clauses = [
+            "status='active'", "archived_at IS NULL",
+            "COALESCE(pinned, 0)=0",
+        ]
+        args: list[Any] = []
+        if protected:
+            placeholders = ",".join("?" for _ in protected)
+            clauses.append(f"kind NOT IN ({placeholders})")
+            args.extend(sorted(protected))
+        rows = rows_to_dicts(
+            self.db.query(
+                "SELECT * FROM memories WHERE " + " AND ".join(clauses)
+                + " ORDER BY COALESCE(last_accessed_at, created_at) ASC"
+                " LIMIT ?",
+                (*args, batch),
+            )
+        )
+        report["examined"] = len(rows)
+        report["status"] = "completed"
+        for row in rows:
+            anchor = util.parse_iso(
+                row.get("last_accessed_at") or row["created_at"]
+            )
+            age_days = (now - anchor).total_seconds() / 86400
+            allowed = self.lifetime_days(int(row.get("access_count") or 0))
+            if age_days <= allowed:
+                continue
+            archived = self.archive(
+                row["id"], changed_by="harness",
+                reason=(
+                    f"lifetime expired: unused for {age_days:.1f} days, "
+                    f"retention {allowed:.0f} days after "
+                    f"{int(row.get('access_count') or 0)} access(es)"
+                ),
+            )
+            report["archived"].append(archived["id"])
+        self.events.record(
+            "memory.swept",
+            data={
+                "examined": report["examined"],
+                "archived": len(report["archived"]),
+                "batch": batch,
+            },
+        )
+        return report
+
+    def archive(
+        self, memory_id: str, *, changed_by: str = "user",
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Archive an active memory. It stays retrievable on request."""
+        row = self._row(memory_id)
+        if row is None:
+            raise MemoryError(f"no such memory: {memory_id}")
+        if row.get("archived_at"):
+            return self._to_public(row)
+        if row["status"] != "active":
+            raise MemoryError(
+                f"memory {memory_id} is {row['status']}, not active"
+            )
+        after = dict(row)
+        ts = util.iso()
+        after["archived_at"] = ts
+        after["revision"] = int(row["revision"]) + 1
+        after["updated_at"] = ts
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE memories SET archived_at=?, revision=?, updated_at=?"
+                " WHERE id=?",
+                (after["archived_at"], after["revision"], ts, memory_id),
+            )
+        self._record_revision(
+            row, after, changed_by, reason or "archived"
+        )
+        self.events.record(
+            "memory.archived",
+            data={"memory_id": memory_id, "changed_by": changed_by,
+                  "reason": reason},
+        )
+        return self._to_public(self._row(memory_id))  # type: ignore[arg-type]
+
+    def restore(
+        self, memory_id: str, *, changed_by: str = "user",
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Restore an archived memory (explicit retrieval also calls this)."""
+        row = self._row(memory_id)
+        if row is None:
+            raise MemoryError(f"no such memory: {memory_id}")
+        if not row.get("archived_at"):
+            return self._to_public(row)
+        after = dict(row)
+        ts = util.iso()
+        after["archived_at"] = None
+        after["revision"] = int(row["revision"]) + 1
+        after["updated_at"] = ts
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE memories SET archived_at=NULL, revision=?,"
+                " updated_at=? WHERE id=?",
+                (after["revision"], ts, memory_id),
+            )
+        self._record_revision(
+            row, after, changed_by, reason or "restored"
+        )
+        self.events.record(
+            "memory.restored",
+            data={"memory_id": memory_id, "changed_by": changed_by,
+                  "reason": reason},
+        )
+        return self._to_public(self._row(memory_id))  # type: ignore[arg-type]
+
+    def set_pinned(
+        self, memory_id: str, pinned: bool, *, changed_by: str = "user",
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Pin (protect from lifetime sweeps) or unpin a memory."""
+        row = self._row(memory_id)
+        if row is None:
+            raise MemoryError(f"no such memory: {memory_id}")
+        wanted = 1 if pinned else 0
+        if int(row.get("pinned") or 0) == wanted:
+            return self._to_public(row)
+        after = dict(row)
+        ts = util.iso()
+        after["pinned"] = wanted
+        after["revision"] = int(row["revision"]) + 1
+        after["updated_at"] = ts
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE memories SET pinned=?, revision=?, updated_at=?"
+                " WHERE id=?",
+                (wanted, after["revision"], ts, memory_id),
+            )
+        self._record_revision(
+            row, after, changed_by,
+            reason or ("pinned" if pinned else "unpinned"),
+        )
+        self.events.record(
+            "memory.pinned" if pinned else "memory.unpinned",
+            data={"memory_id": memory_id, "changed_by": changed_by},
+        )
+        return self._to_public(self._row(memory_id))  # type: ignore[arg-type]
 
     # -- capture ----------------------------------------------------------
 
@@ -380,17 +618,28 @@ class MemoryManager:
         scope_priority: list[str] | None = None,
         limit: int | None = None,
         include_expired: bool = False,
+        include_archived: bool = False,
     ) -> list[dict[str, Any]]:
         """Explainable retrieval: FTS relevance + scope priority + recency.
 
-        Superseded, retracted, and expired rows never enter results. Every
-        result carries ``score_parts`` and a human-readable ``reason``.
+        Superseded, retracted, and expired rows never enter results. Archived
+        rows are excluded by default; with ``include_archived`` they return
+        with a score penalty and an ``archived`` label, and the returned rows
+        are restored (explicit retrieval) with an audit revision. Every result
+        carries ``score_parts`` and a human-readable ``reason``.
         """
         limit = limit or int(self.config.get("memory.max_results", 8))
         terms = [t for t in util.keywords(query)][:10]
         now = util.now_utc()
         scope_priority = scope_priority or []
         results: list[dict[str, Any]] = []
+
+        def usable(row: dict[str, Any]) -> bool:
+            if row["status"] != "active":
+                return False
+            if row.get("archived_at") and not include_archived:
+                return False
+            return not self._expired(row, now)
 
         if terms:
             match = " OR ".join(f'"{t}"' for t in terms)
@@ -404,9 +653,7 @@ class MemoryManager:
             except Exception:
                 rows = []
             for row in rows_to_dicts(rows):
-                if row["status"] != "active":
-                    continue
-                if self._expired(row, now):
+                if not usable(row):
                     continue
                 if not self._scope_visible(row, scope_priority):
                     continue
@@ -428,28 +675,52 @@ class MemoryManager:
                     self.db.query(
                         "SELECT * FROM memories WHERE scope=? AND status="
                         "'active' ORDER BY updated_at DESC LIMIT ?",
-                        (scope, 3),
+                        (scope, 6),
                     )
                 ):
-                    if row["id"] in known or self._expired(row, now):
+                    if row["id"] in known or not usable(row):
                         continue
                     known.add(row["id"])
                     results.append(self._scored(row, 0.4, {"scope": 0.4},
                                                 terms))
         results.sort(key=lambda r: r["score"], reverse=True)
-        return results[:limit]
+        final = results[:limit]
+        if include_archived:
+            for item in final:
+                if not item.get("archived") or not item.get("archived_at"):
+                    continue
+                self.restore(
+                    item["id"], changed_by="retrieval",
+                    reason="explicit retrieval with include_archived",
+                )
+                item["restored"] = True
+                item["restored_from_archive_at"] = item["archived_at"]
+                item["archived_at"] = None
+        return final
 
     def _scored(
         self, row: dict[str, Any], score: float, parts: dict[str, float],
         terms: list[str],
     ) -> dict[str, Any]:
         out = self._to_public(row)
+        archived = bool(row.get("archived_at"))
+        if archived:
+            # Archived rows are retrievable but never outrank live memory.
+            parts = {**parts, "archived": -0.75}
+            score += -0.75
         out["score"] = round(score, 3)
         out["score_parts"] = {k: round(v, 3) for k, v in parts.items()}
-        out["reason"] = (
+        reason = (
             f"lexical match on {', '.join(terms[:4]) or 'recency'}"
             f"; scope={row['scope']}"
         )
+        if archived:
+            reason += (
+                "; archived: included because archived memories were "
+                "requested, and restored by this explicit retrieval"
+            )
+        out["reason"] = reason
+        out["archived"] = archived
         return out
 
     def _expired(self, row: dict[str, Any], now: dt.datetime) -> bool:
@@ -481,16 +752,27 @@ class MemoryManager:
         self, scope: str | None = None, limit: int = 100,
         status: str | None = "active",
     ) -> list[dict[str, Any]]:
-        """List memories. ``status='any'`` (or ``None``) means every status."""
-        want_status = None if status in (None, "any") else status
+        """List memories by status.
+
+        ``status='active'`` (default) means live rows only; archived rows are
+        separate. ``status='archived'`` lists only archived rows.
+        ``status='any'`` (or ``None``) means every status, archived included.
+        """
         clauses: list[str] = []
         args: list[Any] = []
         if scope:
             clauses.append("scope=?")
             args.append(scope)
-        if want_status:
+        if status == "archived":
+            clauses.append("status='active'")
+            clauses.append("archived_at IS NOT NULL")
+        elif status in (None, "any"):
+            pass
+        else:
             clauses.append("status=?")
-            args.append(want_status)
+            args.append(status)
+            if status == "active":
+                clauses.append("archived_at IS NULL")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self.db.query(
             f"SELECT * FROM memories{where} ORDER BY updated_at DESC LIMIT ?",

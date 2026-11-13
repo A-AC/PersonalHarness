@@ -1,7 +1,7 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phase 2 complete)
-Last updated: 2026-11-10
+Status: in progress (Phase 3 complete)
+Last updated: 2026-11-13
 Scope: capability modules (skills + MCP + web), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture.
 
@@ -465,6 +465,8 @@ only the user can make it active.
 
 ### Phase 3 - Memory lifetime and archive
 
+**Status:** complete (2026-11-13).
+
 **Goal:** used memory survives; unused memory is archived; archived memory
 is still retrievable and explainable.
 
@@ -890,6 +892,9 @@ UI) and update this plan. Do not mix phases.
 | 2026-11-10 | `version_history` stores rollback snapshots; `revisions` is a bounded audit list | Rollback needs full prior state, while the audit trail stays small |
 | 2026-11-10 | Auto-draft consumes each completed run once via `schema_meta` | A failed or empty pass must not retry the same batch forever |
 | 2026-11-10 | A tainted run is refused for skill proposals and marked seen | Skills must never encode text derived from untrusted content |
+| 2026-11-13 | Per-run access dedupe is a durable `memory_access(memory_id, run_id)` row, not in-memory state | Restarts and repeated context builds must never inflate usage counts |
+| 2026-11-13 | `include_archived` restores every row it returns, with `changed_by=retrieval` | Explicit retrieval is the only un-archive path, and it must be auditable |
+| 2026-11-13 | The archive index is created after the additive v4 columns, not in the base schema | A v3 database must upgrade without the base script touching a missing column |
 
 ---
 

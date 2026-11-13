@@ -12,16 +12,16 @@ tests under the `live` marker.
 | --- | --- |
 | `harness/util.py` | UTC timestamps, ids, JSON helpers, keyword extraction, clipping |
 | `harness/config.py` | Defaults, YAML load/validate, env overrides, save; unknown keys fail fast |
-| `harness/db.py` | SQLite schema (WAL), FTS5 external-content tables + triggers, transactions, schema version, online backup |
+| `harness/db.py` | SQLite schema (WAL), FTS5 external-content tables + triggers, transactions, schema version (v4 memory lifetime), online backup |
 | `harness/logging.py` | Structured stdout + rotating file logs |
 | `harness/model.py` | `ModelClient` (OpenAI-compatible chat completions, native tool calls, Hermes fallback parsing, bounded retries, probe); `ScriptedModel` for tests |
 | `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + deterministic routing), `Tasks` (statuses, resume-candidate scoring) |
-| `harness/memory.py` | `MemoryManager`: capture with conflict supersession, scopes/kinds, revisions + provenance, FTS retrieval with scope priority and recency, expiry, merge, bounded artifact reads, artifact consistency checks |
+| `harness/memory.py` | `MemoryManager`: capture with conflict supersession, scopes/kinds, revisions + provenance, FTS retrieval with scope priority and recency, usage accounting with per-run dedupe, deterministic lifetime sweep, archive/restore/pin, expiry, merge, bounded artifact reads, artifact consistency checks |
 | `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules, state, memories, recent + retrieved history, registry-driven skill disclosure), inclusion/exclusion sources |
 | `harness/tools.py` | `ToolRegistry` (builtin tools including `propose_skill`, JSON-schema-lite validation, risk classes, trust flags, banned-name refusal, execution records, budgeted per-run schema selection scoped by eligible modules), minimal MCP stdio JSON-RPC client |
 | `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired), expiry sweep, name-keyed proposal dedupe, quick-confirm classification (keyword + tiny model call) |
 | `harness/runtime.py` | `AgentRuntime`: the single bounded loop; capability snapshots; trust/taint escalation; routing/resume entry point; approval/question/interrupt/limit pause and resume; transcript persistence |
-| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, module health refresh, heartbeat checks including the bounded skill builder, scheduler thread |
+| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, module health refresh, heartbeat checks including the bounded skill builder and memory-lifetime sweep, scheduler thread |
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract; applied via `MemoryManager` with revisions; markdown change log per run |
 | `harness/modules/types.py` | `Module`, `ModuleBinding`, `ModuleTool` value objects over the v3 tables |
 | `harness/modules/registry.py` | Module persistence, domain eligibility, lazy skill manager, and the loader seam (`load_all`, `reload`, `set_enabled`, `health_tick`); skill imports and reloads route here |
@@ -78,7 +78,7 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | Path under data dir | Contents |
 | --- | --- |
 | `config.yaml` | Materialized configuration (created with defaults) |
-| `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks`, `runs`, `memories` (+FTS5), `memory_revisions`, `schedules`, `schedule_occurrences`, `approvals`, `tool_executions`, `modules`, `module_bindings`, `module_tools`, `schema_meta` |
+| `harness.db` | Authoritative state: `messages` (+FTS5), `event_log`, `domains`, `tasks`, `runs`, `memories` (+FTS5, lifetime columns), `memory_revisions`, `memory_access`, `schedules`, `schedule_occurrences`, `approvals`, `tool_executions`, `modules`, `module_bindings`, `module_tools`, `schema_meta` |
 | `artifacts/memories/<id>.md` | Long memory notes referenced from rows |
 | `artifacts/consolidation/<run>.md` | Per-run change logs |
 | `artifacts/skills/<run>.md` | Skill builder prompt/report logs (bounded) |
@@ -112,6 +112,7 @@ web POST /api/message | CLI msg | schedule due | heartbeat | approval decision
 | `tests/test_unified_history.py` | Web+CLI shared runtime/state, scheduled prompts and heartbeat work in the same history, source metadata, maintenance not flooding chat, auth, schedules API |
 | `tests/test_domains_tasks.py` | Routing to existing domains, no domain per topic, no cross-domain leakage, restart resumption, ambiguity clarification, follow-up preference, domain creation via approval |
 | `tests/test_memory_context.py` | Explicit capture, old-memory recall, scopes, context sources, budgets, supersession/revisions, temp expiry, consolidation, artifact consistency |
+| `tests/test_memory_lifetime.py` | v4 migration, per-run access dedupe, deterministic sweep bounds, pin/protected kinds, archive retrieval/restore, `search_knowledge` include-archived, consolidation exclusion, heartbeat sweep bound, API usage and filters |
 | `tests/test_scheduler.py` | Due times + timezones, restart survival, missed-run policies, occurrence idempotency, approval pause/resume, heartbeat overlap/notify/retry |
 | `tests/test_time.py` | System-time default, local rendering, naive `at_ts` semantics, explicit-zone override, timezone validation, UI local timestamps |
 | `tests/test_approvals.py` | Exact action binding, quick confirm (keyword/model/ambiguous), rejection/cancellation/expiry/staleness, untrusted-output immunity, no shell tools, risk override validation |

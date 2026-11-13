@@ -21,7 +21,38 @@ from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# Phase 3 memory lifetime: additive columns on ``memories`` plus a small
+# access table. ``archived_at`` marks an archived row without touching the
+# existing status CHECK constraint (SQLite cannot alter one in place). The
+# access table makes "one bump per run" durable across restarts.
+MEMORY_LIFETIME_COLUMNS = (
+    ("access_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("last_accessed_at", "TEXT"),
+    ("archived_at", "TEXT"),
+    ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+    ("importance", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+MEMORY_ACCESS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_access (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  accessed_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_access_run
+  ON memory_access(memory_id, run_id);
+CREATE INDEX IF NOT EXISTS idx_memory_access_mem
+  ON memory_access(memory_id);
+"""
+
+# Created after the additive v4 columns exist, so upgrading a pre-v4 database
+# never trips over a missing ``archived_at`` while the base schema runs.
+MEMORY_LIFETIME_INDEX_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_memories_archive ON memories(archived_at);
+"""
 
 MODULE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS modules (
@@ -184,7 +215,12 @@ CREATE TABLE IF NOT EXISTS memories (
   supersedes_id TEXT,
   superseded_by TEXT,
   tags TEXT,
-  meta TEXT
+  meta TEXT,
+  access_count INTEGER NOT NULL DEFAULT 0,
+  last_accessed_at TEXT,
+  archived_at TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  importance INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope, status);
 
@@ -215,6 +251,7 @@ CREATE TABLE IF NOT EXISTS memory_revisions (
   after TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_revisions_mem ON memory_revisions(memory_id);
+""" + MEMORY_ACCESS_SCHEMA + """
 
 CREATE TABLE IF NOT EXISTS schedules (
   id TEXT PRIMARY KEY,
@@ -327,6 +364,9 @@ class Database:
                 )
             else:
                 self._migrate_to(int(row["value"]))
+            # Safe for both fresh and upgraded databases: the column exists by
+            # the time this runs.
+            self._conn.executescript(MEMORY_LIFETIME_INDEX_SCHEMA)
 
     def _migrate_to(self, version: int) -> None:
         """Apply additive migrations from ``version`` to SCHEMA_VERSION."""
@@ -345,6 +385,20 @@ class Database:
             # above already created them; rerunning here keeps the migration
             # self-contained for databases that predate this script.
             self._conn.executescript(MODULE_SCHEMA)
+        if version < 4:
+            # Additive memory lifetime columns; never rebuild the table or
+            # touch the status CHECK constraint.
+            columns = {
+                row["name"] for row in self._conn.execute(
+                    "PRAGMA table_info(memories)"
+                )
+            }
+            for name, ddl in MEMORY_LIFETIME_COLUMNS:
+                if name not in columns:
+                    self._conn.execute(
+                        f"ALTER TABLE memories ADD COLUMN {name} {ddl}"
+                    )
+            self._conn.executescript(MEMORY_ACCESS_SCHEMA)
         if version < SCHEMA_VERSION:
             self._conn.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",

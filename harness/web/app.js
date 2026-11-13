@@ -6,6 +6,7 @@ let lastChatKey = '';
 let openTaskId = null;
 let taskDetail = {};
 let memorySearch = null;
+let memoryFilter = 'active';
 let configMeta = null;
 let toastTimer = null;
 
@@ -709,8 +710,31 @@ function renderSchedules(side) {
 /* ----------------------------------------------------------------- memory */
 
 function renderMemory(side) {
+  const counts = state.counts || {};
   const card0 = el('div', 'card');
   card0.appendChild(el('h3', null, 'Memory'));
+  const grid = el('div', 'split');
+  for (const [k, v] of [['active', counts.memories || 0],
+                        ['archived', counts.archived_memories || 0]]) {
+    const stat = el('div', 'stat');
+    stat.appendChild(el('div', 'n', pct(v)));
+    stat.appendChild(el('div', 'k', k));
+    grid.appendChild(stat);
+  }
+  card0.appendChild(grid);
+  card0.appendChild(el('div', 'small',
+    'Usage determines retention. Unused memories are archived; archived ' +
+    'memories stay retrievable and can be restored. Pinned memories and ' +
+    'protected kinds never archive.'));
+
+  const filters = el('div', 'btns');
+  for (const [label, value] of [['Active', 'active'], ['Archived', 'archived']]) {
+    const b = el('button', memoryFilter === value ? 'ok' : null, label);
+    b.onclick = () => { memoryFilter = value; renderSide(true); };
+    filters.appendChild(b);
+  }
+  card0.appendChild(filters);
+
   const btns = el('div', 'btns');
   const run = el('button', null, 'Run consolidation now');
   run.onclick = async () => {
@@ -728,15 +752,23 @@ function renderMemory(side) {
   const query = el('input');
   query.placeholder = 'Search memories and history';
   query.style.flex = '1';
+  const archivedBox = el('input');
+  archivedBox.type = 'checkbox';
+  const archivedLabel = el('label', 'small', ' include archived');
+  archivedLabel.prepend(archivedBox);
   const go = el('button', null, 'Search');
   go.onclick = async () => {
     if (!query.value.trim()) { memorySearch = null; renderSide(true); return; }
     const out = await api('/api/memories/search',
-      {method: 'POST', body: {query: query.value.trim()}});
+      {method: 'POST', body: {
+        query: query.value.trim(),
+        include_archived: archivedBox.checked,
+      }});
     if (out) { memorySearch = out; renderSide(true); }
   };
   query.onkeydown = (e) => { if (e.key === 'Enter') go.onclick(); };
-  searchRow.appendChild(query); searchRow.appendChild(go);
+  searchRow.appendChild(query); searchRow.appendChild(archivedLabel);
+  searchRow.appendChild(go);
   card0.appendChild(searchRow);
   side.appendChild(card0);
 
@@ -748,10 +780,14 @@ function renderMemory(side) {
       'Search: ' + results.length + ' memor' + (results.length === 1 ? 'y' : 'ies') +
       ', ' + history.length + ' history hit(s)'));
     for (const m of results) {
+      const label = m.archived ? ' [archived' +
+        (m.restored ? ', restored' : '') + ']' : '';
       card.appendChild(el('div', 'small',
-        '[' + m.kind + '/' + m.scope + '] ' + m.content));
+        '[' + m.kind + '/' + m.scope + ']' + label + ' ' + m.content));
       card.appendChild(el('div', 'small',
-        m.id + ' rev ' + m.revision + ' | ' + short(m.updated_at)));
+        m.id + ' rev ' + m.revision + ' | uses ' + (m.access_count || 0) +
+        ' | ' + short(m.updated_at) +
+        (m.reason ? ' | ' + m.reason : '')));
     }
     for (const h of history) {
       card.appendChild(el('div', 'small',
@@ -761,15 +797,54 @@ function renderMemory(side) {
     side.appendChild(card);
   }
 
-  const list = state.memories || [];
-  if (!list.length) { empty(side, 'No active memories.'); return; }
+  const list = memoryFilter === 'archived'
+    ? (state.memories_archived || []) : (state.memories || []);
+  if (!list.length) {
+    empty(side, memoryFilter === 'archived'
+      ? 'No archived memories.' : 'No active memories.');
+    return;
+  }
   for (const m of list) {
     const card = el('div', 'card');
-    card.appendChild(el('h3', null, m.kind + ' | ' + m.scope));
+    const flags = [];
+    if (m.pinned) flags.push('pinned');
+    if (m.archived) flags.push('archived');
+    card.appendChild(el('h3', null,
+      m.kind + ' | ' + m.scope + (flags.length ? ' | ' + flags.join(', ') : '')));
     card.appendChild(el('div', 'small', m.content));
     card.appendChild(el('div', 'small',
-      m.id + ' rev ' + m.revision + ' | ' + short(m.updated_at) +
+      m.id + ' rev ' + m.revision + ' | uses ' + (m.access_count || 0) +
+      ' | last used ' + short(m.last_accessed_at) +
+      ' | updated ' + short(m.updated_at) +
       (m.expires_at ? ' | expires ' + short(m.expires_at) : '')));
+    const actions = el('div', 'btns');
+    if (m.archived) {
+      const restore = el('button', 'ok', 'Restore');
+      restore.onclick = async () => {
+        const out = await api('/api/memories/' +
+          encodeURIComponent(m.id) + '/restore', {method: 'POST'});
+        if (out) { toast('Memory restored.'); refresh(true); }
+      };
+      actions.appendChild(restore);
+    } else {
+      const archive = el('button', 'no', 'Archive');
+      archive.onclick = async () => {
+        if (!confirm('Archive this memory? It stays retrievable and can be ' +
+                     'restored.')) return;
+        const out = await api('/api/memories/' +
+          encodeURIComponent(m.id) + '/archive', {method: 'POST'});
+        if (out) { toast('Memory archived.'); refresh(true); }
+      };
+      actions.appendChild(archive);
+    }
+    const pin = el('button', null, m.pinned ? 'Unpin' : 'Pin');
+    pin.onclick = async () => {
+      const out = await api('/api/memories/' + encodeURIComponent(m.id) +
+        (m.pinned ? '/unpin' : '/pin'), {method: 'POST'});
+      if (out) { toast(m.pinned ? 'Memory unpinned.' : 'Memory pinned.'); refresh(true); }
+    };
+    actions.appendChild(pin);
+    card.appendChild(actions);
     side.appendChild(card);
   }
 }

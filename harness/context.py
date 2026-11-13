@@ -49,6 +49,7 @@ class ContextBuilder:
         domain: dict[str, Any] | None,
         trigger: dict[str, Any],
         pending_approvals: list[dict[str, Any]] | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         """Assemble the system message for a run. Returns content + sources."""
         sources: list[dict[str, Any]] = []
@@ -64,7 +65,9 @@ class ContextBuilder:
             ), -1)
         )
         sections.append(
-            ("memories", self._memories_block(objective, task, sources), 1)
+            ("memories", self._memories_block(
+                objective, task, sources, run_id
+            ), 1)
         )
         sections.append(
             ("history", self._history_block(task, objective, sources), 2)
@@ -266,7 +269,8 @@ class ContextBuilder:
         return "\n".join(lines)
 
     def _memories_block(
-        self, objective: str, task: dict[str, Any], sources: list[dict[str, Any]]
+        self, objective: str, task: dict[str, Any],
+        sources: list[dict[str, Any]], run_id: str | None = None,
     ) -> str:
         priority = ["global"]
         if task.get("domain_id"):
@@ -276,6 +280,12 @@ class ContextBuilder:
             sources.append({"section": "memories", "ref": None,
                             "reason": "no relevant memories found"})
             return ""
+        # Usage accounting: only memories actually disclosed here count, and
+        # only once per run. Raw FTS candidate scans never reach this point.
+        if run_id:
+            self.memory.record_access(
+                [item["id"] for item in results], run_id=run_id
+            )
         lines = ["# Relevant memory"]
         for item in results:
             lines.append(

@@ -122,6 +122,8 @@ class Server:
         report = util.loads(
             app.db.meta_get("scheduler.last_report") or "", {}
         )
+        memories = app.memory.list(limit=50)
+        archived_memories = app.memory.list(status="archived", limit=50)
         return {
             "messages": app.messages.list_visible(limit=300),
             "tasks": tasks,
@@ -129,7 +131,8 @@ class Server:
             "approvals": approvals,
             "schedules": app.scheduler.list_schedules(),
             "domains": domains,
-            "memories": app.memory.list(limit=50),
+            "memories": memories,
+            "memories_archived": archived_memories,
             "tools": [
                 {"name": spec.name, "risk": spec.risk,
                  "module": spec.module,
@@ -145,6 +148,8 @@ class Server:
                 "pending_approvals": len(approvals),
                 "domains": len(domains),
                 "paused": len([t for t in tasks if t["status"] == "paused"]),
+                "memories": len(memories),
+                "archived_memories": len(archived_memories),
             },
             "scheduler": {
                 "last_tick": app.db.meta_get("scheduler.last_tick"),
@@ -370,13 +375,56 @@ class Server:
         if domain_id:
             priority.insert(0, f"domain:{domain_id}")
         results = await run_in_threadpool(
-            self.app.memory.search, query, scope_priority=priority
+            self.app.memory.search, query, scope_priority=priority,
+            include_archived=bool(body.get("include_archived")),
         )
+        # A search from the UI is an explicit read; count what it returned.
+        await run_in_threadpool(
+            self.app.memory.record_access,
+            [item["id"] for item in results], None,
+        )
+        # Refresh the returned rows so usage fields reflect this read.
+        for item in results:
+            fresh = await run_in_threadpool(
+                self.app.memory.get, item["id"]
+            )
+            if fresh is not None:
+                item["access_count"] = fresh.get("access_count", 0)
+                item["last_accessed_at"] = fresh.get("last_accessed_at")
         history = await run_in_threadpool(
             self.app.messages.search, query,
             limit=int(self.app.config.get("context.history_results", 4)),
         )
         return _json({"results": results, "history": history})
+
+    async def memory_action(self, request: Request) -> Response:
+        """Archive, restore, pin, or unpin one memory."""
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        memory_id = request.path_params["memory_id"]
+        action = request.path_params["action"]
+        memory = self.app.memory.get(memory_id)
+        if memory is None:
+            return _err("no such memory", 404)
+        try:
+            if action == "archive":
+                updated = await run_in_threadpool(
+                    self.app.memory.archive, memory_id, changed_by="web",
+                )
+            elif action == "restore":
+                updated = await run_in_threadpool(
+                    self.app.memory.restore, memory_id, changed_by="web",
+                )
+            elif action in ("pin", "unpin"):
+                updated = await run_in_threadpool(
+                    self.app.memory.set_pinned, memory_id,
+                    action == "pin", changed_by="web",
+                )
+            else:
+                return _err("invalid action")
+        except ValueError as exc:
+            return _err(str(exc), 409)
+        return _json({"memory": updated})
 
     # -- domains ------------------------------------------------------------------
 
@@ -654,6 +702,8 @@ class Server:
             Route("/api/memories/search", self.memory_search, methods=["POST"]),
             Route("/api/memories/{memory_id}", self.memory_detail,
                   methods=["GET"]),
+            Route("/api/memories/{memory_id}/{action}", self.memory_action,
+                  methods=["POST"]),
             Route("/api/domains", self.domains_list, methods=["GET"]),
             Route("/api/domains", self.domains_create, methods=["POST"]),
             Route("/api/domains/{domain_id}", self.domain_update,

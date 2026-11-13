@@ -83,6 +83,18 @@ DEFAULTS: dict[str, Any] = {
         "max_results": 8,
         "temp_expiry_days": 14,       # default expiry for kind=temp
         "search_limit": 10,
+        # Phase 3: usage-based lifetime. Deterministic; no model call is
+        # spent on retention. Archived rows stay retrievable on request.
+        "lifetime": {
+            "enabled": True,
+            "base_days": 30,
+            "growth": 0.5,
+            "min_days": 14,
+            "max_days": 1095,
+            "protected_kinds": ["constraint", "decision", "preference"],
+            "sweep_interval_s": 3600.0,
+            "sweep_batch": 200,
+        },
     },
     "tools": {
         # risk classes: "low" runs immediately, "confirm" needs an approval.
