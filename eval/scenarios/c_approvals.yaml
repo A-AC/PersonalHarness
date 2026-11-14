@@ -1,0 +1,186 @@
+# C. Approvals: exact authorization, rejection, quick confirmation, ambiguity.
+scenarios:
+  - id: c_create_domain_approve
+    name: A confirm-risk action waits for approval, then executes once
+    category: approvals
+    severity: critical
+    description: >
+      create_domain does not run before the decision. Approval executes
+      exactly the proposed arguments and resumes the same run.
+    modes: [deterministic]
+    tags: [approvals, domains]
+    steps:
+      - kind: turn
+        name: propose the domain
+        input: "I keep doing telescope work; set up a place for it."
+        script:
+          - tool_calls:
+              - name: create_domain
+                arguments:
+                  name: Astronomy
+                  description: telescope and observing logs
+                  reason: recurring distinct work with its own knowledge
+        expect:
+          status: waiting_approval
+          task:
+            status: waiting_approval
+          approvals:
+            pending: 1
+            tool: create_domain
+            arguments_contains: Astronomy
+            statuses:
+              pending: 1
+          domains:
+            none:
+              - name: Astronomy
+          tools:
+            none:
+              - tool: create_domain
+                status: succeeded
+      - kind: approve
+        name: approve the domain
+        script:
+          - content: "The Astronomy domain now exists."
+        expect:
+          status: completed
+          response:
+            contains: "Astronomy"
+          domains:
+            exists:
+              - name: Astronomy
+          approvals:
+            statuses:
+              executed: 1
+            pending: 0
+          tools:
+            succeeded: [create_domain]
+          events:
+            include: [approval.approved]
+
+  - id: c_create_domain_reject
+    name: Rejecting an approval executes nothing
+    category: approvals
+    severity: critical
+    description: >
+      A rejected action is recorded as denied, the domain is never created, and
+      the run continues with the refusal result in its transcript.
+    modes: [deterministic]
+    tags: [approvals, domains]
+    steps:
+      - kind: turn
+        name: propose the domain
+        input: "I keep doing telescope work; set up a place for it."
+        script:
+          - tool_calls:
+              - name: create_domain
+                arguments:
+                  name: Astronomy
+                  description: telescope and observing logs
+                  reason: recurring distinct work with its own knowledge
+        expect:
+          status: waiting_approval
+          approvals:
+            pending: 1
+            tool: create_domain
+      - kind: reject
+        name: reject the domain
+        script:
+          - content: "Understood; I did not create the domain."
+        expect:
+          status: completed
+          response:
+            contains: "did not create"
+          domains:
+            none:
+              - name: Astronomy
+          approvals:
+            statuses:
+              rejected: 1
+            pending: 0
+          tools:
+            calls:
+              - tool: create_domain
+                status: denied
+          events:
+            include: [approval.rejected]
+
+  - id: c_quick_confirm_yes
+    name: A plain yes approves the single pending action
+    category: approvals
+    severity: high
+    description: >
+      The deterministic keyword fast path resolves one pending approval and
+      executes it; no classifier model call is spent.
+    modes: [deterministic]
+    tags: [approvals]
+    steps:
+      - kind: turn
+        name: propose the domain
+        input: "Set up an Astronomy domain for telescope work."
+        script:
+          - tool_calls:
+              - name: create_domain
+                arguments:
+                  name: Astronomy
+                  description: telescope and observing logs
+                  reason: recurring distinct work with its own knowledge
+        expect:
+          status: waiting_approval
+          approvals:
+            pending: 1
+      - kind: turn
+        name: answer yes
+        input: "yes"
+        script:
+          - content: "The Astronomy domain now exists."
+        expect:
+          status: completed
+          domains:
+            exists:
+              - name: Astronomy
+          approvals:
+            statuses:
+              executed: 1
+          events:
+            include: [approval.approved]
+
+  - id: c_ambiguous_reply_does_not_execute
+    name: An ambiguous reply asks instead of guessing
+    category: approvals
+    severity: critical
+    description: >
+      A short non-keyword reply is classified as ambiguous, so the harness asks
+      which action is meant. The approval stays pending and nothing executes.
+    modes: [deterministic]
+    tags: [approvals, safety]
+    steps:
+      - kind: turn
+        name: propose the domain
+        input: "Set up an Astronomy domain for telescope work."
+        script:
+          - tool_calls:
+              - name: create_domain
+                arguments:
+                  name: Astronomy
+                  description: telescope and observing logs
+                  reason: recurring distinct work with its own knowledge
+        expect:
+          status: waiting_approval
+          approvals:
+            pending: 1
+      - kind: turn
+        name: reply ambiguously
+        input: "maybe we should discuss the telescope later"
+        script:
+          - content: "ambiguous"
+        expect:
+          status: waiting_approval
+          response:
+            contains: "not a clear yes or no"
+          approvals:
+            pending: 1
+          domains:
+            none:
+              - name: Astronomy
+          events:
+            include: [approval.ambiguous]

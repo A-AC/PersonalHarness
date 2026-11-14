@@ -129,6 +129,7 @@ web UI / CLI / schedule / heartbeat / approval decision
 | SQLite schema | `harness/db.py` |
 | Web server / JSON API | `harness/server.py`, `harness/web/` |
 | CLI client | `harness/__main__.py` |
+| Scenario evaluation (`harness eval`) | `harness/evaluation/`, `eval/scenarios/` |
 | Configuration | `harness/config.py`, `data/config.yaml` |
 
 ## Requirements
@@ -280,6 +281,7 @@ value in `data/config.yaml`.
 | `consolidate` | Run one memory consolidation pass |
 | `events [-N]` | Recent event-log rows |
 | `tools` | Registered tools with their risk classes; MCP status |
+| `eval` | Run scenario evaluations in-process (deterministic or live); `--list`, `--list-models`, `--summary`, `--compare` |
 | `backup` / `restore ZIP --yes` | Snapshot / restore state |
 | `config` | Effective configuration (secrets redacted) |
 | `endpoint-check` | Probe the configured model endpoint directly |
@@ -755,7 +757,60 @@ python -m pytest tests -o addopts="" -q     # deterministic suite (no network)
 python -m pytest tests -m live -o addopts="" # real-endpoint integration tests
 ```
 
-The deterministic suite covers the required categories: core runtime,
+### Scenario evaluation
+
+`harness eval` runs scenario files from `eval/scenarios/` in-process against a
+scratch data directory. It never touches the deployed `data/` directory or the
+repository (the sandbox refuses both). See `eval/README.md` for the scenario
+and assertion reference.
+
+```bash
+# See what would run (live-only scenarios appear only in live mode).
+python -m harness eval --list
+python -m harness eval --mode live --list
+
+# Deterministic: ScriptedModel exercises the harness itself, no network.
+python -m harness eval --mode deterministic
+python -m harness eval --mode deterministic --scenario "b_memory_*" --tag memory
+
+# Live: the real runtime against a named model. Reports land in
+# data/eval/results/<tag>.json and .md.
+python -m harness eval --mode live --model MODEL_NAME \
+    --base-url http://HOST:PORT --api-key KEY --tag live_MODEL
+```
+
+Live runs probe `/v1/models` first and refuse to start unless the requested
+model is advertised. Use `--allow-unlisted-model` for a server that serves the
+model without listing it. `--list-models` prints what the endpoint offers:
+
+```bash
+python -m harness eval --list-models --base-url http://HOST:PORT
+```
+
+Model settings resolve in this order (lowest to highest): built-in defaults,
+`data/config.yaml` (or `--config-from DIR`), `HARNESS_MODEL_NAME` /
+`HARNESS_MODEL_BASE_URL` / `HARNESS_MODEL_API_KEY`, then explicit
+`--model` / `--base-url` / `--api-key`. So this works too:
+
+```bash
+$env:HARNESS_MODEL_NAME = "MODEL_NAME"
+python -m harness eval --mode live --base-url http://HOST:PORT --tag live_MODEL
+```
+
+Useful follow-ups:
+
+```bash
+python -m harness eval --summary live_MODEL
+python -m harness eval --compare deterministic final_deterministic
+```
+
+Deterministic scenarios assert persisted state (tasks, runs, memories,
+approvals, schedules, inbox events, modules, tool executions, and the actual
+run system prompt). Live scenarios (`eval/scenarios/g_live.yaml`) are smoke and
+capability checks: a live result measures that model, not harness regressions.
+Reports include per-assertion expected/observed evidence and real denominators.
+
+The deterministic test suite covers the required categories: core runtime,
 unified history, domains/resumption, context/memory, scheduling/heartbeat,
 approvals/permissions, recovery/deployment, memory lifetime/archive,
 sequential sub-agents, durable inbox/automations/self-scheduling, plus the
@@ -765,8 +820,10 @@ grounding, web+CLI shared state, inspectable failures, traceable
 consolidation, no duplicate occurrences after restart, no indirect
 permission escape). Live tests verify the endpoint's models list, plain
 completion, native tool-call protocol, and multi-step round trip; they are
-marked `live` and were run against the reachable endpoint
-(2026-10-27, passing).
+marked `live`. The live scenario suite (`eval/scenarios/g_live.yaml`) checks a
+named model through the real runtime (plain reply, memory write, memory recall,
+and `search_knowledge`); it was verified against `qwen3.5-4b` with all four
+scenarios passing.
 
 ## Known limitations
 

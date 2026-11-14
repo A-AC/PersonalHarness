@@ -1,0 +1,164 @@
+# B. Memory: scoped retrieval, correction/supersession, lifetime, search.
+scenarios:
+  - id: b_memory_scope
+    name: Domain memory is retrieved in its domain and not elsewhere
+    category: memory
+    severity: high
+    description: >
+      A Homelab task sees the Homelab memory; an unrelated Garden preference
+      never enters the prompt. Retrieval evidence is recorded per source.
+    modes: [deterministic]
+    tags: [memory, context]
+    fixtures:
+      domains:
+        - name: Homelab
+          description: servers, network, nas, rack maintenance
+        - name: Garden
+          description: plants, soil, irrigation
+      memories:
+        - content: "The NAS backup runs at 02:00."
+          kind: fact
+          domain: Homelab
+        - content: "Garden plans use native plants."
+          kind: preference
+          domain: Garden
+    steps:
+      - kind: turn
+        name: ask about the NAS
+        input: "check the homelab nas backup"
+        script:
+          - content: "The NAS backup runs at 02:00."
+        expect:
+          status: completed
+          task:
+            status: completed
+            domain: Homelab
+          context:
+            sections: [memories]
+            refs: ["memory:"]
+            system_contains: "NAS backup"
+            system_not_contains: "native plants"
+            source_counts:
+              memories:
+                min: 1
+                max: 1
+          run:
+            context_not_empty: true
+
+  - id: b_memory_correction
+    name: A correction supersedes the old memory
+    category: memory
+    severity: high
+    description: >
+      The second statement of the same subject supersedes the first; the old
+      row stays inspectable with a revision.
+    modes: [deterministic]
+    tags: [memory]
+    steps:
+      - kind: turn
+        name: store the first password
+        input: "Remember the wifi password is hunter2."
+        script:
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The wifi password is hunter2."
+                  kind: constraint
+                  scope: global
+          - content: "Stored."
+        expect:
+          status: completed
+          memories:
+            exists:
+              - content_contains: "hunter2"
+                status: active
+      - kind: turn
+        name: correct the password
+        input: "Actually the wifi password is hunter3."
+        script:
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The wifi password is hunter3."
+                  kind: constraint
+                  scope: global
+          - content: "Corrected."
+        expect:
+          status: completed
+          memories:
+            exists:
+              - content_contains: "hunter3"
+                status: active
+            superseded_contains: "hunter2"
+            revision_min: 1
+
+  - id: b_memory_archive_restore
+    name: Archived memory is retained and can be restored
+    category: memory
+    severity: medium
+    description: >
+      Archiving removes a memory from ordinary retrieval without deleting it;
+      restore makes it active again. Both transitions are audited.
+    modes: [deterministic]
+    tags: [memory]
+    fixtures:
+      memories:
+        - content: "The spare batteries are in the hall cupboard."
+          kind: fact
+          scope: global
+    steps:
+      - kind: archive_memory
+        name: archive the battery note
+        memory:
+          content_contains: "spare batteries"
+        reason: "evaluation archive"
+        expect:
+          memories:
+            exists:
+              - content_contains: "spare batteries"
+                archived: true
+          events:
+            include: [memory.archived]
+      - kind: restore_memory
+        name: restore the battery note
+        memory:
+          content_contains: "spare batteries"
+        reason: "evaluation restore"
+        expect:
+          memories:
+            exists:
+              - content_contains: "spare batteries"
+                archived: false
+          events:
+            include: [memory.restored]
+
+  - id: b_search_knowledge
+    name: search_knowledge returns older durable facts
+    category: memory
+    severity: medium
+    description: >
+      The model can explicitly search memory beyond what the context builder
+      already disclosed.
+    modes: [deterministic]
+    tags: [memory, tools]
+    fixtures:
+      memories:
+        - content: "The greenhouse heater burns diesel."
+          kind: fact
+          scope: global
+    steps:
+      - kind: turn
+        name: search for the heater fuel
+        input: "What fuel does the greenhouse heater use?"
+        script:
+          - tool_calls:
+              - name: search_knowledge
+                arguments:
+                  query: "greenhouse heater fuel"
+          - content: "The greenhouse heater uses diesel."
+        expect:
+          status: completed
+          response:
+            contains: "diesel"
+          tools:
+            succeeded: [search_knowledge]

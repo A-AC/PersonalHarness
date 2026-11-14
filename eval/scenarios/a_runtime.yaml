@@ -1,0 +1,231 @@
+# A. Core runtime: replies, tools, validation, questions, failure bounds.
+scenarios:
+  - id: a_plain_reply
+    name: A plain reply completes the task
+    category: runtime
+    severity: high
+    description: >
+      The ordinary path: one model turn with no tools completes the run,
+      persists the assistant message, and marks the task completed.
+    modes: [deterministic]
+    tags: [smoke]
+    steps:
+      - kind: turn
+        name: say hello
+        input: "Hello there, just checking in."
+        script:
+          - content: "Hello. I am here when you need me."
+        expect:
+          status: completed
+          response:
+            contains: "Hello"
+          task:
+            status: completed
+            role: user
+          run:
+            status: completed
+            iterations_min: 1
+          events:
+            include: [run.started, run.status]
+          misc:
+            no_hidden_chat: true
+
+  - id: a_tool_lifecycle
+    name: A tool call is validated, executed, and recorded
+    category: runtime
+    severity: high
+    description: >
+      The model proposes a low-risk remember call; the harness executes it,
+      records the execution row, and continues to the final reply.
+    modes: [deterministic]
+    tags: [smoke, tools]
+    steps:
+      - kind: turn
+        name: remember the spare key
+        input: "Remember that the spare key is in the blue drawer."
+        script:
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The spare key is in the blue drawer."
+                  kind: fact
+                  scope: global
+          - content: "Saved."
+        expect:
+          status: completed
+          response:
+            contains: "Saved"
+          memories:
+            exists:
+              - content_contains: "spare key"
+                kind: fact
+                scope: global
+          tools:
+            calls:
+              - tool: remember
+                status: succeeded
+            succeeded: [remember]
+            count_min: 1
+          run:
+            status: completed
+            tool_calls_min: 1
+
+  - id: a_unknown_tool_denied
+    name: An unknown tool is denied, not guessed
+    category: runtime
+    severity: critical
+    description: >
+      A name outside the registry is rejected and recorded as denied; the run
+      continues honestly instead of inventing an outcome.
+    modes: [deterministic]
+    tags: [security, tools]
+    steps:
+      - kind: turn
+        name: propose an unknown tool
+        input: "Delete everything in the house."
+        script:
+          - tool_calls:
+              - name: delete_everything
+                arguments: {}
+          - content: "I cannot use an unknown tool, so nothing was deleted."
+        expect:
+          status: completed
+          response:
+            contains: "unknown tool"
+          tools:
+            calls:
+              - tool: delete_everything
+                status: denied
+            none:
+              - tool: delete_everything
+                status: succeeded
+          events:
+            include: [tool.rejected]
+
+  - id: a_invalid_arguments
+    name: Invalid tool arguments are refused before execution
+    category: runtime
+    severity: critical
+    description: >
+      A remember call without its required content fails schema validation and
+      never reaches the memory manager.
+    modes: [deterministic]
+    tags: [tools]
+    steps:
+      - kind: turn
+        name: call remember without content
+        input: "Remember something for me."
+        script:
+          - tool_calls:
+              - name: remember
+                arguments:
+                  kind: fact
+          - content: "That call was invalid, so nothing was saved."
+        expect:
+          status: completed
+          response:
+            contains: "invalid"
+          tools:
+            calls:
+              - tool: remember
+                status: denied
+          memories:
+            count_max: 0
+
+  - id: a_waiting_user_restart
+    name: A question survives a restart and resumes the same task
+    category: runtime
+    severity: high
+    description: >
+      The ask-user marker pauses the run. After a restart the answer resumes
+      the same task rather than opening unrelated work.
+    modes: [deterministic]
+    tags: [recovery, context]
+    steps:
+      - kind: turn
+        name: ask which rack
+        input: "Check the homelab rack."
+        script:
+          - content: "Which rack should I check? <ask_user/>"
+        expect:
+          status: waiting_user
+          response:
+            contains: "Which rack"
+          task:
+            status: waiting_user
+          run:
+            status: waiting_user
+      - kind: restart
+        name: restart the harness
+      - kind: turn
+        name: answer the question
+        input: "the homelab rack B"
+        script:
+          - content: "Rack B is healthy."
+        expect:
+          status: completed
+          response:
+            contains: "healthy"
+          task:
+            status: completed
+          events:
+            include: [task.resumed]
+
+  - id: a_malformed_reply_bounded
+    name: A malformed model reply pauses instead of looping
+    category: runtime
+    severity: high
+    description: >
+      Protocol errors are not retried in a loop; the run fails, the task is
+      paused, and the reason is recorded.
+    modes: [deterministic]
+    tags: [reliability]
+    steps:
+      - kind: turn
+        name: receive a malformed reply
+        input: "Handle this request."
+        script:
+          - malformed: true
+            detail: "malformed evaluation reply"
+        expect:
+          status: failed
+          task:
+            status: paused
+          run:
+            status: failed
+          misc:
+            detail_contains: "malformed"
+          events:
+            include: [run.failed]
+
+  - id: a_tool_call_limit
+    name: The tool-call budget pauses the task
+    category: runtime
+    severity: high
+    description: >
+      A run that reaches limits.max_tool_calls stops with an explicit
+      limit_reached status and a resumable paused task.
+    modes: [deterministic]
+    tags: [limits]
+    settings:
+      limits:
+        max_tool_calls: 1
+    steps:
+      - kind: turn
+        name: exceed the tool budget
+        input: "Remember the garage code."
+        script:
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The garage code is 8891."
+                  scope: global
+        expect:
+          status: limit_reached
+          task:
+            status: paused
+          run:
+            status: limit_reached
+            decision_contains: "tool-call limit"
+          events:
+            include: [limit.reached]

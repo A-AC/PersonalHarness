@@ -1,0 +1,113 @@
+# G. Live-model smoke and capability checks (never run in deterministic mode).
+#
+# These scenarios exercise the real model through the real runtime. They are
+# deliberately small and state-based: each one asserts something the harness
+# persists, not a preferred wording. A live run is a measurement of the named
+# model, so failures here are informative rather than harness regressions.
+#
+#   python -m harness eval --mode live --model MODEL_NAME \
+#       --base-url http://HOST:PORT --tag live_MODEL
+scenarios:
+  - id: g_live_plain_reply
+    name: The model completes a plain turn without tools
+    category: live
+    severity: medium
+    description: >
+      Baseline health check: one prompt produces a completed task, a persisted
+      run with context, and a reply containing the requested word.
+    modes: [live]
+    tags: [live, smoke]
+    steps:
+      - kind: turn
+        name: ask for one sentence
+        input: "Answer in one short sentence that contains the word harbor."
+        expect:
+          status: completed
+          task:
+            status: completed
+          response:
+            contains: harbor
+          run:
+            status: completed
+            iterations_min: 1
+
+  - id: g_live_memory_write
+    name: The model can persist a durable memory with the remember tool
+    category: live
+    severity: high
+    description: >
+      The model is asked to use the remember tool. Success means the memory
+      row exists with the exact token and the tool execution succeeded.
+    modes: [live]
+    tags: [live, memory, tools]
+    steps:
+      - kind: turn
+        name: store the workshop key
+        input: >
+          Use the remember tool to store this as a global constraint:
+          the workshop key is BLUE-42. Then confirm that you stored it.
+        expect:
+          status: completed
+          response:
+            contains: BLUE-42
+          memories:
+            exists:
+              - content_contains: BLUE-42
+                status: active
+          tools:
+            succeeded: [remember]
+
+  - id: g_live_memory_recall
+    name: A fixture memory reaches the prompt and the answer
+    category: live
+    severity: high
+    description: >
+      A memory written before the turn is disclosed as a source and is used in
+      the reply. This checks retrieval and instruction use end to end.
+    modes: [live]
+    tags: [live, memory, context]
+    fixtures:
+      memories:
+        - content: "The greenhouse heater burns diesel."
+          kind: fact
+          scope: global
+    steps:
+      - kind: turn
+        name: ask about the heater
+        input: "Using your stored memory, what fuel does the greenhouse heater burn?"
+        expect:
+          status: completed
+          response:
+            contains: diesel
+          context:
+            system_contains: "greenhouse heater"
+            source_counts:
+              memories:
+                min: 1
+
+  - id: g_live_search_knowledge
+    name: The model can call search_knowledge and use the result
+    category: live
+    severity: high
+    description: >
+      The prompt names the tool explicitly, so this measures tool selection and
+      result use rather than guessing whether the model prefers recall.
+    modes: [live]
+    tags: [live, memory, tools]
+    fixtures:
+      memories:
+        - content: "The greenhouse heater burns diesel."
+          kind: fact
+          scope: global
+    steps:
+      - kind: turn
+        name: search and answer
+        input: >
+          Call the search_knowledge tool with the query "greenhouse heater
+          fuel", then answer the question using what it returns.
+        expect:
+          status: completed
+          response:
+            contains: diesel
+          tools:
+            succeeded: [search_knowledge]

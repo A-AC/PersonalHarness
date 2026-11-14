@@ -1,0 +1,186 @@
+# F. Sub-agents: result return, isolation, blocked actions, reuse, budgets.
+scenarios:
+  - id: f_delegate_result_return
+    name: A delegated child runs and returns its result
+    category: subagents
+    severity: high
+    description: >
+      The parent delegates one bounded goal, the child completes, and the
+      parent receives the result in the tool outcome and its next prompt.
+    modes: [deterministic]
+    tags: [subagents]
+    steps:
+      - kind: turn
+        name: delegate the rack summary
+        input: "Delegate a summary of the rack note."
+        script:
+          - tool_calls:
+              - name: delegate_task
+                arguments:
+                  goal: Summarise the rack note
+                  context: "The rack is 42U high."
+                  expected_output: One sentence.
+          - content: "The rack is 42U high."
+          - content: "Delegated: the rack is 42U high."
+        expect:
+          status: completed
+          response:
+            contains: "42U"
+          subagents:
+            count: 1
+            statuses:
+              completed: 1
+            result_contains: "42U"
+          tools:
+            succeeded: [delegate_task]
+          events:
+            include: [subagent.started, subagent.completed]
+
+  - id: f_child_context_isolation
+    name: A child never inherits the parent transcript
+    category: subagents
+    severity: critical
+    description: >
+      The parent knows a secret from an earlier task, but the delegated child
+      only receives the explicit brief. The child system prompt proves it.
+    modes: [deterministic]
+    tags: [subagents, context]
+    steps:
+      - kind: turn
+        name: store a secret in the parent conversation
+        input: "The vault code is SECRET-123."
+        script:
+          - content: "Noted."
+      - kind: turn
+        name: delegate a separate summary
+        input: "Please delegate a summary of the rack notes."
+        script:
+          - tool_calls:
+              - name: delegate_task
+                arguments:
+                  goal: Summarise the rack notes
+          - content: "Rack summary for the child."
+          - content: "Parent final."
+        expect:
+          status: completed
+          subagents:
+            count: 1
+            child_system_contains: "Sub-agent rules"
+            child_system_not_contains: "SECRET-123"
+
+  - id: f_child_confirm_blocked
+    name: A child cannot perform confirmation-gated actions
+    category: subagents
+    severity: critical
+    description: >
+      The child's propose_skill attempt is blocked, not turned into an approval.
+      The parent receives a blocked result and continues without user input.
+    modes: [deterministic]
+    tags: [subagents, safety]
+    steps:
+      - kind: turn
+        name: delegate a restricted action
+        input: "Delegate a confirm action."
+        script:
+          - tool_calls:
+              - name: delegate_task
+                arguments:
+                  goal: Try a confirm action
+          - tool_calls:
+              - name: propose_skill
+                arguments:
+                  name: child skill
+                  description: a skill the child should not save
+                  body: "Do restricted work."
+          - content: "The child was blocked."
+        expect:
+          status: completed
+          response:
+            contains: "blocked"
+          approvals:
+            pending: 0
+          subagents:
+            count: 1
+            statuses:
+              failed: 1
+            result_contains: "confirmation-gated"
+          tasks:
+            exists:
+              - role: subagent
+                status: failed
+          events:
+            include: [subagent.blocked]
+
+  - id: f_same_goal_reuse
+    name: Re-delegating the same goal reuses the child
+    category: subagents
+    severity: high
+    description: >
+      Delegation is idempotent by goal within a parent run: the second request
+      returns the existing child instead of spending a second child run.
+    modes: [deterministic]
+    tags: [subagents]
+    steps:
+      - kind: turn
+        name: delegate the same goal twice
+        input: "Delegate the same goal twice."
+        script:
+          - tool_calls:
+              - name: delegate_task
+                arguments:
+                  goal: Reuse this exact goal
+          - content: "Only one child ever runs."
+          - tool_calls:
+              - name: delegate_task
+                arguments:
+                  goal: Reuse this exact goal
+          - content: "Both delegations are done."
+        expect:
+          status: completed
+          response:
+            contains: "Both delegations"
+          subagents:
+            count: 1
+            statuses:
+              completed: 1
+          tools:
+            succeeded: [delegate_task]
+            count_min: 2
+          events:
+            include: [subagent.reused]
+
+  - id: f_child_tool_budget
+    name: A runaway child stops at its own budget
+    category: subagents
+    severity: high
+    description: >
+      The child gets the tighter sub-agent budget, not the parent's. Exceeding
+      it returns a blocked result while the parent keeps going.
+    modes: [deterministic]
+    tags: [subagents, limits]
+    settings:
+      subagents:
+        max_tool_calls: 1
+    steps:
+      - kind: turn
+        name: delegate a runaway child
+        input: "Delegate a runaway child."
+        script:
+          - tool_calls:
+              - name: delegate_task
+                arguments:
+                  goal: Keep searching forever
+          - tool_calls:
+              - name: search_knowledge
+                arguments:
+                  query: loop
+          - content: "The child was stopped; continuing without it."
+        expect:
+          status: completed
+          response:
+            contains: "stopped"
+          subagents:
+            count: 1
+            statuses:
+              cancelled: 1
+            result_contains: "tool-call limit"

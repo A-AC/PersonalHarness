@@ -557,6 +557,13 @@ def cmd_config(args: argparse.Namespace) -> None:
     print(json.dumps(out.get("config", {}), indent=2, default=str))
 
 
+def cmd_eval(args: argparse.Namespace) -> None:
+    """Run scenarios in-process; never touches the deployed data directory."""
+    from .evaluation.cli import cmd_eval as run_eval
+
+    run_eval(args)
+
+
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
@@ -709,6 +716,51 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("config", help="show the effective configuration")
     common(p); p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser(
+        "eval",
+        help="run scenario evaluations (deterministic or against a live model)",
+    )
+    common(p)
+    p.add_argument("--mode", choices=["deterministic", "live"],
+                   default="deterministic")
+    p.add_argument("--scenario-dir", default=None,
+                   help="directory of YAML scenario files "
+                        "(default eval/scenarios)")
+    p.add_argument("--scenario", default=None,
+                   help="comma-separated scenario ids or glob patterns")
+    p.add_argument("--category", default=None)
+    p.add_argument("--scenario-tag", default=None)
+    p.add_argument("--repeats", type=int, default=1)
+    p.add_argument("--tag", default=None,
+                   help="report name under the results directory")
+    p.add_argument("--results-dir", default=None,
+                   help="where JSON/Markdown reports are written "
+                        "(default data/eval/results)")
+    p.add_argument("--sandbox", default=None,
+                   help="scratch root (default: the OS temp directory)")
+    p.add_argument("--config-from", default=None,
+                   help="data directory whose config.yaml supplies model "
+                        "settings (default ./data)")
+    p.add_argument("--model", default=None,
+                   help="override model.name")
+    p.add_argument("--base-url", default=None,
+                   help="override model.base_url, e.g. http://host:8181")
+    p.add_argument("--api-key", default=None,
+                   help="override model.api_key")
+    p.add_argument("--allow-unlisted-model", action="store_true",
+                   help="run even when /v1/models does not advertise the "
+                        "requested model")
+    p.add_argument("--keep-sandbox", action="store_true")
+    p.add_argument("--list", action="store_true",
+                   help="list selected scenarios without running them")
+    p.add_argument("--list-models", action="store_true",
+                   help="probe the endpoint and print the models it serves")
+    p.add_argument("--summary", default=None,
+                   help="print the stored summary for a report tag or path")
+    p.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"),
+                   help="compare two stored reports by tag or path")
+    p.set_defaults(func=cmd_eval)
 
     return parser
 

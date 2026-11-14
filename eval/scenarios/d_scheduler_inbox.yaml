@@ -1,0 +1,296 @@
+# D. Scheduling and inbox: due work, missed slots, idempotency, automations.
+scenarios:
+  - id: d_schedule_due_and_idempotent
+    name: A due schedule runs once and never duplicates
+    category: scheduling
+    severity: high
+    description: >
+      A due once-schedule creates one task, runs it through the normal runtime,
+      disables itself, and a second heartbeat submits nothing.
+    modes: [deterministic]
+    tags: [scheduler, recovery]
+    steps:
+      - kind: create_schedule
+        name: create a due once schedule
+        schedule_name: due-once
+        prompt: "Run the due check."
+        schedule_kind: once
+        at_in_seconds: -5
+        expect:
+          schedules:
+            count: 1
+            kind: once
+            enabled: true
+            occurrences: 0
+      - kind: tick
+        name: run the heartbeat
+        script:
+          - content: "The due check ran."
+        expect:
+          schedules:
+            enabled: false
+            occurrences: 1
+            occurrences_statuses:
+              submitted: 1
+          tasks:
+            count: 1
+            exists:
+              - origin: schedule
+                status: completed
+          events:
+            include: [schedule.submitted]
+      - kind: tick
+        name: run a second heartbeat
+        expect:
+          tasks:
+            count: 1
+            exists:
+              - origin: schedule
+                status: completed
+          schedules:
+            occurrences: 1
+
+  - id: d_missed_policy_run_once
+    name: Missed interval slots coalesce to one run
+    category: scheduling
+    severity: high
+    description: >
+      With the default run_once policy, older missed slots are recorded as
+      skipped and only the newest slot submits work.
+    modes: [deterministic]
+    tags: [scheduler, time]
+    settings:
+      scheduler:
+        missed_policy: run_once
+    steps:
+      - kind: create_schedule
+        name: create an hourly interval
+        schedule_name: hourly-check
+        prompt: "Check the homelab."
+        schedule_kind: interval
+        interval_s: 3600
+        expect:
+          schedules:
+            count: 1
+            kind: interval
+      - kind: schedule_due
+        name: jump four hours ahead
+        in_seconds: 14400
+        expect:
+          schedules:
+            occurrences: 4
+            occurrences_statuses:
+              skipped: 3
+              submitted: 1
+          tasks:
+            count: 1
+            exists:
+              - origin: schedule
+                status: active
+
+  - id: d_missed_policy_skip
+    name: The skip policy submits nothing for missed slots
+    category: scheduling
+    severity: medium
+    description: >
+      With scheduler.missed_policy=skip, every missed interval occurrence is
+      marked skipped and no task is created.
+    modes: [deterministic]
+    tags: [scheduler, time]
+    settings:
+      scheduler:
+        missed_policy: skip
+    steps:
+      - kind: create_schedule
+        name: create an hourly interval
+        schedule_name: hourly-skip
+        prompt: "Check the homelab."
+        schedule_kind: interval
+        interval_s: 3600
+      - kind: schedule_due
+        name: jump three hours ahead
+        in_seconds: 10800
+        expect:
+          schedules:
+            occurrences: 3
+            occurrences_statuses:
+              skipped: 3
+          tasks:
+            count: 0
+
+  - id: d_inbox_idempotent
+    name: Duplicate inbox deliveries insert one event
+    category: inbox
+    severity: critical
+    description: >
+      (source, external_id) is the idempotency key. The same delivery is
+      accepted once, then reported as a duplicate without a second row.
+    modes: [deterministic]
+    tags: [inbox]
+    steps:
+      - kind: inbox
+        name: receive the first delivery
+        event:
+          source: mail
+          external_id: dup-1
+          title: Ping
+          body: "Hello from outside."
+        expect:
+          inbox:
+            accepted: true
+            duplicate: false
+            count: 1
+            statuses:
+              new: 1
+            trust: untrusted
+      - kind: inbox
+        name: receive the same delivery again
+        event:
+          source: mail
+          external_id: dup-1
+          title: Ping
+          body: "Hello from outside."
+        expect:
+          inbox:
+            accepted: false
+            duplicate: true
+            count: 1
+            statuses:
+              new: 1
+      - kind: inbox
+        name: triage the event
+        event:
+          source: mail
+          external_id: dup-1
+          title: Ping
+          body: "Hello from outside."
+        triage: true
+        max_runs: 0
+        expect:
+          inbox:
+            duplicate: true
+            triage_status: ok
+            count: 1
+            statuses:
+              triaged: 1
+          events:
+            include: [inbox.triaged]
+          tasks:
+            count: 0
+
+  - id: d_inbox_automation_cooldown
+    name: An automation promotes one task and respects its cooldown
+    category: inbox
+    severity: high
+    description: >
+      Matching mail creates one tainted task and runs it. A second matching
+      event inside the cooldown is recorded as suppressed, not promoted again.
+    modes: [deterministic]
+    tags: [inbox, automations, trust]
+    fixtures:
+      automations:
+        - name: invoice mail
+          source: mail
+          kind: message
+          match_keywords: [invoice]
+          action: task
+          cooldown_s: 3600
+    steps:
+      - kind: inbox
+        name: receive the first invoice
+        event:
+          source: mail
+          external_id: m-1
+          title: Invoice 1
+          body: "Please review invoice 1."
+          kind: message
+        triage: true
+        max_runs: 1
+        script:
+          - content: "I reviewed invoice 1."
+        expect:
+          inbox:
+            accepted: true
+            triage_status: ok
+            statuses:
+              promoted: 1
+            fires_min: 1
+          tasks:
+            count: 1
+            exists:
+              - origin: "inbox:mail"
+                status: completed
+                tainted: true
+          events:
+            include: [inbox.promoted]
+      - kind: inbox
+        name: receive a second invoice during cooldown
+        event:
+          source: mail
+          external_id: m-2
+          title: Invoice 2
+          body: "Please review invoice 2."
+          kind: message
+        triage: true
+        max_runs: 1
+        expect:
+          inbox:
+            triage_status: ok
+            statuses:
+              promoted: 1
+              triaged: 1
+            fires_min: 2
+          tasks:
+            count: 1
+          events:
+            include: [automation.suppressed]
+
+  - id: d_quiet_hours_defer_then_triage
+    name: Quiet hours keep events and start no work
+    category: inbox
+    severity: high
+    description: >
+      During quiet hours events stay new and no task is created. Clearing quiet
+      hours lets the next tick triage the same event normally.
+    modes: [deterministic]
+    tags: [inbox, time]
+    settings:
+      inbox:
+        quiet_hours: "00:00-00:00"
+    steps:
+      - kind: inbox
+        name: receive during quiet hours
+        event:
+          source: mail
+          external_id: quiet-1
+          title: Quiet event
+          body: "Hold this until later."
+        triage: true
+        expect:
+          inbox:
+            triage_status: quiet_hours
+            statuses:
+              new: 1
+          tasks:
+            count: 0
+      - kind: set_config
+        name: clear quiet hours
+        values:
+          inbox.quiet_hours: ""
+      - kind: inbox
+        name: triage after quiet hours
+        event:
+          source: mail
+          external_id: quiet-1
+          title: Quiet event
+          body: "Hold this until later."
+        triage: true
+        max_runs: 0
+        expect:
+          inbox:
+            duplicate: true
+            triage_status: ok
+            statuses:
+              triaged: 1
+          tasks:
+            count: 0
