@@ -27,6 +27,23 @@ def test_explicit_remember_creates_durable_memory(make_app):
     assert memories[0]["provenance"]["run_id"]
 
 
+def test_duplicate_remember_is_a_successful_tool_call(make_app):
+    """A repeated write dedupes; it must not raise inside the tool handler."""
+    script = {"tool_calls": [{"name": "remember", "arguments": {
+        "content": "The shed key is in the blue pot.",
+        "kind": "fact"}}]}
+    app = make_app.build(scripts=[
+        script, {"content": "Saved."},
+        script, {"content": "It was already saved."},
+    ])
+    _say(app, "Remember where the shed key is.")
+    _say(app, "Remember where the shed key is, again.")
+    assert len(app.memory.list()) == 1
+    rows = app.db.query("SELECT status FROM tool_executions ORDER BY id")
+    assert len(rows) == 2
+    assert all(row["status"] == "succeeded" for row in rows)
+
+
 def test_old_memory_retrieved_after_many_later_messages(make_app):
     app = make_app.build(scripts=[
         {"tool_calls": [{"name": "remember", "arguments": {

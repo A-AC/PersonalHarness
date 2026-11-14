@@ -79,6 +79,12 @@ def render_comparison(comparison: dict[str, Any]) -> str:
         f"{after['metrics'].get('critical_failures', 0)} |",
         _score_row("Quality (mean rubric)", before["metrics"],
                    after["metrics"]),
+        _metric_row("Model time (sum)", before["metrics"], after["metrics"],
+                    "latency_ms", _duration_cell),
+        _metric_row("Model latency (mean)", before["metrics"],
+                    after["metrics"], "latency_mean_ms", _duration_cell),
+        _metric_row("Completion tokens/s", before["metrics"], after["metrics"],
+                    "tokens_per_second", _number_cell),
         "",
     ]
     _section(lines, "Regressions", comparison["regressions"])
@@ -176,6 +182,40 @@ def _score_cell(value: Any) -> str:
         return str(value)
 
 
+def _metric_row(
+    label: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    key: str,
+    formatter,
+) -> str:
+    return (
+        f"| {label} | {formatter((before.get('model') or {}).get(key))} "
+        f"| {formatter((after.get('model') or {}).get(key))} |"
+    )
+
+
+def _duration_cell(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        milliseconds = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if milliseconds >= 1000:
+        return f"{milliseconds / 1000:.1f} s"
+    return f"{milliseconds:.0f} ms"
+
+
+def _number_cell(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def metrics_from_scenarios(report: dict[str, Any]) -> dict[str, Any]:
     """Fallback for reports written before metrics were embedded."""
     scenarios = report.get("scenarios") or []
@@ -196,6 +236,11 @@ def metrics_from_scenarios(report: dict[str, Any]) -> dict[str, Any]:
     scores: list[float] = []
     quality_criteria = 0
     quality_passed = 0
+    model_totals: dict[str, int] = {
+        "calls": 0, "runs": 0, "latency_ms": 0, "prompt_tokens": 0,
+        "completion_tokens": 0, "iterations": 0, "tool_calls": 0,
+    }
+    have_prompt = have_completion = False
     for scenario in scenarios:
         for step in scenario.get("steps") or []:
             quality = step.get("quality") or {}
@@ -206,6 +251,19 @@ def metrics_from_scenarios(report: dict[str, Any]) -> dict[str, Any]:
                 quality_criteria += 1
                 if criterion.get("status") == "passed":
                     quality_passed += 1
+        model_metrics = scenario.get("model") or {}
+        if not model_metrics:
+            model_metrics = _steps_model_fallback(scenario.get("steps") or [])
+        for key in ("calls", "runs", "latency_ms", "iterations", "tool_calls"):
+            model_totals[key] += int(model_metrics.get(key) or 0)
+        if model_metrics.get("prompt_tokens") is not None:
+            model_totals["prompt_tokens"] += int(model_metrics["prompt_tokens"])
+            have_prompt = True
+        if model_metrics.get("completion_tokens") is not None:
+            model_totals["completion_tokens"] += int(
+                model_metrics["completion_tokens"]
+            )
+            have_completion = True
     categories: dict[str, dict[str, int]] = {}
     for scenario in scenarios:
         bucket = categories.setdefault(
@@ -257,6 +315,32 @@ def metrics_from_scenarios(report: dict[str, Any]) -> dict[str, Any]:
             "criteria_passed": quality_passed,
             "criterion_pass_rate": rate(quality_passed, quality_criteria),
         },
+        "model": {
+            **model_totals,
+            "prompt_tokens": (
+                model_totals["prompt_tokens"] if have_prompt else None
+            ),
+            "completion_tokens": (
+                model_totals["completion_tokens"] if have_completion else None
+            ),
+            "total_tokens": (
+                model_totals["prompt_tokens"]
+                + model_totals["completion_tokens"]
+                if (have_prompt or have_completion) else None
+            ),
+            "latency_mean_ms": (
+                round(model_totals["latency_ms"] / model_totals["calls"])
+                if model_totals["calls"] else None
+            ),
+            "tokens_per_second": (
+                round(
+                    model_totals["completion_tokens"]
+                    / (model_totals["latency_ms"] / 1000),
+                    1,
+                )
+                if have_completion and model_totals["latency_ms"] > 0 else None
+            ),
+        },
         "categories": categories,
         "failures": [
             failure
@@ -277,4 +361,34 @@ def metrics_from_scenarios(report: dict[str, Any]) -> dict[str, Any]:
                 if assertion.get("status") == "failed"
             ]
         ],
+    }
+
+
+def _steps_model_fallback(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reconstruct model totals for reports written before scenario totals."""
+    calls = latency = prompt = completion = iterations = tool_calls = runs = 0
+    have_prompt = have_completion = False
+    for step in steps:
+        metrics = step.get("model") or {}
+        calls += int(metrics.get("calls") or 0)
+        latency += int(metrics.get("latency_ms") or 0)
+        runs += int(metrics.get("runs") or 0)
+        iterations += int(metrics.get("iterations") or 0)
+        tool_calls += int(metrics.get("tool_calls") or 0)
+        if metrics.get("prompt_tokens") is not None:
+            prompt += int(metrics["prompt_tokens"])
+            have_prompt = True
+        if metrics.get("completion_tokens") is not None:
+            completion += int(metrics["completion_tokens"])
+            have_completion = True
+    if not calls and not runs:
+        return {}
+    return {
+        "calls": calls,
+        "runs": runs,
+        "latency_ms": latency,
+        "prompt_tokens": prompt if have_prompt else None,
+        "completion_tokens": completion if have_completion else None,
+        "iterations": iterations,
+        "tool_calls": tool_calls,
     }

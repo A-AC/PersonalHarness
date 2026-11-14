@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,11 @@ import yaml
 from harness.__main__ import main
 from harness.evaluation import cli as cli_mod
 from harness.evaluation import runner as runner_mod
+from harness.evaluation.aggregate import (
+    aggregate_reports,
+    load_reports,
+    render_aggregate,
+)
 from harness.evaluation.compare import compare_reports, render_comparison
 from harness.evaluation.loader import (
     ScenarioError,
@@ -103,11 +109,12 @@ def test_shipped_scenario_suite_is_mode_partitioned() -> None:
     scenarios = load_scenarios(Path(__file__).resolve().parents[1] / "eval"
                                / "scenarios")
     ids = {scenario.id for scenario in scenarios}
-    assert len(scenarios) >= 43
+    assert len(scenarios) >= 53
     assert "a_plain_reply" in ids
     assert "g_live_plain_reply" in ids
     assert "h_loop_remember_then_search" in ids
     assert "i_live_multi_tool_loop" in ids
+    assert "j_live_three_bullets" in ids
     live = select_scenarios(scenarios, mode="live")
     deterministic = select_scenarios(scenarios, mode="deterministic")
     assert live and all(scenario.modes == ["live"] for scenario in live)
@@ -115,6 +122,7 @@ def test_shipped_scenario_suite_is_mode_partitioned() -> None:
         "live" not in scenario.modes for scenario in deterministic
     )
     assert "i_live_multi_tool_loop" in {scenario.id for scenario in live}
+    assert "j_live_unknown_fact" in {scenario.id for scenario in live}
     assert "h_loop_remember_then_search" in {
         scenario.id for scenario in deterministic
     }
@@ -377,6 +385,252 @@ def test_quality_rubric_matchers() -> None:
     failed = {item["id"] for item in short["criteria"]
               if item["status"] == "failed"}
     assert failed == {"no_beta", "short"}
+
+
+def test_quality_regex_count_matchers() -> None:
+    step = ScenarioStep(kind="turn", expect={"quality": {"rubric": [{
+        "id": "bullets",
+        "regex": r"(?m)^\s*[-*]\s+\S",
+        "min_matches": 2,
+        "max_matches": 3,
+    }]}})
+
+    def score(message: str) -> dict:
+        class Result:
+            pass
+
+        class Obs:
+            result = Result()
+
+        Obs.result.message = message
+        Obs.step = step
+        return evaluate_quality(Obs())
+
+    assert score("- alpha\n- beta\n")["score"] == 1.0
+    assert score("- alpha\n")["score"] == 0.0
+    assert score("- a\n- b\n- c\n- d\n")["score"] == 0.0
+
+
+def test_quality_regex_counts_numbered_lists() -> None:
+    """The list criterion must count ``2.``/``3.``, not only the literal ``1.``."""
+    step = ScenarioStep(kind="turn", expect={"quality": {"rubric": [{
+        "id": "uses_a_list",
+        "regex": r"(?m)^\s*(\d+[.)]|[-*])\s+",
+        "min_matches": 3,
+        "max_matches": 5,
+    }]}})
+
+    def score(message: str) -> float:
+        class Obs:
+            pass
+
+        Obs.result = type("Result", (), {"message": message})()
+        Obs.step = step
+        return evaluate_quality(Obs())["score"]
+
+    assert score("1. weather\n2. water\n3. bail-out\n") == 1.0
+    assert score("1) weather\n2) water\n3) bail-out\n") == 1.0
+    assert score("1. weather\n2. water\n") == 0.0
+
+
+def test_run_bounds_assertions(tmp_path: Path) -> None:
+    def scenario(iterations_max: int, tool_calls_max: int) -> dict:
+        return {
+            "scenarios": [{
+                "id": "unit_bounds",
+                "name": "Run bounds are enforced",
+                "category": "unit",
+                "modes": ["deterministic"],
+                "steps": [{
+                    "kind": "turn",
+                    "input": "answer",
+                    "script": [{"content": "Done."}],
+                    "expect": {
+                        "status": "completed",
+                        "run": {
+                            "iterations_max": iterations_max,
+                            "tool_calls_max": tool_calls_max,
+                        },
+                    },
+                }],
+            }]
+        }
+
+    good = load_scenarios(_write_scenarios(
+        tmp_path / "good.yaml", scenario(1, 0)
+    ))
+    run = run_evaluation(
+        good, mode="deterministic", sandbox=tmp_path / "sandbox",
+        results_dir=tmp_path / "results", tag="bounds_good", environ={},
+    )
+    assert run.scenarios[0].status == "passed"
+
+    bad = load_scenarios(_write_scenarios(
+        tmp_path / "bad.yaml", scenario(0, 0)
+    ))
+    run = run_evaluation(
+        bad, mode="deterministic", sandbox=tmp_path / "sandbox2",
+        results_dir=tmp_path / "results", tag="bounds_bad", environ={},
+    )
+    assert run.scenarios[0].status == "failed"
+    assert any(
+        assertion.id == "s1.run.iterations_max"
+        and assertion.status == "failed"
+        for assertion in run.scenarios[0].assertions
+    )
+
+
+def test_model_metrics_are_recorded(tmp_path: Path) -> None:
+    scenarios = load_scenarios(
+        _write_scenarios(tmp_path / "scenarios.yaml", PLAIN_SCENARIO)
+    )
+    run = run_evaluation(
+        scenarios, mode="deterministic", sandbox=tmp_path / "sandbox",
+        results_dir=tmp_path / "results", tag="metrics", environ={},
+        model="unit-model",
+    )
+    report = load_run("metrics", tmp_path / "results")
+    assert report["metrics"]["model"]["calls"] >= 1
+    assert report["scenarios"][0]["model"]["calls"] >= 1
+    assert report["scenarios"][0]["steps"][0]["model"]["calls"] >= 1
+    assert "Model latency (mean)" in Path(run.report_path).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_resumed_step_model_metrics_are_per_step(tmp_path: Path) -> None:
+    """An approval step must not re-count the tool call that created it."""
+    scenarios = select_scenarios(
+        load_scenarios(),
+        mode="deterministic",
+        ids="h_loop_resumes_after_approval",
+    )
+    run = run_evaluation(
+        scenarios, mode="deterministic", sandbox=tmp_path / "sandbox",
+        results_dir=tmp_path / "results", tag="resume_metrics", environ={},
+    )
+    steps = run.scenarios[0].steps
+    assert steps[0].model["calls"] == 1
+    assert steps[0].model["iterations"] == 1
+    # The approval-gated call is not executed (or counted) until approval.
+    assert steps[0].model["tool_calls"] == 0
+    # The approved tool plus the resumed loop's update_task_notes run here,
+    # with one model call for each and none re-counted from the first step.
+    assert steps[1].model["calls"] == 2
+    assert steps[1].model["iterations"] == 2
+    assert steps[1].model["tool_calls"] == 2
+
+
+def _synthetic_report(
+    model: str,
+    tag: str,
+    *,
+    status: str,
+    score: float,
+    latency: int,
+    wall: int,
+) -> dict:
+    return {
+        "tag": tag,
+        "run_id": f"run_{tag}",
+        "mode": "live",
+        "model": {"name": model},
+        "scenarios": [{
+            "scenario_id": "quiet_task",
+            "category": "unit",
+            "status": status,
+            "duration_ms": wall,
+            "assertions": [
+                {"id": "s1.status.completed", "status": "passed"},
+            ],
+            "steps": [{
+                "name": "turn",
+                "quality": {
+                    "score": score,
+                    "criteria": [
+                        {"id": "answers", "status": "passed"},
+                        {"id": "brief", "status": "passed" if score >= 0.9
+                         else "failed"},
+                    ],
+                },
+                "model": {
+                    "calls": 1,
+                    "runs": 1,
+                    "latency_ms": latency,
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "iterations": 1,
+                    "tool_calls": 0,
+                },
+            }],
+            "model": {
+                "calls": 1,
+                "runs": 1,
+                "latency_ms": latency,
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "iterations": 1,
+                "tool_calls": 0,
+            },
+        }],
+    }
+
+
+def test_aggregate_reports_distributions(tmp_path: Path) -> None:
+    results = tmp_path / "results"
+    results.mkdir()
+    reports = [
+        _synthetic_report("alpha", "a1", status="passed", score=1.0,
+                          latency=100, wall=120),
+        _synthetic_report("alpha", "a2", status="passed", score=1.0,
+                          latency=200, wall=220),
+        _synthetic_report("beta", "b1", status="failed", score=0.5,
+                          latency=50, wall=60),
+    ]
+    for index, report in enumerate(reports):
+        (results / f"r{index}.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+    reports = load_reports(["r*.json"], results)
+    aggregation = aggregate_reports(reports)
+    assert set(aggregation["models"]) == {"alpha", "beta"}
+    alpha = aggregation["models"]["alpha"]
+    assert alpha["runs"] == 2
+    assert alpha["scenario_pass_rate"]["value"] == 1.0
+    assert alpha["quality_mean"] == 1.0
+    assert alpha["model_ms"]["mean"] == 150.0
+    assert alpha["model_ms"]["stdev"] == 50.0
+    beta = aggregation["models"]["beta"]
+    assert beta["scenario_pass_rate"]["value"] == 0.0
+    assert beta["criterion_failures"] == {"brief": 1}
+
+    text = render_aggregate(aggregation)
+    assert "Aggregate model comparison" in text
+    assert "Per scenario" in text
+    assert "`quiet_task`" in text
+    assert "Rubric criterion failures" in text
+
+
+def test_cli_aggregate_writes_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    results = tmp_path / "results"
+    results.mkdir()
+    for index, report in enumerate([
+        _synthetic_report("alpha", "a", status="passed", score=1.0,
+                          latency=100, wall=120),
+        _synthetic_report("beta", "b", status="passed", score=0.8,
+                          latency=50, wall=70),
+    ]):
+        (results / f"agg{index}.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+    main(["eval", "--aggregate", "agg*.json", "--results-dir", str(results)])
+    out = capsys.readouterr().out
+    assert "Aggregate model comparison" in out
+    assert "`alpha`" in out and "`beta`" in out
+    assert (results / "aggregate_alpha_vs_beta.md").is_file()
+    assert (results / "aggregate_alpha_vs_beta.json").is_file()
 
 
 

@@ -203,6 +203,17 @@ def _contains(text: Any, needle: Any) -> bool:
     return str(needle).lower() in haystack
 
 
+def _time_key(value: Any) -> str:
+    """Compare ``7:30`` and ``07:30`` as the same wall-clock time."""
+    parts = str(value or "").split(":")
+    if len(parts) >= 2:
+        try:
+            return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+        except ValueError:
+            pass
+    return str(value or "")
+
+
 def _partial(item: dict[str, Any], spec: dict[str, Any]) -> bool:
     for key, value in spec.items():
         if key in ("content_contains", "objective_contains"):
@@ -324,6 +335,12 @@ def _names(app, domain_id: str | None) -> str | None:
 
 def _check_status(obs: Observation, value: Any, add) -> None:
     observed = getattr(obs.result, "status", None)
+    if isinstance(value, list):
+        allowed = [str(item) for item in value]
+        ok = observed is not None and str(observed) in allowed
+        add("status", "any", ok, allowed, observed,
+            f"run status was {observed!r}, expected one of {allowed!r}")
+        return
     ok = observed is not None and str(observed) == str(value)
     add("status", str(value), ok, value, observed,
         f"run status was {observed!r}, expected {value!r}")
@@ -488,10 +505,18 @@ def _check_run(obs: Observation, value: Any, add) -> None:
             ok = int(run.get("iterations") or 0) >= int(expected)
             add("run", "iterations_min", ok, expected, run.get("iterations"),
                 "run used fewer model iterations than expected")
+        elif key == "iterations_max":
+            ok = int(run.get("iterations") or 0) <= int(expected)
+            add("run", "iterations_max", ok, expected, run.get("iterations"),
+                "run used more model iterations than expected")
         elif key == "tool_calls_min":
             ok = int(run.get("tool_calls") or 0) >= int(expected)
             add("run", "tool_calls_min", ok, expected, run.get("tool_calls"),
                 "run executed fewer tool calls than expected")
+        elif key == "tool_calls_max":
+            ok = int(run.get("tool_calls") or 0) <= int(expected)
+            add("run", "tool_calls_max", ok, expected, run.get("tool_calls"),
+                "run executed more tool calls than expected")
         elif key == "context_not_empty":
             ok = bool(util.loads(run.get("context_sources") or "", [])) is bool(
                 expected)
@@ -751,6 +776,20 @@ def _check_schedules(obs: Observation, value: Any, add) -> None:
         found = [s for s in schedules if s.get("kind") == value["kind"]]
         add("schedules", "kind", bool(found), value["kind"],
             [s.get("kind") for s in schedules], "expected kind was not found")
+    if "time_of_day" in value:
+        wanted = _time_key(value["time_of_day"])
+        found = [s for s in schedules
+                 if _time_key(s.get("time_of_day")) == wanted]
+        add("schedules", "time_of_day", bool(found), value["time_of_day"],
+            [s.get("time_of_day") for s in schedules],
+            "expected time_of_day was not found")
+    if "weekday" in value:
+        wanted = str(value["weekday"]).lower()[:3]
+        found = [s for s in schedules
+                 if str(s.get("weekday") or "").lower()[:3] == wanted]
+        add("schedules", "weekday", bool(found), value["weekday"],
+            [s.get("weekday") for s in schedules],
+            "expected weekday was not found")
     if "enabled" in value:
         found = [s for s in schedules if bool(s.get("enabled")) is bool(
             value["enabled"])]

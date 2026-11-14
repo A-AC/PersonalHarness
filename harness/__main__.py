@@ -760,6 +760,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print the stored summary for a report tag or path")
     p.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"),
                    help="compare two stored reports by tag or path")
+    p.add_argument("--aggregate", nargs="+", metavar="TAG",
+                   help="aggregate stored reports (tags, paths, or globs) "
+                        "into per-model distributions")
     p.set_defaults(func=cmd_eval)
 
     return parser

@@ -15,6 +15,7 @@ import yaml
 from .. import util
 from ..app import App
 from ..config import DEFAULTS, Config
+from ..db import rows_to_dicts
 from ..model import ModelClient, ScriptedModel
 from ..runtime import RunResult
 from .assertions import Observation, evaluate
@@ -393,6 +394,7 @@ class Evaluator:
             started_at=util.iso(),
         )
         started = time.monotonic()
+        baseline = self._metric_baseline(app)
         observation = Observation(
             app=app, step=step, step_index=index,
             started_at=step_result.started_at, severity=scenario.severity,
@@ -407,6 +409,9 @@ class Evaluator:
         step_result.finished_at = util.iso()
         step_result.duration_ms = int((time.monotonic() - started) * 1000)
         step_result.evidence = observation.evidence
+        step_result.model = self._step_model_metrics(
+            app, step_result.run_id, baseline
+        )
         try:
             assertions = evaluate(observation)
         except Exception as exc:
@@ -660,6 +665,114 @@ class Evaluator:
             "task_id": step_result.task_id,
             "run_id": step_result.run_id,
             "response": step_result.response,
+        }
+
+    @staticmethod
+    def _metric_baseline(app: App) -> dict[str, Any]:
+        """Snapshot counters so a resumed step reports only its own work.
+
+        A step that resumes a waiting run shares that run with earlier steps.
+        Without a baseline, ``run.tool_calls_max`` on the approval step would
+        re-count the tool call that created the approval.
+        """
+        last_event = app.db.query_one(
+            "SELECT MAX(id) AS id FROM event_log"
+        )
+        runs = rows_to_dicts(app.db.query(
+            "SELECT id, iterations, tool_calls FROM runs"
+        ))
+        return {
+            "event_id": int(last_event["id"] or 0) if last_event else 0,
+            "runs": {
+                row["id"]: (
+                    int(row.get("iterations") or 0),
+                    int(row.get("tool_calls") or 0),
+                )
+                for row in runs
+            },
+        }
+
+    @staticmethod
+    def _step_model_metrics(
+        app: App, run_id: str, baseline: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Model time and token usage for one step's run tree.
+
+        The runtime already records one ``model.call`` event per completion
+        with latency and token counts. Reading those events keeps evaluation
+        reporting separate from the runtime hot path and includes sub-agent
+        child runs that a step produced. Counts are deltas against the step
+        baseline, so a resumed run does not re-report earlier steps.
+        """
+        if not run_id:
+            return {}
+        roots = rows_to_dicts(app.db.query(
+            "SELECT id, iterations, tool_calls FROM runs WHERE id=?", (run_id,)
+        ))
+        if not roots:
+            return {}
+        children = rows_to_dicts(app.db.query(
+            "SELECT id, iterations, tool_calls FROM runs WHERE parent_run_id=?",
+            (run_id,),
+        ))
+        runs = roots + children
+        run_ids = [row["id"] for row in runs]
+        placeholders = ",".join("?" for _ in run_ids)
+        baseline = baseline or {}
+        previous = baseline.get("runs") or {}
+        since_event = int(baseline.get("event_id") or 0)
+        events = rows_to_dicts(app.db.query(
+            "SELECT data FROM event_log WHERE type='model.call'"
+            f" AND run_id IN ({placeholders}) AND id > ?",
+            tuple(run_ids) + (since_event,),
+        ))
+        latency = prompt = completion = 0
+        have_prompt = have_completion = False
+        for row in events:
+            data = util.loads(row.get("data") or "{}", {})
+            if not isinstance(data, dict):
+                continue
+            if data.get("latency_ms") is not None:
+                latency += int(data["latency_ms"])
+            if data.get("prompt_tokens") is not None:
+                prompt += int(data["prompt_tokens"])
+                have_prompt = True
+            if data.get("completion_tokens") is not None:
+                completion += int(data["completion_tokens"])
+                have_completion = True
+        calls = len(events)
+        iterations = tool_calls = 0
+        active_runs = 0
+        for row in runs:
+            before_iterations, before_calls = previous.get(row["id"], (0, 0))
+            step_iterations = max(
+                0, int(row.get("iterations") or 0) - before_iterations
+            )
+            step_calls = max(
+                0, int(row.get("tool_calls") or 0) - before_calls
+            )
+            iterations += step_iterations
+            tool_calls += step_calls
+            if step_iterations or step_calls:
+                active_runs += 1
+        if calls and not active_runs:
+            active_runs = len(runs)
+        return {
+            "calls": calls,
+            "runs": active_runs,
+            "latency_ms": latency,
+            "latency_mean_ms": round(latency / calls) if calls else None,
+            "prompt_tokens": prompt if have_prompt else None,
+            "completion_tokens": completion if have_completion else None,
+            "total_tokens": (
+                prompt + completion if (have_prompt or have_completion) else None
+            ),
+            "tokens_per_second": (
+                round(completion / (latency / 1000), 1)
+                if have_completion and latency > 0 else None
+            ),
+            "iterations": iterations,
+            "tool_calls": tool_calls,
         }
 
     @staticmethod

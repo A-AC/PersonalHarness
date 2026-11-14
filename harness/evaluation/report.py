@@ -69,6 +69,15 @@ def render_markdown(run: EvaluationRun) -> str:
         _row("Rubric criteria", _rate_text(
             (counts.get("quality") or {}).get("criterion_pass_rate") or {}
         )),
+        _row("Model time (sum)", _duration_text(
+            (counts.get("model") or {}).get("latency_ms")
+        )),
+        _row("Model latency (mean)", _duration_text(
+            (counts.get("model") or {}).get("latency_mean_ms")
+        )),
+        _row("Completion tokens/s", _number_text(
+            (counts.get("model") or {}).get("tokens_per_second")
+        )),
         _row("Statuses", counts["scenarios_by_status"]),
         "",
     ]
@@ -116,14 +125,18 @@ def render_markdown(run: EvaluationRun) -> str:
     lines.extend([
         "## Scenarios",
         "",
-        "| Scenario | Mode | Repeat | Status | Duration |",
-        "| --- | --- | ---: | --- | ---: |",
+        "| Scenario | Mode | Repeat | Status | Wall | Model | Iter | Tools |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: |",
     ])
     for scenario in data["scenarios"]:
+        model_metrics = scenario.get("model") or {}
         lines.append(
             f"| `{scenario['scenario_id']}` | {scenario['mode']} "
             f"| {scenario['repeat']} | {scenario['status']} "
-            f"| {scenario['duration_ms']} ms |"
+            f"| {scenario['duration_ms']} ms "
+            f"| {_duration_text(model_metrics.get('latency_ms'))} "
+            f"| {_number_text(model_metrics.get('iterations'), 0)} "
+            f"| {_number_text(model_metrics.get('tool_calls'), 0)} |"
         )
     lines.append("")
 
@@ -193,6 +206,11 @@ def summary_lines(run: dict[str, Any]) -> list[str]:
         f"critical failures {counts.get('critical_failures', 0)}",
         f"quality mean {_score_text((counts.get('quality') or {}).get('mean_score'))}"
         f" | rubric criteria {_rate_text((counts.get('quality') or {}).get('criterion_pass_rate') or {})}",
+        f"model time {_duration_text((counts.get('model') or {}).get('latency_ms'))}"
+        f" | latency mean "
+        f"{_duration_text((counts.get('model') or {}).get('latency_mean_ms'))}"
+        f" | tokens/s "
+        f"{_number_text((counts.get('model') or {}).get('tokens_per_second'))}",
     ]
     for bucket, count in sorted(
         (counts.get("scenarios_by_status") or {}).items()
@@ -227,6 +245,27 @@ def _score_text(value: Any) -> str:
         return "n/a"
     try:
         return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _duration_text(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        milliseconds = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if milliseconds >= 1000:
+        return f"{milliseconds / 1000:.1f} s"
+    return f"{milliseconds:.0f} ms"
+
+
+def _number_text(value: Any, digits: int = 1) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.{digits}f}"
     except (TypeError, ValueError):
         return str(value)
 

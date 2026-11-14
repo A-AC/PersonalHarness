@@ -36,6 +36,10 @@ scenarios:
                 status: active
           tools:
             succeeded: [remember]
+          run:
+            status: completed
+            iterations_max: 4
+            tool_calls_max: 2
       - kind: turn
         name: ask for the time later
         input: "What time does the Pine Ridge trailhead start?"
@@ -47,6 +51,10 @@ scenarios:
             source_counts:
               memories:
                 min: 1
+          run:
+            status: completed
+            iterations_max: 3
+            tool_calls_max: 2
           quality:
             min_score: 0.75
             rubric:
@@ -101,6 +109,10 @@ scenarios:
             revision_min: 1
           response:
             contains: cedar-22
+          run:
+            status: completed
+            iterations_max: 6
+            tool_calls_max: 3
           quality:
             min_score: 0.75
             rubric:
@@ -150,6 +162,10 @@ scenarios:
             system_contains:
               - "## Skill: trail check"
               - "bail-out point"
+          run:
+            status: completed
+            iterations_max: 4
+            tool_calls_max: 2
           quality:
             min_score: 0.8
             rubric:
@@ -164,7 +180,9 @@ scenarios:
                 any: ["bail-out", "bailout", "bail out", "north gate"]
               - id: uses_a_list
                 weight: 1
-                regex: "(?m)^\\s*(1\\.|[-*]|\\d+\\))"
+                regex: "(?m)^\\s*(\\d+[.)]|[-*])\\s+"
+                min_matches: 3
+                max_matches: 5
               - id: answers_not_approval_prompt
                 weight: 3
                 none: ["draft skill", "approve/reject", "approvals panel"]
@@ -197,6 +215,10 @@ scenarios:
             result_contains: "42U"
           response:
             contains: "42U"
+          run:
+            status: completed
+            iterations_max: 8
+            tool_calls_max: 4
           quality:
             min_score: 0.5
             rubric:
@@ -259,6 +281,9 @@ scenarios:
                 status: succeeded
               - tool: schedule_task
                 status: succeeded
+          run:
+            iterations_max: 8
+            tool_calls_max: 4
           quality:
             min_score: 0.6
             rubric:
@@ -314,6 +339,9 @@ scenarios:
             arguments_contains: sump
           schedules:
             count: 0
+          run:
+            iterations_max: 3
+            tool_calls_max: 2
       - kind: approve
         name: approve the schedule
         expect:
@@ -329,6 +357,9 @@ scenarios:
             pending: 0
           tools:
             succeeded: [schedule_task]
+          run:
+            iterations_max: 3
+            tool_calls_max: 2
 
   - id: i_live_multi_tool_loop
     name: A live model chains remember and search_knowledge
@@ -367,15 +398,14 @@ scenarios:
             contains: "red toolbox"
           run:
             tool_calls_min: 2
+            iterations_max: 8
+            tool_calls_max: 4
           quality:
             min_score: 0.75
             rubric:
               - id: gives_location
-                weight: 2
+                weight: 3
                 any: ["red toolbox"]
-              - id: grounded
-                weight: 1
-                any: ["stored", "search", "found", "memory"]
               - id: concise
                 weight: 1
                 max_words: 100

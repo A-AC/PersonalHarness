@@ -24,6 +24,7 @@ Two modes:
 
 from __future__ import annotations
 
+from .aggregate import aggregate_reports, render_aggregate
 from .loader import load_scenarios, select_scenarios
 from .models import (
     AssertionResult,
@@ -45,7 +46,9 @@ __all__ = [
     "ScenarioResult",
     "ScenarioStep",
     "StepResult",
+    "aggregate_reports",
     "load_scenarios",
+    "render_aggregate",
     "run_evaluation",
     "select_scenarios",
 ]

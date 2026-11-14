@@ -139,6 +139,7 @@ class StepResult:
     error: str | None = None
     assertions: list[AssertionResult] = field(default_factory=list)
     quality: dict[str, Any] = field(default_factory=dict)
+    model: dict[str, Any] = field(default_factory=dict)
     evidence: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -158,6 +159,7 @@ class StepResult:
             "error": self.error,
             "assertions": [item.as_dict() for item in self.assertions],
             "quality": self.quality,
+            "model": self.model,
             "evidence": self.evidence,
         }
 
@@ -203,6 +205,7 @@ class ScenarioResult:
             "data_dir": self.data_dir,
             "steps": [step.as_dict() for step in self.steps],
             "assertions": [item.as_dict() for item in self.assertions],
+            "model": _step_model_totals(self.steps),
         }
 
 
@@ -295,7 +298,100 @@ def metrics(run: EvaluationRun) -> dict[str, Any]:
         ]),
         "categories": categories,
         "quality": quality,
+        "model": _model_metrics(scenarios),
         "failures": failures,
+    }
+
+
+def _step_model_totals(steps: list[StepResult]) -> dict[str, Any]:
+    """Sum recorded model calls for one step or scenario.
+
+    Latency here is model time only (the endpoint round trip recorded in the
+    ``model.call`` event). It excludes tool execution, approvals, and ticks so
+    it can be compared across harnesses and across models.
+    """
+    calls = latency_ms = prompt = completion = iterations = tool_calls = 0
+    runs = 0
+    have_prompt = have_completion = False
+    for step in steps:
+        metrics = step.model or {}
+        calls += int(metrics.get("calls") or 0)
+        latency_ms += int(metrics.get("latency_ms") or 0)
+        iterations += int(metrics.get("iterations") or 0)
+        tool_calls += int(metrics.get("tool_calls") or 0)
+        runs += int(metrics.get("runs") or 0)
+        if metrics.get("prompt_tokens") is not None:
+            prompt += int(metrics["prompt_tokens"])
+            have_prompt = True
+        if metrics.get("completion_tokens") is not None:
+            completion += int(metrics["completion_tokens"])
+            have_completion = True
+    if not calls and not runs:
+        return {}
+    total = (prompt if have_prompt else 0) + (
+        completion if have_completion else 0
+    )
+    return {
+        "calls": calls,
+        "runs": runs,
+        "latency_ms": latency_ms,
+        "latency_mean_ms": round(latency_ms / calls) if calls else None,
+        "prompt_tokens": prompt if have_prompt else None,
+        "completion_tokens": completion if have_completion else None,
+        "total_tokens": total if (have_prompt or have_completion) else None,
+        "tokens_per_second": (
+            round(completion / (latency_ms / 1000), 1)
+            if have_completion and latency_ms > 0 else None
+        ),
+        "iterations": iterations,
+        "tool_calls": tool_calls,
+    }
+
+
+def _model_metrics(scenarios: list[ScenarioResult]) -> dict[str, Any]:
+    """Model latency and token usage, kept separate from wall-clock duration."""
+    totals: dict[str, int] = {
+        "calls": 0, "runs": 0, "latency_ms": 0, "prompt_tokens": 0,
+        "completion_tokens": 0, "iterations": 0, "tool_calls": 0,
+    }
+    have_prompt = have_completion = False
+    per_scenario: list[dict[str, Any]] = []
+    for scenario in scenarios:
+        metrics = _step_model_totals(scenario.steps)
+        if not metrics:
+            continue
+        for key in ("calls", "runs", "latency_ms", "iterations", "tool_calls"):
+            totals[key] += int(metrics.get(key) or 0)
+        if metrics.get("prompt_tokens") is not None:
+            totals["prompt_tokens"] += int(metrics["prompt_tokens"])
+            have_prompt = True
+        if metrics.get("completion_tokens") is not None:
+            totals["completion_tokens"] += int(metrics["completion_tokens"])
+            have_completion = True
+        per_scenario.append({
+            "scenario_id": scenario.scenario_id,
+            "repeat": scenario.repeat,
+            "status": scenario.status,
+            "duration_ms": scenario.duration_ms,
+            **metrics,
+        })
+    calls = totals["calls"]
+    latency = totals["latency_ms"]
+    completion = totals["completion_tokens"]
+    return {
+        **totals,
+        "prompt_tokens": totals["prompt_tokens"] if have_prompt else None,
+        "completion_tokens": completion if have_completion else None,
+        "total_tokens": (
+            totals["prompt_tokens"] + completion
+            if (have_prompt or have_completion) else None
+        ),
+        "latency_mean_ms": round(latency / calls) if calls else None,
+        "tokens_per_second": (
+            round(completion / (latency / 1000), 1)
+            if have_completion and latency > 0 else None
+        ),
+        "scenarios": per_scenario,
     }
 
 

@@ -70,9 +70,17 @@ def _criterion(response: str, criterion: dict[str, Any]) -> tuple[bool, str]:
             str(item).lower() in text for item in _list(criterion["none"])
         )
     if "regex" in criterion:
-        passed = passed and re.search(
-            str(criterion["regex"]), response, re.IGNORECASE
-        ) is not None
+        pattern = str(criterion["regex"])
+        if "min_matches" in criterion or "max_matches" in criterion:
+            count = len(re.findall(pattern, response, re.IGNORECASE))
+            if "min_matches" in criterion:
+                passed = passed and count >= int(criterion["min_matches"])
+            if "max_matches" in criterion:
+                passed = passed and count <= int(criterion["max_matches"])
+        else:
+            passed = passed and re.search(
+                pattern, response, re.IGNORECASE
+            ) is not None
     words = len(re.findall(r"\S+", response))
     if "min_words" in criterion:
         passed = passed and words >= int(criterion["min_words"])

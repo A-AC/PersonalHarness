@@ -31,6 +31,11 @@ suite partitions them:
 | `g_live.yaml` | live | Single-turn smoke/capability checks |
 | `h_agent_loops.yaml` | deterministic | Sequential multi-tool loops, recovery, approval boundaries, budgets, deferred batches |
 | `i_live_behavior.yaml` | live | Multi-turn continuity, correction, skill following, delegation, hostile inbox, scheduling, live tool chaining |
+| `j_live_holdout.yaml` | live | Held-out judgment and instruction following: unknown facts, contradictions, exact tool arguments, grounding, secret refusal, strict format |
+
+The `j_` suite is a holdout. It was written after the behavior prompts were
+tuned and is intentionally not used to tune them further. Use it to check
+whether a model result generalizes instead of overfitting the tuned suite.
 
 ## What this suite measures
 
@@ -50,10 +55,21 @@ suite partitions them:
   can hide a loop or a refused instruction, and a keyword failure can be a
   wording difference rather than worse behavior.
 
-Treat latency and quality as separate axes. Measure latency from the report
-durations (including per-scenario durations), and measure quality with the
-rubric mean and criterion pass rate over multiple trials. Do not infer quality
-from scenario pass rate alone.
+Treat latency and quality as separate axes. Model latency is recorded from each
+`model.call` event (`latency_ms`, the endpoint round trip), not from scenario
+wall time. Wall time also contains tool execution, approvals, ticks, and harness
+overhead, so it answers "how long did the scenario take", not "how fast is the
+model". Reports show both, plus prompt/completion tokens, completion tokens per
+second, iterations, and tool calls per step, scenario, and run. Child sub-agent
+runs are included in the step that produced them, and per-step counters are
+deltas, so an approval step that resumes a run does not re-count the call that
+created the approval.
+
+- **`j_live_holdout.yaml`** adds discrimination where a saturated rubric cannot
+  separate models: admitting an unknown fact, surfacing a contradictory
+  request, constructing exact schedule arguments, grounded summarisation,
+  secret refusal, and strict output format. Treat it as the generalization
+  check for a routing decision.
 
 ## Running a different model
 
@@ -82,17 +98,35 @@ Follow up with:
 ```bash
 python -m harness eval --summary live_MODEL
 
-# Behavioral suite, three trials per model.
+# Behavioral suite, five trials per model.
 python -m harness eval --mode live --model MODEL_A --base-url http://HOST:PORT \
-    --scenario "i_live_*" --repeats 3 --tag behavior_MODEL_A
+    --scenario "i_live_*" --repeats 5 --tag behavior_MODEL_A
 python -m harness eval --mode live --model MODEL_B --base-url http://HOST:PORT \
-    --scenario "i_live_*" --repeats 3 --tag behavior_MODEL_B
+    --scenario "i_live_*" --repeats 5 --tag behavior_MODEL_B
+
+# Held-out judgment suite, three trials per model.
+python -m harness eval --mode live --model MODEL_A --base-url http://HOST:PORT \
+    --scenario "j_live_*" --repeats 3 --tag holdout_MODEL_A
+python -m harness eval --mode live --model MODEL_B --base-url http://HOST:PORT \
+    --scenario "j_live_*" --repeats 3 --tag holdout_MODEL_B
+
+# Per-model distributions and a per-scenario routing table.
+python -m harness eval --aggregate behavior_MODEL_A behavior_MODEL_B \
+    holdout_MODEL_A holdout_MODEL_B
 python -m harness eval --compare behavior_MODEL_A behavior_MODEL_B
 ```
 
-The comparison shows scenario/assertion pass rates and the rubric mean side by
-side. Use the per-scenario durations in the JSON/Markdown report for latency;
-do not compare total wall time from a different task mix.
+`--aggregate` accepts tags, report paths, or globs. It groups reports by the
+model recorded in each report and writes
+`aggregate_<model>_vs_<model>.{json,md}`. The output includes scenario and
+assertion pass rates over all repeats, rubric score distributions, per-criterion
+failure counts, model latency mean/median/spread, tokens per second, iterations,
+tool calls, wall time, and a per-scenario table. Read the per-scenario table to
+choose a fast path: a model that is much faster on simple actions while holding
+pass rate and rubric score is a routing candidate, not a global winner.
+
+Run repeats sequentially. Concurrent live runs share the endpoint and make
+latency numbers meaningless.
 
 ## Safety
 
@@ -187,9 +221,20 @@ harness correctness and reply quality on separate axes.
 ```
 
 Criterion keys: `any`, `all`, `none`, `regex`, `min_words`, `max_words`.
-`weight` defaults to 1. `min_score` records whether the weighted score crossed
-the threshold; the report shows scores, criterion pass rate, and any steps below
-their minimum.
+`weight` defaults to 1. `regex` is a presence match by default; add
+`min_matches` and/or `max_matches` to count matches instead. That expresses
+"exactly three bullets" without a second assertion language:
+
+```yaml
+- id: exactly_three_bullets
+  weight: 2
+  regex: "(?m)^\\s*[-*]\\s+\\S"
+  min_matches: 3
+  max_matches: 3
+```
+
+`min_score` records whether the weighted score crossed the threshold; the report
+shows scores, criterion pass rate, and any steps below their minimum.
 
 This is a rubric, not an LLM judge. Use a judge when subjective judgment is the
 thing being measured; the shipped suite stays offline and repeatable.
@@ -201,18 +246,18 @@ Every assertion reads persisted state. An unobservable expectation fails with
 
 | Check | Examples |
 | --- | --- |
-| `status` | `completed`, `waiting_approval`, `limit_reached` |
+| `status` | `completed`, `waiting_approval`, `limit_reached`, or a list of allowed statuses |
 | `response` | `contains`, `not_contains`, `regex`, `empty` |
 | `task` | `status`, `domain`, `role`, `parent`, `reason_contains` |
 | `tasks` | `count`, `exists: [{origin, status, tainted}]`, `none` |
 | `domains` | `exists`, `none`, `count` |
-| `run` | `status`, `iterations_min`, `tool_calls_min`, `context_not_empty` |
+| `run` | `status`, `iterations_min`, `iterations_max`, `tool_calls_min`, `tool_calls_max`, `context_not_empty` |
 | `memories` | `exists`, `none`, `count_min`, `superseded_contains`, `revision_min` |
 | `tools` | `calls`, `none`, `succeeded`, `forbidden`, `count_min`, `count_max`, `result_contains`, `error_contains`, `sequence`, `sequence_contiguous`, `deferred_min`, `deferred_max` |
-| `approvals` | `pending`, `tool`, `statuses`, `arguments_contains` |
+| `approvals` | `pending`, `count_max`, `tool`, `statuses`, `arguments_contains` |
 | `events` | `include`, `exclude`, `data` |
 | `context` | `sections`, `refs`, `system_contains`, `exclude_refs`, `source_counts` |
-| `schedules` | `count`, `enabled`, `occurrences`, `occurrences_statuses` |
+| `schedules` | `count`, `enabled`, `occurrences`, `occurrences_statuses`, `kind`, `time_of_day`, `weekday` |
 | `inbox` | `accepted`, `duplicate`, `triage_status`, `statuses`, `fires_min` |
 | `modules` | `statuses`, `absent`, `tools_include`, `tools_exclude` |
 | `subagents` | `count`, `statuses`, `result_contains`, `child_system_contains` |
@@ -226,3 +271,9 @@ can prove that a later call consumed the previous call's output. `tools.sequence
 checks an ordered subsequence (add `sequence_contiguous: true` for adjacent
 rows). `deferred_min` reads the run transcript for calls the runtime deferred
 because it executes one action per model response.
+
+Live behavior steps also set `run.iterations_max` and `run.tool_calls_max`. These
+are runaway bounds, not quality targets: they turn a model that re-plans or
+repeats a tool into a named failure instead of a slow, ambiguous pass. The
+runtime's own limits still apply; the scenario bound is deliberately tighter so
+the report says which scenario leaked.

@@ -22,6 +22,24 @@ from .runner import (
 def cmd_eval(args: Any) -> None:
     results_dir = Path(args.results_dir or Path("data") / "eval" / "results")
 
+    if args.aggregate:
+        from .aggregate import (
+            aggregate_reports,
+            load_reports,
+            render_aggregate,
+            write_aggregate,
+        )
+
+        try:
+            reports = load_reports(args.aggregate, results_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(f"aggregate failed: {exc}")
+        aggregation = aggregate_reports(reports)
+        print(render_aggregate(aggregation))
+        _, md_path = write_aggregate(aggregation, results_dir)
+        print(f"\naggregate written: {md_path}")
+        return
+
     if args.compare:
         before = load_run(args.compare[0], results_dir)
         after = load_run(args.compare[1], results_dir)

@@ -394,7 +394,11 @@ class MemoryManager:
         )
         if existing:
             row = rows_to_dicts([existing])[0]
-            return {"memory": self._to_public(row), "duplicate": True}
+            return {
+                "memory": self._to_public(row),
+                "duplicate": True,
+                "superseded": None,
+            }
 
         # Conflict: same subject (kind + strong keyword overlap) in scope —
         # the newer statement supersedes the older one.

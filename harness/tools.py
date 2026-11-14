@@ -969,7 +969,9 @@ class ToolRegistry:
             "scope": mem["scope"],
             "saved": util.clip(mem["content"], 400),
             "duplicate": out["duplicate"],
-            "superseded_id": out["superseded"]["id"] if out["superseded"] else None,
+            "superseded_id": (
+                out["superseded"]["id"] if out.get("superseded") else None
+            ),
         }
 
     def _tool_update_memory(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
