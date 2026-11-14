@@ -21,6 +21,7 @@ from typing import Any
 
 from . import util
 from . import transcript as transcript_mod
+from .approvals import ApprovalError
 from .config import Config
 from .db import Database, rows_to_dicts
 from .model import (
@@ -743,6 +744,9 @@ class AgentRuntime:
         the run must still be waiting on it. Anything else is stale and
         executes nothing.
         """
+        # Re-read the approval so execution uses the latest refined arguments
+        # even if the caller held an older snapshot of the request.
+        approval = self.approvals.get(approval["id"]) or approval
         run = self._run_row(approval["run_id"])
         task = self.tasks.get(approval["task_id"])
         if (
@@ -1223,8 +1227,9 @@ class AgentRuntime:
                         ),
                     }
 
-        # Skill writes are approval-gated and deduped by skill name, so a
-        # model cannot queue repeated proposals/edits for the same skill.
+        # Skill writes are approval-gated and deduped by skill name. A write in
+        # the same run may refine the request that is already pending; any
+        # other run must wait for that decision.
         if call.name in SKILL_WRITE_TOOLS:
             name = str((call.arguments or {}).get("name") or "").strip()
             for approval in self.approvals.pending():
@@ -1233,16 +1238,19 @@ class AgentRuntime:
                 pending_name = str(
                     (approval.get("arguments") or {}).get("name") or ""
                 ).strip().lower()
-                if name and pending_name == name.lower():
-                    return {
-                        "status": "denied",
-                        "error": (
-                            f"A skill change for '{name}' is already pending "
-                            f"({approval.get('tool')}, approval "
-                            f"{approval['id']}). Wait for that decision; do "
-                            "not propose it again."
-                        ),
-                    }
+                if not name or pending_name != name.lower():
+                    continue
+                if approval.get("run_id") == run_id:
+                    break
+                return {
+                    "status": "denied",
+                    "error": (
+                        f"A skill change for '{name}' is already pending "
+                        f"({approval.get('tool')}, approval "
+                        f"{approval['id']}). Wait for that decision; do "
+                        "not propose it again."
+                    ),
+                }
 
         # Trust/taint policy: once this run has consumed untrusted content, a
         # side-effecting tool is escalated to confirm even when it is
@@ -1289,9 +1297,22 @@ class AgentRuntime:
 
         if effective_risk == "confirm":
             pending = self.approvals.pending_for_run(run_id)
-            if pending is not None:
-                # A confirm-risk action is already awaiting a decision; do
-                # not stack a second one.
+            pending_name = str(
+                ((pending or {}).get("arguments") or {}).get("name") or ""
+            ).strip().lower()
+            call_name = str(
+                (call.arguments or {}).get("name") or ""
+            ).strip().lower()
+            refining_skill = (
+                pending is not None
+                and call.name in SKILL_WRITE_TOOLS
+                and pending.get("tool") in SKILL_WRITE_TOOLS
+                and bool(call_name)
+                and call_name == pending_name
+            )
+            if pending is not None and not refining_skill:
+                # A non-skill action, or a different skill, is already
+                # awaiting a decision; do not stack a second one.
                 return {
                     "status": "denied",
                     "error": "another action is already awaiting approval "
@@ -1311,7 +1332,29 @@ class AgentRuntime:
                         "error": "skills are disabled in configuration",
                     }
                 try:
-                    if call.name == "edit_skill":
+                    if refining_skill:
+                        # Build on the latest pending request, not the older
+                        # skill row, so successive refinements compose.
+                        base = dict(pending.get("arguments") or {})
+                        existing = skills.find_by_name(
+                            str(base.get("name") or "")
+                        )
+                        if (
+                            existing is not None
+                            and not skills.is_agent_owned(existing)
+                        ):
+                            return {
+                                "status": "denied",
+                                "error": skills.ownership_error(existing),
+                            }
+                        arguments = skills.merge_fields(
+                            base,
+                            description=arguments.get("description"),
+                            preconditions=arguments.get("preconditions"),
+                            domains=arguments.get("domains"),
+                            body=arguments.get("body"),
+                        )
+                    elif call.name == "edit_skill":
                         _, arguments = skills.edit_plan(
                             name=str(arguments.get("name") or ""),
                             description=arguments.get("description"),
@@ -1339,6 +1382,10 @@ class AgentRuntime:
                             }
                 except ValueError as exc:
                     return {"status": "denied", "error": str(exc)}
+            if refining_skill:
+                return self._refine_pending_skill_approval(
+                    run_id, task, pending, call, arguments,
+                )
             action = "create_domain" if call.name == "create_domain" else "tool"
             reason = (
                 f"untrusted content from {taint_origin} requires approval "
@@ -1427,6 +1474,67 @@ class AgentRuntime:
                 self._taint_origin(outcome.get("result")),
             )
         return outcome
+
+    def _refine_pending_skill_approval(
+        self,
+        run_id: str,
+        task: dict[str, Any],
+        pending: dict[str, Any],
+        call: ToolCall,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Fold a same-run skill write into the approval already pending.
+
+        The user keeps exactly one decision card: the approval's arguments
+        and the awaiting execution row are updated in place, so approving or
+        rejecting applies to the latest version rather than a stale one. No
+        skill is written and no second approval is created.
+        """
+        tool = str(pending.get("tool"))
+        reason = f"confirm-risk tool: {tool} (refined before approval)"
+        try:
+            approval = self.approvals.update_pending(
+                pending["id"], arguments=arguments, reason=reason,
+            )
+        except ApprovalError as exc:
+            return {"status": "denied", "error": str(exc)}
+        execution_id = self._awaiting_execution_id(approval["id"])
+        if execution_id is not None:
+            self.db.execute(
+                "UPDATE tool_executions SET arguments=? WHERE id=?"
+                " AND status='awaiting_approval'",
+                (util.dumps(arguments), execution_id),
+            )
+        self.events.record(
+            "approval.refined", task_id=task["id"], run_id=run_id,
+            data={
+                "approval_id": approval["id"],
+                "tool": tool,
+                "name": arguments.get("name"),
+                "via": call.name,
+            },
+        )
+        note = (
+            f"Refined the pending **{tool}** request for "
+            f"'{arguments.get('name')}'. The approval now shows this version; "
+            "no skill was written and no new approval was created. Approve "
+            "or reject it when ready.\n\n"
+            f"{self._skill_proposal_detail(arguments)}"
+        )
+        self.messages.record(
+            "note", note, source="system", task_id=task["id"], run_id=run_id,
+            domain_id=task.get("domain_id"), visible=self._visible(task),
+        )
+        return {
+            "status": "ok",
+            "result": {
+                "approval_id": approval["id"],
+                "tool": tool,
+                "name": arguments.get("name"),
+                "note": "the pending approval was updated in place; no skill "
+                        "was written and no new approval was created",
+            },
+        }
 
     def _skill_proposal_detail(self, arguments: dict[str, Any]) -> str:
         """Bounded, readable approval content for a skill write call."""

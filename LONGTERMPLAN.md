@@ -918,6 +918,8 @@ UI) and update this plan. Do not mix phases.
 | 2026-11-13 | Inbox triage shares the scheduler run budget and runs before due schedules | Urgent external work wins the tick while background model work stays bounded |
 | 2026-11-13 | The agent may refine only skills it created (`origin=agent`, `created_by=model|builder`) | Self-built procedures can improve without letting the model rewrite imported or user-authored instructions |
 | 2026-11-13 | User UI/API revisions keep the original ownership markers | An agent skill edited by the user remains agent-owned, while an imported or user-created skill stays read-only to the agent |
+| 2026-11-13 | A same-run skill write may refine the already-pending approval in place; another run may not | Lets the agent fine-tune a proposal before the user decides without stacking approvals or widening authorization |
+| 2026-11-13 | Refining an approval updates its arguments and the awaiting execution row, keeping the original tool and id | The recorded audit matches the action that will actually execute, and one decision still covers exactly one request |
 
 ---
 

@@ -210,6 +210,74 @@ class Approvals:
         )
         return self.get(approval_id)  # type: ignore[return-value]
 
+    def update_pending(
+        self,
+        approval_id: str,
+        *,
+        arguments: dict[str, Any],
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Refine a still-pending approval's exact action in place.
+
+        The approval stays bound to the same tool, run, and tool call; only
+        the authorized arguments (and optionally the reason) change, so the
+        user makes exactly one decision about the latest request.
+        """
+        now = util.iso()
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE id=?", (approval_id,)
+            ).fetchone()
+            if row is None:
+                raise ApprovalError(f"no such approval: {approval_id}")
+            approval = rows_to_dicts([row])[0]
+            if approval["status"] != "pending":
+                raise ApprovalError(
+                    f"approval {approval_id} is already {approval['status']}"
+                )
+            if self._is_expired(approval):
+                conn.execute(
+                    "UPDATE approvals SET status='expired', decided_at=?,"
+                    " decided_by='system' WHERE id=? AND status='pending'",
+                    (now, approval_id),
+                )
+                expired = True
+            else:
+                assignments = ["arguments=?"]
+                params: list[Any] = [util.dumps(arguments)]
+                if reason is not None:
+                    assignments.append("reason=?")
+                    params.append(reason)
+                params.append(approval_id)
+                cur = conn.execute(
+                    f"UPDATE approvals SET {', '.join(assignments)}"
+                    " WHERE id=? AND status='pending'",
+                    tuple(params),
+                )
+                if cur.rowcount != 1:
+                    raise ApprovalError(
+                        f"approval {approval_id} was decided concurrently"
+                    )
+                expired = False
+        if expired:
+            self.events.record(
+                "approval.expired", task_id=approval["task_id"],
+                run_id=approval["run_id"],
+                data={"approval_id": approval_id,
+                      "note": "expired before refinement"},
+            )
+            raise ApprovalError(f"approval {approval_id} expired")
+        self.events.record(
+            "approval.updated", task_id=approval["task_id"],
+            run_id=approval["run_id"],
+            data={
+                "approval_id": approval_id,
+                "tool": approval.get("tool"),
+                "fields": sorted(arguments),
+            },
+        )
+        return self.get(approval_id)  # type: ignore[return-value]
+
     def claim_for_execution(self, approval_id: str) -> str | None:
         """Atomically claim the awaiting execution for an approved approval.
 

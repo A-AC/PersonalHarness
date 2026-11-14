@@ -284,6 +284,40 @@ class SkillManager:
             "body": body,
         }
 
+    def merge_fields(
+        self,
+        base: dict[str, Any],
+        *,
+        description: Any = None,
+        preconditions: Any = None,
+        domains: Any = None,
+        body: Any = None,
+    ) -> dict[str, Any]:
+        """Merge provided fields over a pending request and validate them.
+
+        ``None`` means "inherit from the pending request", matching
+        ``edit_plan``; an explicit empty list still replaces the old list.
+        This lets the model fine-tune an approval without stacking a second
+        one.
+        """
+        return self.validate_fields(
+            name=str(base.get("name") or ""),
+            description=(
+                str(base.get("description") or "")
+                if description is None else description
+            ),
+            preconditions=(
+                base.get("preconditions")
+                if preconditions is None else preconditions
+            ),
+            domains=(
+                base.get("domains") if domains is None else domains
+            ),
+            body=(
+                str(base.get("body") or "") if body is None else body
+            ),
+        )
+
     # -- import ----------------------------------------------------------
 
     def import_configured(self) -> list[str]:

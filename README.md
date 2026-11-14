@@ -646,6 +646,14 @@ Imported skills and skills created by the user through the UI/API remain
 read-only to the agent; `propose_skill` cannot overwrite them by reusing
 their name. Users can still revise any skill through the UI.
 
+While a skill create/edit request is pending, the same run may send another
+`propose_skill` or `edit_skill` for that name to refine the pending request
+in place. The approval keeps its original tool and id, and its arguments and
+the awaiting execution record are updated to the latest version, so the user
+makes one decision about what is actually shown. No second approval is
+created and nothing is written before that decision; a same-name skill write
+from a different run is still denied until the existing decision is made.
+
 ```bash
 python -m harness skills                    # status, scope, versions
 python -m harness skills --activate ID      # draft/disabled -> active
