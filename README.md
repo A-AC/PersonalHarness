@@ -802,28 +802,48 @@ Useful follow-ups:
 ```bash
 python -m harness eval --summary live_MODEL
 python -m harness eval --compare deterministic final_deterministic
+
+# Behavioral suite: three trials, then compare quality and pass rates.
+python -m harness eval --mode live --model MODEL --base-url http://HOST:PORT \
+    --scenario "i_live_*" --repeats 3 --tag behavior_MODEL
+python -m harness eval --compare behavior_MODEL_A behavior_MODEL_B
 ```
 
 Deterministic scenarios assert persisted state (tasks, runs, memories,
 approvals, schedules, inbox events, modules, tool executions, and the actual
-run system prompt). Live scenarios (`eval/scenarios/g_live.yaml`) are smoke and
-capability checks: a live result measures that model, not harness regressions.
-Reports include per-assertion expected/observed evidence and real denominators.
+run system prompt). The `h_agent_loops.yaml` suite adds sequential multi-tool
+loops: result chaining, denied/invalid-tool recovery, an approval boundary,
+budget exhaustion, and a deferred second action. It also verifies execution
+order with `tools.sequence` and reads deferred calls from the run transcript.
+Deterministic mode measures the harness, not the model.
 
-The deterministic test suite covers the required categories: core runtime,
-unified history, domains/resumption, context/memory, scheduling/heartbeat,
+The deterministic pytest suite covers core runtime, unified history,
+domains/resumption, context/memory, scheduling/heartbeat,
 approvals/permissions, recovery/deployment, memory lifetime/archive,
-sequential sub-agents, durable inbox/automations/self-scheduling, plus the
-ten end-to-end acceptance scenarios (preference recall, interrupted multi-step resume,
-scheduled approval pause/resume, heartbeat-initiated work, old-history
-grounding, web+CLI shared state, inspectable failures, traceable
-consolidation, no duplicate occurrences after restart, no indirect
-permission escape). Live tests verify the endpoint's models list, plain
-completion, native tool-call protocol, and multi-step round trip; they are
-marked `live`. The live scenario suite (`eval/scenarios/g_live.yaml`) checks a
-named model through the real runtime (plain reply, memory write, memory recall,
-and `search_knowledge`); it was verified against `qwen3.5-4b` with all four
-scenarios passing.
+sequential sub-agents, durable inbox/automations/self-scheduling, and the ten
+end-to-end acceptance scenarios.
+
+Live scenarios are split into `g_live.yaml` (single-turn smoke and capability
+checks) and `i_live_behavior.yaml` (behavioral coverage). The behavior suite
+exercises multi-turn continuity, memory correction, active-skill following,
+delegation, hostile-inbox safety, approval-gated scheduling, and a live
+`remember` → `search_knowledge` loop. Action claims are checked against
+persisted state. Open-ended reply quality is scored by a local deterministic
+rubric and reported separately from assertion pass/fail; a low rubric score does
+not change scenario status. Pass rates and rubric scores are different axes, and
+neither is a general model-quality benchmark.
+
+Reports include per-assertion expected/observed evidence, real denominators,
+rubric scores, criterion pass rates, and per-scenario durations. Compare models
+with multiple repeats on the same suite. In a three-repeat run of the behavior
+suite, both `qwen3.5-9b` and `minicpm5-2B` passed 21/21 scenarios and 153/153
+assertions. Their rubric means differed (`qwen3.5-9b` 1.000,
+`minicpm5-2B` 0.968), and so did per-scenario latency: total durations were
+301 s and 289 s, but `minicpm5-2B` spent 44 s on the hostile-inbox scenario
+versus 12 s for `qwen3.5-9b`, while `qwen3.5-9b` spent more on memory
+correction and delegation. That is evidence about this suite, not a universal
+ranking. Choose a model with repeated behavior results and per-scenario
+latency, not with a smoke pass or a single aggregate.
 
 ## Known limitations
 

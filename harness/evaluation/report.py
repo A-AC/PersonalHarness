@@ -63,6 +63,12 @@ def render_markdown(run: EvaluationRun) -> str:
         _row("Scenarios", _rate_text(counts["scenario_pass_rate"])),
         _row("Assertions", _rate_text(counts["assertion_pass_rate"])),
         _row("Critical failures", counts["critical_failures"]),
+        _row("Quality (mean rubric)", _score_text(
+            (counts.get("quality") or {}).get("mean_score")
+        )),
+        _row("Rubric criteria", _rate_text(
+            (counts.get("quality") or {}).get("criterion_pass_rate") or {}
+        )),
         _row("Statuses", counts["scenarios_by_status"]),
         "",
     ]
@@ -90,6 +96,21 @@ def render_markdown(run: EvaluationRun) -> str:
             lines.append(
                 f"| {category} | {bucket['scenarios']} | {bucket['passed']} "
                 f"| {bucket['assertions']} | {bucket['assertions_passed']} |"
+            )
+        lines.append("")
+    quality = (counts.get("quality") or {}).get("steps") or []
+    if quality:
+        lines.extend([
+            "## Quality (rubric)",
+            "",
+            "| Scenario | Repeat | Step | Score | Min |",
+            "| --- | ---: | --- | ---: | ---: |",
+        ])
+        for item in quality:
+            lines.append(
+                f"| `{item['scenario_id']}` | {item['repeat']} "
+                f"| {item['step']} | {_score_text(item.get('score'))} "
+                f"| {_score_text(item.get('min_score'))} |"
             )
         lines.append("")
     lines.extend([
@@ -143,6 +164,8 @@ def render_markdown(run: EvaluationRun) -> str:
         "not language quality or model judgment.",
         "- Live mode measures the named model through the real runtime; it is "
         "not a general capability benchmark.",
+        "- Rubric scores are reported separately from assertion pass rates and "
+        "do not change scenario status.",
         "",
         "## Configuration",
         "",
@@ -168,6 +191,8 @@ def summary_lines(run: dict[str, Any]) -> list[str]:
         f"scenarios {_rate_text(counts.get('scenario_pass_rate') or {})} | "
         f"assertions {_rate_text(counts.get('assertion_pass_rate') or {})} | "
         f"critical failures {counts.get('critical_failures', 0)}",
+        f"quality mean {_score_text((counts.get('quality') or {}).get('mean_score'))}"
+        f" | rubric criteria {_rate_text((counts.get('quality') or {}).get('criterion_pass_rate') or {})}",
     ]
     for bucket, count in sorted(
         (counts.get("scenarios_by_status") or {}).items()
@@ -195,6 +220,15 @@ def _rate_text(rate: dict[str, Any]) -> str:
     value = rate.get("value")
     percent = f"{value * 100:.1f}%" if value is not None else "n/a"
     return f"{numerator}/{denominator} ({percent})"
+
+
+def _score_text(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _short(value: Any, limit: int = 160) -> str:

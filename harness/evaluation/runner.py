@@ -27,6 +27,7 @@ from .models import (
     ScenarioStep,
     StepResult,
 )
+from .quality import evaluate_quality
 from .safety import prepare_sandbox, scenario_dir
 
 # Settings applied to every scenario unless it overrides them. They remove
@@ -429,6 +430,14 @@ class Evaluator:
                 severity=scenario.severity,
             ))
         step_result.assertions = assertions
+        try:
+            step_result.quality = evaluate_quality(observation)
+        except Exception as exc:
+            step_result.quality = {
+                "error": f"{type(exc).__name__}: {exc}",
+                "score": None,
+                "criteria": [],
+            }
         step_result.status = (
             "failed" if any(a.status == "failed" for a in assertions) else "passed"
         )

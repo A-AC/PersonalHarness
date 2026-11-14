@@ -138,6 +138,7 @@ class StepResult:
     run_id: str = ""
     error: str | None = None
     assertions: list[AssertionResult] = field(default_factory=list)
+    quality: dict[str, Any] = field(default_factory=dict)
     evidence: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -156,6 +157,7 @@ class StepResult:
             "run_id": self.run_id,
             "error": self.error,
             "assertions": [item.as_dict() for item in self.assertions],
+            "quality": self.quality,
             "evidence": self.evidence,
         }
 
@@ -277,6 +279,7 @@ def metrics(run: EvaluationRun) -> dict[str, Any]:
         for assertion in step.assertions
         if assertion.status == "failed"
     ]
+    quality = _quality_metrics(scenarios)
     return {
         "scenarios": len(scenarios),
         "scenarios_by_status": by_status,
@@ -291,7 +294,55 @@ def metrics(run: EvaluationRun) -> dict[str, Any]:
             if a.status == "failed" and a.severity == "critical"
         ]),
         "categories": categories,
+        "quality": quality,
         "failures": failures,
+    }
+
+
+def _quality_metrics(scenarios: list[ScenarioResult]) -> dict[str, Any]:
+    """Rubric results, kept out of assertion pass/fail totals on purpose."""
+    scores: list[float] = []
+    criteria = 0
+    passed = 0
+    below_min = 0
+    by_scenario: list[dict[str, Any]] = []
+    for scenario in scenarios:
+        for step in scenario.steps:
+            quality = step.quality or {}
+            score = quality.get("score")
+            step_criteria = quality.get("criteria") or []
+            if score is None and not step_criteria:
+                continue
+            if isinstance(score, (int, float)):
+                scores.append(float(score))
+            criteria += len(step_criteria)
+            passed += sum(
+                1 for item in step_criteria if item.get("status") == "passed"
+            )
+            minimum = quality.get("min_score")
+            if (
+                minimum is not None
+                and isinstance(score, (int, float))
+                and score < float(minimum)
+            ):
+                below_min += 1
+            by_scenario.append({
+                "scenario_id": scenario.scenario_id,
+                "repeat": scenario.repeat,
+                "step": step.name or f"#{step.index}",
+                "score": score,
+                "min_score": minimum,
+                "criteria": step_criteria,
+            })
+    return {
+        "scored_steps": len(by_scenario),
+        "criteria": criteria,
+        "criteria_passed": passed,
+        "criterion_pass_rate": _rate(passed, criteria),
+        "scores": scores,
+        "mean_score": round(sum(scores) / len(scores), 4) if scores else None,
+        "below_min": below_min,
+        "steps": by_scenario,
     }
 
 

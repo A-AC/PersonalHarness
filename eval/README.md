@@ -19,11 +19,41 @@ is the human summary.
 
 | Mode | Model | Purpose |
 | --- | --- | --- |
-| `deterministic` | `ScriptedModel` | Harness behavior: permissions, persistence, recovery, scheduling, retrieval. No network. |
-| `live` | configured endpoint | Smoke and capability checks for a named model through the real runtime. |
+| `deterministic` | `ScriptedModel` | Harness behavior: permissions, persistence, recovery, scheduling, retrieval, and multi-tool loops. No network. |
+| `live` | configured endpoint | Smoke and behavioral checks for a named model through the real runtime. |
 
 A scenario declares `modes: [deterministic]`, `[live]`, or both. The shipped
-suite partitions them: `a_`–`f_` are deterministic; `g_live.yaml` is live-only.
+suite partitions them:
+
+| File | Mode | Purpose |
+| --- | --- | --- |
+| `a_runtime.yaml`–`f_subagents.yaml` | deterministic | Core harness coverage |
+| `g_live.yaml` | live | Single-turn smoke/capability checks |
+| `h_agent_loops.yaml` | deterministic | Sequential multi-tool loops, recovery, approval boundaries, budgets, deferred batches |
+| `i_live_behavior.yaml` | live | Multi-turn continuity, correction, skill following, delegation, hostile inbox, scheduling, live tool chaining |
+
+## What this suite measures
+
+- **Deterministic scenarios** verify harness behavior with a scripted model:
+  permissions, persistence, recovery, scheduling, retrieval, state
+  transitions, and multi-tool loop control. They do not measure model quality.
+- **`g_live.yaml`** is smoke/capability coverage: explicit single-turn prompts
+  confirm that a model can answer, call a named tool, write memory, and recall
+  it.
+- **`i_live_behavior.yaml`** is a behavioral suite. It asks for multi-turn
+  continuity, correction, skill following, delegation, safe handling of
+  untrusted mail, approval-gated scheduling, and a two-tool loop. Action claims
+  are checked against persisted state; open-ended replies are scored by a local
+  rubric.
+- **Neither suite is a general model-quality benchmark.** A live pass does not
+  establish parity with another model. Compare multiple repeats: a single pass
+  can hide a loop or a refused instruction, and a keyword failure can be a
+  wording difference rather than worse behavior.
+
+Treat latency and quality as separate axes. Measure latency from the report
+durations (including per-scenario durations), and measure quality with the
+rubric mean and criterion pass rate over multiple trials. Do not infer quality
+from scenario pass rate alone.
 
 ## Running a different model
 
@@ -51,8 +81,18 @@ Follow up with:
 
 ```bash
 python -m harness eval --summary live_MODEL
-python -m harness eval --compare deterministic final_deterministic
+
+# Behavioral suite, three trials per model.
+python -m harness eval --mode live --model MODEL_A --base-url http://HOST:PORT \
+    --scenario "i_live_*" --repeats 3 --tag behavior_MODEL_A
+python -m harness eval --mode live --model MODEL_B --base-url http://HOST:PORT \
+    --scenario "i_live_*" --repeats 3 --tag behavior_MODEL_B
+python -m harness eval --compare behavior_MODEL_A behavior_MODEL_B
 ```
+
+The comparison shows scenario/assertion pass rates and the rubric mean side by
+side. Use the per-scenario durations in the JSON/Markdown report for latency;
+do not compare total wall time from a different task mix.
 
 ## Safety
 
@@ -118,6 +158,42 @@ Step options are the YAML keys outside `kind`, `name`, `input`, `script`, and
   at_in_seconds: -5
 ```
 
+## Quality rubrics
+
+A step may include `quality:` next to its state assertions. Rubric criteria are
+local and deterministic (substring, regex, and word counts). They produce a
+weighted score and criterion results, reported separately from assertion
+pass/fail. A low score does **not** change the scenario status; that keeps
+harness correctness and reply quality on separate axes.
+
+```yaml
+- kind: turn
+  input: "What time does the trailhead start?"
+  expect:
+    status: completed
+    response: {contains: "07:00"}
+    quality:
+      min_score: 0.75
+      rubric:
+        - id: states_time
+          weight: 2
+          any: ["07:00", "7:00"]
+        - id: concise
+          weight: 1
+          max_words: 80
+        - id: not_an_approval_prompt
+          weight: 3
+          none: ["reply approve/reject", "approvals panel"]
+```
+
+Criterion keys: `any`, `all`, `none`, `regex`, `min_words`, `max_words`.
+`weight` defaults to 1. `min_score` records whether the weighted score crossed
+the threshold; the report shows scores, criterion pass rate, and any steps below
+their minimum.
+
+This is a rubric, not an LLM judge. Use a judge when subjective judgment is the
+thing being measured; the shipped suite stays offline and repeatable.
+
 ## Assertions
 
 Every assertion reads persisted state. An unobservable expectation fails with
@@ -132,7 +208,7 @@ Every assertion reads persisted state. An unobservable expectation fails with
 | `domains` | `exists`, `none`, `count` |
 | `run` | `status`, `iterations_min`, `tool_calls_min`, `context_not_empty` |
 | `memories` | `exists`, `none`, `count_min`, `superseded_contains`, `revision_min` |
-| `tools` | `calls`, `none`, `succeeded`, `forbidden`, `count_min` |
+| `tools` | `calls`, `none`, `succeeded`, `forbidden`, `count_min`, `count_max`, `result_contains`, `error_contains`, `sequence`, `sequence_contiguous`, `deferred_min`, `deferred_max` |
 | `approvals` | `pending`, `tool`, `statuses`, `arguments_contains` |
 | `events` | `include`, `exclude`, `data` |
 | `context` | `sections`, `refs`, `system_contains`, `exclude_refs`, `source_counts` |
@@ -144,3 +220,9 @@ Every assertion reads persisted state. An unobservable expectation fails with
 
 Assertions inherit the scenario `severity` (default `medium`); critical
 failures are counted separately in every report.
+
+`tools.calls` entries accept `result_contains` and `error_contains`, so a loop
+can prove that a later call consumed the previous call's output. `tools.sequence`
+checks an ordered subsequence (add `sequence_contiguous: true` for adjacent
+rows). `deferred_min` reads the run transcript for calls the runtime deferred
+because it executes one action per model response.

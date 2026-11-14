@@ -56,7 +56,8 @@ def evaluate(observation: Observation) -> list[AssertionResult]:
         ))
 
     for check, value in expect.items():
-        if check == "severity":
+        if check in ("severity", "quality"):
+            # Quality rubrics are scored separately from pass/fail assertions.
             continue
         handler = _CHECKS.get(check)
         if handler is None:
@@ -90,8 +91,10 @@ def _memories(app) -> list[dict[str, Any]]:
 
 
 def _executions(app) -> list[dict[str, Any]]:
+    # rowid breaks ties when several calls start within the same clock tick,
+    # which is common in scripted tests and keeps sequence assertions stable.
     return rows_to_dicts(app.db.query(
-        "SELECT * FROM tool_executions ORDER BY started_at"
+        "SELECT * FROM tool_executions ORDER BY started_at, rowid"
     ))
 
 
@@ -214,6 +217,12 @@ def _partial(item: dict[str, Any], spec: dict[str, Any]) -> bool:
         elif key == "arguments_contains":
             if not _contains(util.dumps(item.get("arguments") or {}), value):
                 return False
+        elif key == "result_contains":
+            if not _contains(item.get("result"), value):
+                return False
+        elif key == "error_contains":
+            if not _contains(item.get("error"), value):
+                return False
         elif key == "tainted":
             meta = util.loads(item.get("meta") or "{}", {})
             if bool(meta.get("tainted_sources")) != bool(value):
@@ -242,6 +251,63 @@ def _partial(item: dict[str, Any], spec: dict[str, Any]) -> bool:
 
 def _matches(items: list[dict[str, Any]], spec: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in items if _partial(item, spec)]
+
+
+def _sequence_specs(value: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in value or []:
+        if isinstance(item, str):
+            out.append({"tool": item})
+        elif isinstance(item, dict):
+            out.append(item)
+        else:
+            out.append({"tool": str(item)})
+    return out
+
+
+def _sequence_matches(
+    items: list[dict[str, Any]], specs: list[dict[str, Any]], contiguous: bool
+) -> bool:
+    """Whether ``specs`` occur in order (optionally adjacent) in ``items``."""
+    if not specs:
+        return True
+    if contiguous:
+        width = len(specs)
+        for start in range(len(items) - width + 1):
+            if all(
+                _partial(items[start + offset], spec)
+                for offset, spec in enumerate(specs)
+            ):
+                return True
+        return False
+    position = 0
+    for spec in specs:
+        while position < len(items) and not _partial(items[position], spec):
+            position += 1
+        if position == len(items):
+            return False
+        position += 1
+    return True
+
+
+def _deferred_calls(app) -> list[str]:
+    """Tool calls the runtime deferred because only one action may run.
+
+    A deferred call never creates a ``tool_executions`` row; its only evidence
+    is the tool message in the run transcript, so read that directly.
+    """
+    deferred: list[str] = []
+    for run in rows_to_dicts(app.db.query("SELECT transcript FROM runs")):
+        transcript = util.loads(run.get("transcript") or "[]", [])
+        if not isinstance(transcript, list):
+            continue
+        for message in transcript:
+            if not isinstance(message, dict) or message.get("role") != "tool":
+                continue
+            payload = util.loads(message.get("content") or "", {})
+            if isinstance(payload, dict) and payload.get("status") == "deferred":
+                deferred.append(str(message.get("tool_call_id") or ""))
+    return deferred
 
 
 def _names(app, domain_id: str | None) -> str | None:
@@ -508,6 +574,23 @@ def _check_tools(obs: Observation, value: Any, add) -> None:
         missing = [name for name in names if name not in found]
         add("tools", "succeeded", not missing, names, found,
             f"tools did not succeed: {missing}")
+    if "sequence" in value:
+        specs = _sequence_specs(value["sequence"])
+        contiguous = bool(value.get("sequence_contiguous"))
+        observed = [f"{item['tool']}:{item['status']}" for item in executions]
+        ok = _sequence_matches(executions, specs, contiguous)
+        add("tools", "sequence", ok, specs, observed,
+            "tool calls did not occur in the required order")
+    if "deferred_min" in value:
+        deferred = _deferred_calls(obs.app)
+        ok = len(deferred) >= int(value["deferred_min"])
+        add("tools", "deferred_min", ok, value["deferred_min"], len(deferred),
+            "fewer deferred tool calls than expected")
+    if "deferred_max" in value:
+        deferred = _deferred_calls(obs.app)
+        ok = len(deferred) <= int(value["deferred_max"])
+        add("tools", "deferred_max", ok, value["deferred_max"], len(deferred),
+            "more deferred tool calls than expected")
 
 
 def _check_approvals(obs: Observation, value: Any, add) -> None:

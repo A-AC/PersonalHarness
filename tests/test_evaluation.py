@@ -16,6 +16,8 @@ from harness.evaluation.loader import (
     load_scenarios,
     select_scenarios,
 )
+from harness.evaluation.models import ScenarioStep
+from harness.evaluation.quality import evaluate_quality
 from harness.evaluation.report import load_run, render_markdown, summary_lines
 from harness.evaluation.runner import (
     EndpointUnavailable,
@@ -101,13 +103,21 @@ def test_shipped_scenario_suite_is_mode_partitioned() -> None:
     scenarios = load_scenarios(Path(__file__).resolve().parents[1] / "eval"
                                / "scenarios")
     ids = {scenario.id for scenario in scenarios}
-    assert len(scenarios) >= 34
+    assert len(scenarios) >= 43
     assert "a_plain_reply" in ids
     assert "g_live_plain_reply" in ids
+    assert "h_loop_remember_then_search" in ids
+    assert "i_live_multi_tool_loop" in ids
     live = select_scenarios(scenarios, mode="live")
     deterministic = select_scenarios(scenarios, mode="deterministic")
-    assert live and all(scenario.id.startswith("g_live_") for scenario in live)
-    assert all(not scenario.id.startswith("g_live_") for scenario in deterministic)
+    assert live and all(scenario.modes == ["live"] for scenario in live)
+    assert deterministic and all(
+        "live" not in scenario.modes for scenario in deterministic
+    )
+    assert "i_live_multi_tool_loop" in {scenario.id for scenario in live}
+    assert "h_loop_remember_then_search" in {
+        scenario.id for scenario in deterministic
+    }
 
 
 # -- sandbox safety ----------------------------------------------------------
@@ -179,6 +189,195 @@ def test_markdown_lists_failures(tmp_path: Path) -> None:
     text = render_markdown(run)
     assert "## Failures" in text
     assert "unit_plain" in text
+
+
+# -- tool loop assertions ----------------------------------------------------
+
+
+def _loop_scenario(sequence: list[dict]) -> dict:
+    return {
+        "scenarios": [
+            {
+                "id": "unit_tool_loop",
+                "name": "A scripted tool loop",
+                "category": "unit",
+                "modes": ["deterministic"],
+                "steps": [
+                    {
+                        "kind": "turn",
+                        "input": "loop",
+                        "script": [
+                            {"tool_calls": [{"name": "remember", "arguments": {
+                                "content": "alpha fact", "scope": "global"}}]},
+                            {"tool_calls": [{"name": "search_knowledge",
+                                             "arguments": {"query": "alpha"}}]},
+                            {"content": "alpha fact"},
+                        ],
+                        "expect": {
+                            "status": "completed",
+                            "tools": {
+                                "calls": [
+                                    {"tool": "remember", "status": "succeeded",
+                                     "result_contains": "alpha"},
+                                    {"tool": "search_knowledge",
+                                     "status": "succeeded",
+                                     "result_contains": "alpha"},
+                                ],
+                                "sequence": sequence,
+                            },
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_tool_result_and_sequence_assertions(tmp_path: Path) -> None:
+    good = _loop_scenario([{"tool": "remember"},
+                           {"tool": "search_knowledge"}])
+    scenarios = load_scenarios(
+        _write_scenarios(tmp_path / "good.yaml", good)
+    )
+    run = run_evaluation(
+        scenarios, mode="deterministic", sandbox=tmp_path / "sandbox",
+        results_dir=tmp_path / "results", tag="good", environ={},
+    )
+    assert run.scenarios[0].status == "passed"
+
+    bad = _loop_scenario([{"tool": "search_knowledge"},
+                          {"tool": "remember"}])
+    bad["scenarios"][0]["id"] = "unit_bad_sequence"
+    scenarios = load_scenarios(_write_scenarios(tmp_path / "bad.yaml", bad))
+    run = run_evaluation(
+        scenarios, mode="deterministic", sandbox=tmp_path / "sandbox2",
+        results_dir=tmp_path / "results", tag="bad", environ={},
+    )
+    assert run.scenarios[0].status == "failed"
+    assert any(
+        assertion.id == "s1.tools.sequence"
+        and assertion.status == "failed"
+        for assertion in run.scenarios[0].assertions
+    )
+
+
+def test_batch_deferral_is_observable(tmp_path: Path) -> None:
+    data = {
+        "scenarios": [{
+            "id": "unit_deferred",
+            "name": "Only the first batch action runs",
+            "category": "unit",
+            "modes": ["deterministic"],
+            "steps": [{
+                "kind": "turn",
+                "input": "save both",
+                "script": [
+                    {"tool_calls": [
+                        {"name": "remember", "arguments": {
+                            "content": "alpha note", "scope": "global"}},
+                        {"name": "remember", "arguments": {
+                            "content": "beta note", "scope": "global"}},
+                    ]},
+                    {"content": "first only"},
+                ],
+                "expect": {
+                    "status": "completed",
+                    "memories": {"none": [{"content_contains": "beta"}]},
+                    "tools": {"count_max": 1, "deferred_min": 1},
+                },
+            }],
+        }]
+    }
+    scenarios = load_scenarios(
+        _write_scenarios(tmp_path / "deferred.yaml", data)
+    )
+    run = run_evaluation(
+        scenarios, mode="deterministic", sandbox=tmp_path / "sandbox",
+        results_dir=tmp_path / "results", tag="deferred", environ={},
+    )
+    assert run.scenarios[0].status == "passed"
+
+
+def test_quality_is_scored_separately_from_assertions(tmp_path: Path) -> None:
+    data = {
+        "scenarios": [{
+            "id": "unit_quality",
+            "name": "A rubric scores the reply",
+            "category": "unit",
+            "modes": ["deterministic"],
+            "steps": [{
+                "kind": "turn",
+                "input": "answer",
+                "script": [{"content": "The answer is 42."}],
+                "expect": {
+                    "status": "completed",
+                    "quality": {
+                        "min_score": 1.0,
+                        "rubric": [
+                            {"id": "gives_number", "any": ["42"],
+                             "weight": 2},
+                            {"id": "explains", "any": ["because"],
+                             "weight": 2},
+                        ],
+                    },
+                },
+            }],
+        }]
+    }
+    scenarios = load_scenarios(
+        _write_scenarios(tmp_path / "quality.yaml", data)
+    )
+    run = run_evaluation(
+        scenarios, mode="deterministic", sandbox=tmp_path / "sandbox",
+        results_dir=tmp_path / "results", tag="quality", environ={},
+    )
+    scenario = run.scenarios[0]
+    # A low rubric score must not turn into a harness failure.
+    assert scenario.status == "passed"
+    assert scenario.steps[0].quality["score"] == 0.5
+    assert scenario.steps[0].quality["passed"] is False
+    report = load_run("quality", tmp_path / "results")
+    assert report["metrics"]["quality"]["mean_score"] == 0.5
+    assert report["metrics"]["quality"]["criteria"] == 2
+    assert report["metrics"]["quality"]["criteria_passed"] == 1
+    assert report["metrics"]["quality"]["below_min"] == 1
+    assert "Quality (rubric)" in Path(run.report_path).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_quality_rubric_matchers() -> None:
+    step = ScenarioStep(kind="turn", expect={"quality": {"rubric": [
+        {"id": "has_alpha", "any": ["alpha"]},
+        {"id": "no_beta", "none": ["beta"]},
+        {"id": "has_number", "regex": r"\b42\b"},
+        {"id": "short", "max_words": 3},
+    ]}})
+
+    class Result:
+        message = "alpha 42"
+
+    class Obs:
+        result = Result()
+
+    Obs.step = step
+    good = evaluate_quality(Obs())
+    assert good["score"] == 1.0
+    assert all(item["status"] == "passed" for item in good["criteria"])
+
+    class LongResult:
+        message = "beta alpha 42 extra"
+
+    class LongObs:
+        result = LongResult()
+
+    LongObs.step = step
+    short = evaluate_quality(LongObs())
+    assert short["score"] == 0.5
+    failed = {item["id"] for item in short["criteria"]
+              if item["status"] == "failed"}
+    assert failed == {"no_beta", "short"}
+
 
 
 # -- configuration precedence -------------------------------------------------

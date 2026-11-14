@@ -1,0 +1,316 @@
+# H. Multi-tool agent loops (deterministic).
+#
+# The runtime executes one tool call per model response; a second call in the
+# same response is recorded as deferred. These scenarios therefore script
+# sequential iterations and assert both the chained results and their order.
+# They measure harness loop behavior, not model quality.
+scenarios:
+  - id: h_loop_remember_then_search
+    name: A saved fact is found by a later knowledge search
+    category: agent_loop
+    severity: high
+    description: >
+      The loop runs remember, then search_knowledge in a later iteration. The
+      search result must contain the fact the previous tool stored, proving the
+      result of one call is available to the next.
+    modes: [deterministic]
+    tags: [tools, memory, loop]
+    steps:
+      - kind: turn
+        name: store then search
+        input: "Store the heater code, then look it up."
+        script:
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The greenhouse heater code is GH-7781."
+                  kind: fact
+                  scope: global
+          - tool_calls:
+              - name: search_knowledge
+                arguments:
+                  query: "greenhouse heater code"
+          - content: "The greenhouse heater code is GH-7781."
+        expect:
+          status: completed
+          response:
+            contains: GH-7781
+          memories:
+            exists:
+              - content_contains: GH-7781
+                status: active
+          tools:
+            calls:
+              - tool: remember
+                status: succeeded
+                result_contains: GH-7781
+              - tool: search_knowledge
+                status: succeeded
+                result_contains: GH-7781
+            sequence:
+              - tool: remember
+              - tool: search_knowledge
+            succeeded: [remember, search_knowledge]
+          run:
+            status: completed
+            tool_calls_min: 2
+          events:
+            include: [tool.executed]
+
+  - id: h_loop_denied_then_recovery
+    name: The loop recovers from a denied tool with a valid action
+    category: agent_loop
+    severity: critical
+    description: >
+      An unknown tool is denied, then the next iteration uses a real tool. The
+      denied call stays visible in the execution log and does not stop the run.
+    modes: [deterministic]
+    tags: [tools, safety, loop]
+    steps:
+      - kind: turn
+        name: fail once, then save a note
+        input: "Try the cleanup tool; if it is unavailable, save the key note."
+        script:
+          - tool_calls:
+              - name: delete_everything
+                arguments: {}
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The spare key is in the blue drawer."
+                  kind: fact
+                  scope: global
+          - content: "The unknown tool was refused; I saved the spare-key note."
+        expect:
+          status: completed
+          response:
+            contains: "refused"
+          memories:
+            exists:
+              - content_contains: "spare key"
+                status: active
+          tools:
+            calls:
+              - tool: delete_everything
+                status: denied
+              - tool: remember
+                status: succeeded
+                result_contains: "blue drawer"
+            sequence:
+              - tool: delete_everything
+              - tool: remember
+            none:
+              - tool: delete_everything
+                status: succeeded
+          run:
+            status: completed
+            tool_calls_min: 2
+          events:
+            include: [tool.rejected, tool.executed]
+
+  - id: h_loop_invalid_then_recovery
+    name: The loop retries after invalid arguments
+    category: agent_loop
+    severity: high
+    description: >
+      A remember call without its required content is denied at validation.
+      The model gets that result and retries the same tool with valid
+      arguments in the next iteration.
+    modes: [deterministic]
+    tags: [tools, validation, loop]
+    steps:
+      - kind: turn
+        name: invalid remember then a valid one
+        input: "Save the garden gate code."
+        script:
+          - tool_calls:
+              - name: remember
+                arguments:
+                  kind: constraint
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The garden gate code is 4412."
+                  kind: constraint
+                  scope: global
+          - content: "Saved the garden gate code."
+        expect:
+          status: completed
+          memories:
+            exists:
+              - content_contains: 4412
+                status: active
+          tools:
+            calls:
+              - tool: remember
+                status: denied
+                error_contains: "missing required argument: content"
+              - tool: remember
+                status: succeeded
+                result_contains: 4412
+            sequence:
+              - tool: remember
+                status: denied
+              - tool: remember
+                status: succeeded
+          events:
+            include: [tool.failed, tool.executed]
+
+  - id: h_loop_resumes_after_approval
+    name: A loop continues with another tool after approval
+    category: agent_loop
+    severity: critical
+    description: >
+      create_domain pauses the run for approval. After the user approves, the
+      resumed loop runs update_task_notes and finishes, so an approval boundary
+      does not end the multi-step work.
+    modes: [deterministic]
+    tags: [approvals, tools, loop]
+    steps:
+      - kind: turn
+        name: propose the domain
+        input: "Set up an Astronomy domain, then note the next step."
+        script:
+          - tool_calls:
+              - name: create_domain
+                arguments:
+                  name: Astronomy
+                  description: telescope and observing logs
+                  reason: recurring distinct work with its own knowledge
+        expect:
+          status: waiting_approval
+          approvals:
+            pending: 1
+            tool: create_domain
+          domains:
+            none:
+              - name: Astronomy
+      - kind: approve
+        name: approve and continue the loop
+        script:
+          - tool_calls:
+              - name: update_task_notes
+                arguments:
+                  notes: "Astronomy domain approved; next step is to log an observation."
+          - content: "The Astronomy domain exists and the next step is noted."
+        expect:
+          status: completed
+          domains:
+            exists:
+              - name: Astronomy
+          task:
+            status: completed
+            notes_contains: "next step"
+          approvals:
+            statuses:
+              executed: 1
+            pending: 0
+          tools:
+            calls:
+              - tool: create_domain
+                status: succeeded
+              - tool: update_task_notes
+                status: succeeded
+                result_contains: notes_saved
+            sequence:
+              - tool: create_domain
+              - tool: update_task_notes
+            succeeded: [create_domain, update_task_notes]
+          run:
+            tool_calls_min: 2
+
+  - id: h_loop_budget_exhaustion
+    name: A multi-tool loop pauses at the tool-call budget
+    category: agent_loop
+    severity: high
+    description: >
+      With a two-call budget, two successful iterations run and the next one
+      stops in limit_reached. Completed work is retained and the task is
+      resumable, so a loop cannot run forever.
+    modes: [deterministic]
+    tags: [limits, loop]
+    settings:
+      limits:
+        max_tool_calls: 2
+    steps:
+      - kind: turn
+        name: spend the whole budget
+        input: "Note the first step, then remember the rack code."
+        script:
+          - tool_calls:
+              - name: update_task_notes
+                arguments:
+                  notes: "Step one: inspect the rack."
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The rack door code is 7719."
+                  kind: fact
+                  scope: global
+          - content: "This reply should never be requested."
+        expect:
+          status: limit_reached
+          task:
+            status: paused
+          run:
+            status: limit_reached
+            decision_contains: "tool-call limit"
+          memories:
+            exists:
+              - content_contains: 7719
+                status: active
+          tools:
+            count_min: 2
+            sequence:
+              - tool: update_task_notes
+              - tool: remember
+            succeeded: [update_task_notes, remember]
+          events:
+            include: [limit.reached]
+
+  - id: h_loop_batch_deferred
+    name: Only the first action of a batch executes
+    category: agent_loop
+    severity: high
+    description: >
+      One model response proposes two remember calls. The runtime executes the
+      first, records the second as deferred, and never creates the second
+      memory. The deferred marker is read from the run transcript.
+    modes: [deterministic]
+    tags: [tools, loop, limits]
+    steps:
+      - kind: turn
+        name: propose a two-action batch
+        input: "Save both notes."
+        script:
+          - tool_calls:
+              - name: remember
+                arguments:
+                  content: "The first batch note is alpha."
+                  kind: fact
+                  scope: global
+              - name: remember
+                arguments:
+                  content: "The second batch note is beta."
+                  kind: fact
+                  scope: global
+          - content: "Only the first action ran; the second was deferred."
+        expect:
+          status: completed
+          response:
+            contains: deferred
+          memories:
+            exists:
+              - content_contains: alpha
+                status: active
+            none:
+              - content_contains: beta
+          tools:
+            count_max: 1
+            deferred_min: 1
+            calls:
+              - tool: remember
+                status: succeeded
+                result_contains: alpha
+          run:
+            tool_calls_min: 1

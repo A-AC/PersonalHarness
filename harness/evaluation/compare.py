@@ -77,6 +77,8 @@ def render_comparison(comparison: dict[str, Any]) -> str:
         "| Critical failures | "
         f"{before['metrics'].get('critical_failures', 0)} | "
         f"{after['metrics'].get('critical_failures', 0)} |",
+        _score_row("Quality (mean rubric)", before["metrics"],
+                   after["metrics"]),
         "",
     ]
     _section(lines, "Regressions", comparison["regressions"])
@@ -158,6 +160,22 @@ def _rate_cell(rate: dict[str, Any] | None) -> str:
     return f"{rate.get('numerator', 0)}/{rate.get('denominator', 0)} ({percent})"
 
 
+def _score_row(label: str, before: dict[str, Any], after: dict[str, Any]) -> str:
+    return (
+        f"| {label} | {_score_cell((before.get('quality') or {}).get('mean_score'))} "
+        f"| {_score_cell((after.get('quality') or {}).get('mean_score'))} |"
+    )
+
+
+def _score_cell(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def metrics_from_scenarios(report: dict[str, Any]) -> dict[str, Any]:
     """Fallback for reports written before metrics were embedded."""
     scenarios = report.get("scenarios") or []
@@ -175,6 +193,19 @@ def metrics_from_scenarios(report: dict[str, Any]) -> dict[str, Any]:
     for assertion in assertions:
         status = assertion.get("status") or "failed"
         assertion_status[status] = assertion_status.get(status, 0) + 1
+    scores: list[float] = []
+    quality_criteria = 0
+    quality_passed = 0
+    for scenario in scenarios:
+        for step in scenario.get("steps") or []:
+            quality = step.get("quality") or {}
+            score = quality.get("score")
+            if isinstance(score, (int, float)):
+                scores.append(float(score))
+            for criterion in quality.get("criteria") or []:
+                quality_criteria += 1
+                if criterion.get("status") == "passed":
+                    quality_passed += 1
     categories: dict[str, dict[str, int]] = {}
     for scenario in scenarios:
         bucket = categories.setdefault(
@@ -217,6 +248,15 @@ def metrics_from_scenarios(report: dict[str, Any]) -> dict[str, Any]:
             if assertion.get("status") == "failed"
             and assertion.get("severity") == "critical"
         ]),
+        "quality": {
+            "scores": scores,
+            "mean_score": (
+                round(sum(scores) / len(scores), 4) if scores else None
+            ),
+            "criteria": quality_criteria,
+            "criteria_passed": quality_passed,
+            "criterion_pass_rate": rate(quality_passed, quality_criteria),
+        },
         "categories": categories,
         "failures": [
             failure
