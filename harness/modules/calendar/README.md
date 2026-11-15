@@ -2,7 +2,9 @@
 
 A standalone stdio MCP server over CalDAV. It imports nothing from the
 harness and needs no harness code changes: register it like any other MCP
-server through `tools.mcp_servers_file` (see `examples/mcp_servers.yaml`).
+server through `data/mcp.json` (standard `mcpServers` shape) or
+`tools.mcp_servers_file` (see `examples/mcp.json` and
+`examples/mcp_servers.yaml`).
 
 Only CalDAV is supported. Every request is rooted at the configured DAV
 collection; event hrefs come from discovery, so the model cannot fetch an
@@ -76,25 +78,35 @@ python harness/modules/calendar/server.py \
 
 ## Registering with the harness
 
-Point `tools.mcp_servers_file` at a YAML file (absolute paths recommended)
-containing:
+Copy `calendar.example.json` to `<data_dir>/modules/mcp/calendar.json` and edit
+it. Then add this entry to `data/mcp.json` (the standard `mcpServers` shape,
+auto-detected) or to the file named by `tools.mcp_servers_file`:
 
-```yaml
-servers:
-  - name: calendar
-    command: python
-    args:
-      - /app/harness/modules/calendar/server.py
-      - --config
-      - /data/calendar.json
-    risk_default: confirm
-    side_effects: true
-    startup: lazy
-    timeout_s: 60
+```json
+{
+  "mcpServers": {
+    "calendar": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "harness/modules/calendar/server.py",
+        "--config",
+        "${data_dir}/modules/mcp/calendar.json"
+      ],
+      "tool_prefix": "",
+      "risk_default": "confirm",
+      "side_effects": true,
+      "startup": "lazy",
+      "timeout_s": 60
+    }
+  }
+}
 ```
 
-The import runs on startup/reload and creates the `mcp:calendar` module row
-once; later edits to the YAML do not overwrite an existing row.
+`${data_dir}` expands to the absolute data directory, so the same entry works
+locally and in Docker. The import runs on startup and creates the
+`mcp:calendar` module row once. After editing the entry, apply the change with
+`python -m harness modules --reload` (reload also re-reads the file).
 
 The generic MCP loader has one risk class per module, so choose a policy:
 
@@ -116,7 +128,7 @@ In Docker, mount the file read-only and use the container paths:
 ```yaml
     volumes:
       - harness-data:/data
-      - ./calendar.json:/data/calendar.json:ro
+      - ./calendar.json:/data/modules/mcp/calendar.json:ro
 ```
 
 The image runs as UID 10001, so a host bind mount must be readable by that

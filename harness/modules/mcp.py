@@ -14,6 +14,18 @@ Per-call process isolation is preserved: the stdio JSON-RPC client in
 ``harness/tools.py`` starts a fresh subprocess for every list/call. Health
 checks refresh the cache and record ``module.unavailable`` without ever
 raising into a turn.
+
+Two registration files are understood, and both may be JSON or YAML:
+
+* ``servers:`` - a list of harness manifests (see ``examples/mcp_servers.yaml``)
+* ``mcpServers:`` - the standard mapping shape used by MCP desktop clients
+
+When ``tools.mcp_servers_file`` is empty, ``<data_dir>/mcp.json``,
+``mcp_servers.yaml``, and ``mcp_servers.yml`` are picked up automatically.
+Explicit reloads re-read the file, so editing a server entry does not require
+deleting its module row by hand. Environment *values* in the source file are
+written to a private sidecar (``modules/mcp/<name>.env.json``), never to the
+module row or SQLite.
 """
 
 from __future__ import annotations
@@ -49,6 +61,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # here: the retired group is serialized verbatim into the server's config file.
 RETIRED_MODULES = {"web": ""}
 MCP_JSON_PARSE_LIMIT = 1_000_000
+# Conventional files checked when no explicit import file is configured.
+DEFAULT_SERVERS_FILES = ("mcp.json", "mcp_servers.yaml", "mcp_servers.yml")
+_DATA_DIR_PLACEHOLDER = re.compile(r"\$\{data_dir\}|\$\{DATA_DIR\}")
 
 
 def _sanitize(value: str) -> str:
@@ -82,12 +97,14 @@ class McpModuleLoader:
     # Loading / reloading
     # ------------------------------------------------------------------
 
-    def load_all(self) -> dict[str, Any]:
+    def load_all(
+        self, *, sync: bool = False, force: bool = False
+    ) -> dict[str, Any]:
         report: dict[str, Any] = {"loaded": [], "skipped": [], "errors": []}
         if not bool(self.config.get("modules.enabled", True)):
             return report
         self.migrate_retired_modules()
-        self.import_legacy()
+        self.import_legacy(sync=sync)
         for module in self.registry.all():
             if module.kind != "mcp":
                 continue
@@ -95,7 +112,7 @@ class McpModuleLoader:
                 report["skipped"].append(module.id)
                 continue
             try:
-                if self._activate(module):
+                if self._activate(module, force=force):
                     report["loaded"].append(module.id)
                 else:
                     report["errors"].append({
@@ -138,7 +155,7 @@ class McpModuleLoader:
         if self.tools is not None:
             for module in self.registry.all():
                 self.tools.unregister_module(module.id)
-        report = self.load_all()
+        report = self.load_all(sync=True, force=True)
         self.events.record(
             "module.reloaded",
             data={"all": True, "loaded": report["loaded"],
@@ -211,18 +228,18 @@ class McpModuleLoader:
     # Legacy import and retired built-ins
     # ------------------------------------------------------------------
 
-    def import_legacy(self) -> list[str]:
-        """Import ``tools.mcp_servers_file`` entries that are not yet rows.
+    def import_legacy(self, *, sync: bool = False) -> list[str]:
+        """Import MCP server entries that are not yet module rows.
 
-        The file stays supported as an import source: existing module rows are
-        never overwritten, so edits made through the API/UI survive.
+        ``tools.mcp_servers_file`` may be YAML or JSON and may use either the
+        harness ``servers:`` list or the standard ``mcpServers:`` mapping. An
+        explicit reload (``sync=True``) refreshes existing manifests from the
+        file, which is what makes editing or updating a server entry a
+        one-command operation.
         """
-        path_text = str(self.config.get("tools.mcp_servers_file", "") or "")
-        if not path_text:
+        path = self._servers_path()
+        if path is None:
             return []
-        path = Path(path_text)
-        if not path.is_absolute():
-            path = self.registry.data_dir / path
         if not path.is_file():
             self.events.record(
                 "mcp.config_missing", level="warn", data={"path": str(path)},
@@ -239,47 +256,72 @@ class McpModuleLoader:
             )
             return []
         imported: list[str] = []
-        for entry in data.get("servers") or []:
-            if not isinstance(entry, dict):
-                continue
+        for entry in self._entries(data):
             name = str(entry.get("name") or "").strip()
             command = str(entry.get("command") or "").strip()
             if not name or not command:
                 continue
             module_id = f"mcp:{name}"
-            if self.registry.get(module_id) is not None:
-                continue
-            legacy_env = entry.get("env") or {}
-            if isinstance(legacy_env, dict) and any(
-                str(value or "").strip() for value in legacy_env.values()
-            ):
-                # Invariant: editable state stores variable names, not values.
-                self.events.record(
-                    "mcp.env_values_ignored", level="warn",
-                    data={
-                        "module_id": module_id,
-                        "env_names": sorted(legacy_env),
-                        "note": "set these variables in the harness "
-                                "environment; values are not stored",
-                    },
-                )
+            env = entry.get("env") if isinstance(entry.get("env"), dict) else {}
             manifest = self._manifest_from_entry(entry)
-            domains = [
-                str(domain).strip() for domain in entry.get("domains") or []
-                if str(domain).strip()
-            ]
+            domains = [str(domain) for domain in manifest.get("domains") or []]
             scope = str(entry.get("scope") or "").strip() or (
                 "domain" if domains else "global"
             )
+            scope = scope if scope in ("global", "domain", "adaptive") else "global"
             now = util.iso()
+            existing = self.registry.get(module_id)
+            if existing is not None:
+                if not sync:
+                    continue
+                changed = (
+                    existing.manifest != manifest
+                    or existing.name != name
+                    or existing.scope != scope
+                )
+                status = existing.status
+                # A user-disabled module stays disabled. Anything else is
+                # reset so a fixed entry can recover from an old error.
+                if status == "error":
+                    status = "active"
+                if changed or status != existing.status:
+                    updated = replace(
+                        existing,
+                        name=name,
+                        manifest=manifest,
+                        scope=scope,
+                        status=status,
+                        provenance={
+                            **dict(existing.provenance or {}),
+                            "source": str(path),
+                        },
+                        updated_at=now,
+                    )
+                    self.registry.save(updated)
+                if changed:
+                    # Cached discovery may reflect the old tools_allow / risk
+                    # settings; drop it so the next activation re-discovers.
+                    self.registry.replace_tools(module_id, [])
+                self._store_env_values(name, env)
+                for domain_id in domains:
+                    self.registry.set_binding(ModuleBinding(
+                        module_id=module_id, domain_id=domain_id, enabled=True,
+                    ))
+                imported.append(module_id)
+                if changed or status != existing.status:
+                    self.events.record(
+                        "module.updated", data={
+                            "module_id": module_id, "source": str(path),
+                        },
+                    )
+                continue
             module = Module(
                 id=module_id,
                 kind="mcp",
                 name=name,
                 version=1,
                 status="active",
-                scope=scope if scope in ("global", "domain", "adaptive")
-                else "global",
+                scope=scope,
                 manifest=manifest,
                 origin="import",
                 provenance={"source": str(path)},
@@ -288,6 +330,7 @@ class McpModuleLoader:
                 updated_at=now,
             )
             self.registry.save(module)
+            self._store_env_values(name, env)
             for domain_id in domains:
                 self.registry.set_binding(ModuleBinding(
                     module_id=module_id, domain_id=domain_id, enabled=True,
@@ -299,6 +342,79 @@ class McpModuleLoader:
                 },
             )
         return imported
+
+    def _servers_path(self) -> Path | None:
+        """Resolve the configured import file, or a conventional default."""
+        path_text = str(self.config.get("tools.mcp_servers_file", "") or "")
+        path_text = path_text.strip()
+        if path_text:
+            path = Path(path_text).expanduser()
+            if not path.is_absolute():
+                path = self.registry.data_dir / path
+            return path
+        for name in DEFAULT_SERVERS_FILES:
+            candidate = self.registry.data_dir / name
+            if candidate.is_file():
+                return candidate
+        return None
+
+    @staticmethod
+    def _entries(data: Any) -> list[dict[str, Any]]:
+        """Accept harness ``servers:`` lists and standard ``mcpServers:``."""
+        entries: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            entries.extend(entry for entry in data if isinstance(entry, dict))
+        if isinstance(data, dict):
+            servers = data.get("servers")
+            if isinstance(servers, list):
+                entries.extend(
+                    entry for entry in servers if isinstance(entry, dict)
+                )
+            elif isinstance(servers, dict):
+                entries.extend(
+                    {**entry, "name": str(name)}
+                    for name, entry in servers.items()
+                    if isinstance(entry, dict)
+                )
+            standard = data.get("mcpServers")
+            if isinstance(standard, dict):
+                entries.extend(
+                    {**entry, "name": str(name)}
+                    for name, entry in standard.items()
+                    if isinstance(entry, dict)
+                )
+        return entries
+
+    def _store_env_values(self, name: str, env: dict[str, Any]) -> None:
+        """Keep explicit env values in a private sidecar, never in SQLite."""
+        directory = self.registry.root / "mcp"
+        path = directory / f"{_sanitize(name)}.env.json"
+        values = {
+            str(key): str(value)
+            for key, value in env.items()
+            if str(value or "").strip() != ""
+        }
+        if not values:
+            # The source now relies on the process environment; drop any
+            # values left over from an earlier version of the file.
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        directory.mkdir(parents=True, exist_ok=True)
+        path.write_text(util.dumps(values) + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        self.events.record(
+            "mcp.env_values_stored", data={
+                "module_id": f"mcp:{name}",
+                "path": str(path),
+                "env_names": sorted(values),
+            },
+        )
 
     def migrate_retired_modules(self) -> list[str]:
         """Rewrite system-owned legacy rows as ordinary MCP modules.
@@ -411,19 +527,33 @@ class McpModuleLoader:
     @staticmethod
     def _manifest_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         autoapprove = bool(entry.get("autoapprove", False))
+
+        def _strings(value: Any) -> list[str]:
+            if isinstance(value, (list, tuple)):
+                return [str(item) for item in value]
+            if isinstance(value, str) and value.strip():
+                return [value.strip()]
+            return []
+
+        try:
+            timeout = float(entry.get("timeout_s") or 30.0)
+        except (TypeError, ValueError):
+            timeout = 30.0
         manifest: dict[str, Any] = {
-            "transport": str(entry.get("transport") or "stdio"),
+            "transport": str(
+                entry.get("transport") or entry.get("type") or "stdio"
+            ),
             "command": str(entry.get("command") or ""),
-            "args": [str(arg) for arg in entry.get("args") or []],
+            "args": _strings(entry.get("args")),
             "env_names": sorted((entry.get("env") or {}).keys())
             if isinstance(entry.get("env"), dict) else [],
-            "domains": [str(d) for d in entry.get("domains") or []],
+            "domains": _strings(entry.get("domains")),
             "autoapprove": autoapprove,
-            "tools_allow": [str(t) for t in entry.get("tools_allow") or []],
-            "tools_deny": [str(t) for t in entry.get("tools_deny") or []],
+            "tools_allow": _strings(entry.get("tools_allow")),
+            "tools_deny": _strings(entry.get("tools_deny")),
             "read_only": bool(entry.get("read_only", False)),
             "startup": str(entry.get("startup") or "lazy"),
-            "timeout_s": float(entry.get("timeout_s") or 30.0),
+            "timeout_s": max(0.1, timeout),
         }
         if entry.get("risk_default"):
             manifest["risk_default"] = str(entry["risk_default"])
@@ -446,24 +576,47 @@ class McpModuleLoader:
             raise ValueError(
                 f"unsupported module transport: {transport} (only stdio)"
             )
-        command = str(manifest.get("command") or "").strip()
+        command = self._expand(str(manifest.get("command") or "").strip())
         if not command:
             raise ValueError("module manifest has no command")
-        args = [str(arg) for arg in manifest.get("args") or []]
+        args = [self._expand(str(arg)) for arg in manifest.get("args") or []]
         return McpServer(
             module.id, command, args, self._env(module),
             timeout_s=float(manifest.get("timeout_s") or 30.0),
         )
 
-    def _env(self, module: Module) -> dict[str, str]:
-        """Forward only the variable names the server declared.
+    def _expand(self, value: str) -> str:
+        """Expand ``${data_dir}`` so one manifest works locally and in Docker."""
+        if "${" not in value:
+            return value
+        data_dir = str(self.registry.data_dir.resolve())
+        return _DATA_DIR_PLACEHOLDER.sub(lambda _match: data_dir, value)
 
-        Values are read from the harness process environment; they are never
-        copied into editable state. Server-specific settings belong in the
-        server's own config file passed through ``args``.
+    def _env(self, module: Module) -> dict[str, str]:
+        """Forward only the variables the server declared.
+
+        Process environment values are used when present. Explicit values from
+        a standard ``mcpServers`` file live in a private sidecar written at
+        import time; they override the process environment. They are never
+        copied into the module row or SQLite.
         """
         names = [str(name) for name in module.manifest.get("env_names") or []]
-        return {name: os.environ[name] for name in names if name in os.environ}
+        env = {name: os.environ[name] for name in names if name in os.environ}
+        sidecar = self._env_path(module)
+        if sidecar is not None and sidecar.is_file():
+            values = util.loads(sidecar.read_text(encoding="utf-8"), {})
+            if isinstance(values, dict):
+                for name in names:
+                    value = values.get(name)
+                    if value is not None and str(value).strip() != "":
+                        env[name] = str(value)
+        return env
+
+    def _env_path(self, module: Module) -> Path | None:
+        name = module.id.split(":", 1)[-1]
+        if not name:
+            return None
+        return self.registry.root / "mcp" / f"{_sanitize(name)}.env.json"
 
     def _module_tools(
         self, module: Module, raw_tools: list[dict[str, Any]]

@@ -45,33 +45,45 @@ python harness/modules/web/server.py \
 
 ## Registering with the harness
 
-The harness knows only the MCP entry below; it never reads the config file
-and stores no SearXNG URL of its own. Add it to the file named by
-`tools.mcp_servers_file` (see `examples/mcp_servers.yaml`):
+Copy `web.example.json` to `<data_dir>/modules/mcp/web.json` and edit it. The
+harness knows only the MCP entry below; it never reads the config file and
+stores no SearXNG URL of its own. Add it to `data/mcp.json` (the standard
+`mcpServers` shape, auto-detected) or to the file named by
+`tools.mcp_servers_file` (see `examples/mcp.json` and
+`examples/mcp_servers.yaml`):
 
-```yaml
-servers:
-  - name: web
-    command: python
-    args:
-      - /app/harness/modules/web/server.py
-      - --config
-      - /data/modules/mcp/web.json
-    tool_prefix: ""          # keep the server's tool name: web_search
-    tools_allow: [web_search]
-    risk_default: low
-    autoapprove: true
-    read_only: true
-    side_effects: false
-    startup: lazy
-    timeout_s: 60
+```json
+{
+  "mcpServers": {
+    "web": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "harness/modules/web/server.py",
+        "--config",
+        "${data_dir}/modules/mcp/web.json"
+      ],
+      "tool_prefix": "",
+      "tools_allow": ["web_search"],
+      "risk_default": "low",
+      "autoapprove": true,
+      "read_only": true,
+      "side_effects": false,
+      "startup": "lazy",
+      "timeout_s": 60
+    }
+  }
+}
 ```
 
-`tool_prefix: ""` registers `web_search` verbatim; omit it to get the default
-`mcp_web_web_search`. Every result is untrusted data. After one enters a run,
-a side-effecting tool still needs approval even if it was auto-approved.
+`${data_dir}` expands to the absolute data directory, so the same entry works
+locally and in Docker. `tool_prefix: ""` registers `web_search` verbatim; omit
+it to get the default `mcp_web_web_search`. Every result is untrusted data.
+After one enters a run, a side-effecting tool still needs approval even if it
+was auto-approved.
 
-In Docker, mount the config read-only and use container paths:
+In Docker, mount the config read-only and use the container data path
+(`/data/modules/mcp/web.json` via `${data_dir}`):
 
 ```yaml
     volumes:

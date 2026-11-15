@@ -523,40 +523,63 @@ toolset without a process restart. Each run keeps a capability snapshot, so a
 reload cannot silently change the tools mid-run; an explicit `use_domain`
 change recomputes once and records `toolset.changed`.
 
-**MCP servers.** Set `tools.mcp_servers_file` to a YAML file listing stdio
-servers (see `examples/mcp_servers.yaml`). The file is an import source:
-entries become module rows on first load and are never overwritten by later
-edits. Manifest fields include `transport` (stdio), `command`, `args`,
-`env_names`, `domains`, `autoapprove`, `risk_default`, `tools_allow`,
-`tools_deny`, `tool_prefix`, `read_only`, `side_effects`, `startup`
-(`eager`/`lazy`), and `timeout_s`:
+**MCP servers.** The simplest install is to drop a standard `mcpServers`
+file at `data/mcp.json` (YAML is accepted too):
 
-```yaml
-servers:
-  - name: example_echo
-    command: python
-    args: [examples/mcp/echo_server.py]
-    autoapprove: true
-    read_only: true             # echo cannot change external state
-    # domains: [dom_example]    # domain-bound instead of global
-    # tools_allow: [echo, add]
-    # tool_prefix: ""           # keep the server's names (default: mcp_<name>_)
-    # startup: lazy             # default; use cached discovery
+```json
+{
+  "mcpServers": {
+    "example_echo": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["examples/mcp/echo_server.py"],
+      "autoapprove": true,
+      "read_only": true,
+      "tools_allow": ["echo", "add"]
+    }
+  }
+}
 ```
+
+`<data_dir>/mcp.json`, `mcp_servers.yaml`, and `mcp_servers.yml` are picked
+up automatically when `tools.mcp_servers_file` is empty. To keep several
+files or store one elsewhere, set `tools.mcp_servers_file` to its path. Both
+the standard `mcpServers` mapping and the harness `servers:` list are
+understood; see `examples/mcp.json` and `examples/mcp_servers.yaml`.
+
+Entries become module rows (`id: mcp:<name>`) on first load. An explicit
+reload re-reads the file and updates existing rows, so editing an entry needs
+only:
+
+```bash
+python -m harness modules --reload
+```
+
+Manifest fields include `transport` (stdio), `command`, `args`, `env`,
+`domains`, `autoapprove`, `risk_default`, `tools_allow`, `tools_deny`,
+`tool_prefix`, `read_only`, `side_effects`, `startup` (`eager`/`lazy`), and
+`timeout_s`. `${data_dir}` inside `command`/`args` expands to the absolute
+data directory, so one entry works both locally and in Docker. Environment
+variables named in `env` are forwarded from the harness process; explicit
+values are written to a private sidecar (`modules/mcp/<name>.env.json`) and
+never to SQLite.
 
 Registered names default to `mcp_<server>_<tool>`. Set `tool_prefix: ""` when
 a server should keep its own tool names. Server-specific settings — endpoints,
 credentials, categories — belong in that server's own config file passed
-through `args`; the harness never stores or reads them. Two self-contained
-examples ship in the repo: `harness/modules/web/server.py` (SearXNG search)
-and `harness/modules/calendar/server.py` (CalDAV).
+through `args`; the harness never reads them. Two self-contained examples
+ship in the repo: `harness/modules/web/server.py` (SearXNG search) and
+`harness/modules/calendar/server.py` (CalDAV). Their config templates are
+`web.example.json` and `calendar.example.json`; copy them to
+`data/modules/mcp/` and point the entry at that path.
 
 Servers are launched per call for isolation; a server that fails to start
-is reported as unavailable and never blocks turns. Discovery is cached in
-`module_tools`; the heartbeat refreshes enabled modules every
-`modules.health_interval_s`. The client speaks the MCP stdio JSON-RPC
-protocol directly (initialize, tools/list, tools/call) with no heavy SDK
-dependency.
+is reported as unavailable and never blocks turns. Startup failures include
+the server's stderr tail, so a bad config path or malformed JSON is visible in
+`python -m harness modules`. Discovery is cached in `module_tools`; the
+heartbeat refreshes enabled modules every `modules.health_interval_s`. The
+client speaks the MCP stdio JSON-RPC protocol directly (initialize, tools/list,
+tools/call) with no heavy SDK dependency.
 
 Manage modules from the API or CLI:
 
@@ -574,15 +597,16 @@ The same actions are available as `GET /api/modules`,
 
 **Web search.** `harness/modules/web/server.py` is a self-contained stdio
 MCP server that queries SearXNG's JSON API and returns bounded
-`{title, url, snippet}` results. It ships with a `--config` file
-(`web.example.json`), not harness configuration keys; `WEB_*` environment
-variables override the file when set. Register it through
-`tools.mcp_servers_file` with `tool_prefix: ""` and `tools_allow:
-[web_search]`. See `harness/modules/web/README.md`. Results are untrusted
-data, so they taint the run: after web content enters a run, any
-side-effecting tool is escalated to confirm-risk and the approval names the
-source URL. Read-only tools stay low-risk. `web_fetch` is deliberately not
-provided (SSRF and injection surface).
+`{title, url, snippet}` results. Copy `web.example.json` to
+`data/modules/mcp/web.json`, set `searxng_url`, and add the entry from
+`examples/mcp.json`; `WEB_*` environment variables override the file when set.
+The server validates the URL at startup, so a missing or malformed endpoint
+shows up as an unavailable module instead of a surprise on the first call. See
+`harness/modules/web/README.md`. Results are untrusted data, so they taint the
+run: after web content enters a run, any side-effecting tool is escalated to
+confirm-risk and the approval names the source URL. Read-only tools stay
+low-risk. `web_fetch` is deliberately not provided (SSRF and injection
+surface).
 
 > Port note: the harness also defaults to port 8080. Do not run it and
 > SearXNG on the same host unless you change `HARNESS_PORT` or

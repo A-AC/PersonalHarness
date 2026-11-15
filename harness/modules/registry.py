@@ -70,7 +70,9 @@ class ModuleRegistry:
 
     def load_all(self) -> dict[str, Any]:
         """Import, discover, and register every eligible capability module."""
-        report = self.loader.load_all()
+        # Re-read the MCP source file on startup. Unchanged entries keep their
+        # cached discovery; a changed entry drops its cache and re-discovers.
+        report = self.loader.load_all(sync=True)
         try:
             imported = self.skills.import_configured()
         except Exception as exc:  # a broken skill never blocks startup

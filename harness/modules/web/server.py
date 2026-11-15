@@ -316,6 +316,10 @@ def _config_arg(argv: list[str]) -> str:
 def main() -> None:
     try:
         configure(_config_arg(sys.argv[1:]))
+        # Fail discovery immediately, with a useful stderr message, when the
+        # endpoint is missing or malformed. Otherwise the module would look
+        # healthy and only fail later on the first tool call.
+        base_url()
     except WebConfigError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1)

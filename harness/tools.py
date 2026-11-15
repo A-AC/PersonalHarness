@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1205,7 +1206,12 @@ class McpServer:
         self.env = env
         self.timeout_s = max(0.1, float(timeout_s or 30.0))
 
-    def _request(self, process: subprocess.Popen, payload: dict[str, Any]) -> dict[str, Any]:
+    def _request(
+        self,
+        process: subprocess.Popen,
+        payload: dict[str, Any],
+        stderr: Any = None,
+    ) -> dict[str, Any]:
         stdin_text = util.dumps(payload) + "\n"
         process.stdin.write(stdin_text.encode("utf-8"))
         process.stdin.flush()
@@ -1215,7 +1221,9 @@ class McpServer:
         while time.monotonic() < deadline:
             line = process.stdout.readline()
             if not line:
-                raise McpError(f"MCP server '{self.name}' closed its output")
+                raise McpError(self._failure(
+                    "closed its output", stderr
+                ))
             lines.append(line.decode("utf-8", errors="replace"))
             try:
                 message = json.loads(lines[-1])
@@ -1228,21 +1236,48 @@ class McpServer:
                         f"{message['error'].get('message')}"
                     )
                 return message.get("result") or {}
-        raise McpError(f"MCP server '{self.name}' timed out")
+        raise McpError(self._failure("timed out", stderr))
 
-    def _launch(self) -> subprocess.Popen:
+    def _failure(self, reason: str, stderr: Any = None) -> str:
+        detail = self._stderr_text(stderr)
+        message = f"MCP server '{self.name}' {reason}"
+        return f"{message}: {detail}" if detail else message
+
+    @staticmethod
+    def _stderr_text(stderr: Any, limit: int = 800) -> str:
+        """Bounded stderr tail, so a crash is diagnosable from the UI."""
+        if stderr is None:
+            return ""
         try:
-            return subprocess.Popen(
+            stderr.flush()
+            stderr.seek(0, 2)
+            size = stderr.tell()
+            stderr.seek(max(0, size - limit * 4))
+            text = stderr.read(limit * 4).decode(
+                "utf-8", errors="replace"
+            ).strip()
+        except Exception:
+            return ""
+        return text[-limit:]
+
+    def _launch(self) -> tuple[subprocess.Popen, Any]:
+        # A temp file (not a pipe) avoids a deadlock when a server logs a lot
+        # to stderr, while still letting a failure report the real reason.
+        stderr = tempfile.TemporaryFile()
+        try:
+            process = subprocess.Popen(
                 [self.command, *self.args],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=stderr,
                 env={**dict(__import__("os").environ), **(self.env or {})},
             )
         except OSError as exc:
+            stderr.close()
             raise McpError(f"cannot start MCP server '{self.name}': {exc}") from exc
+        return process, stderr
 
     def list_tools(self) -> list[dict[str, Any]]:
-        process = self._launch()
+        process, stderr = self._launch()
         try:
             self._request(process, {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1251,20 +1286,20 @@ class McpServer:
                     "capabilities": {},
                     "clientInfo": {"name": "harness", "version": "2.0.0"},
                 },
-            })
+            }, stderr)
             process.stdin.write((util.dumps({
                 "jsonrpc": "2.0", "method": "notifications/initialized"
             }) + "\n").encode("utf-8"))
             process.stdin.flush()
             result = self._request(process, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/list",
-            })
+            }, stderr)
             return result.get("tools") or []
         finally:
-            self._shutdown(process)
+            self._shutdown(process, stderr)
 
     def call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        process = self._launch()
+        process, stderr = self._launch()
         try:
             self._request(process, {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1273,7 +1308,7 @@ class McpServer:
                     "capabilities": {},
                     "clientInfo": {"name": "harness", "version": "2.0.0"},
                 },
-            })
+            }, stderr)
             process.stdin.write((util.dumps({
                 "jsonrpc": "2.0", "method": "notifications/initialized"
             }) + "\n").encode("utf-8"))
@@ -1281,7 +1316,7 @@ class McpServer:
             result = self._request(process, {
                 "jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": tool, "arguments": arguments},
-            })
+            }, stderr)
             if result.get("isError"):
                 texts = [
                     item.get("text", "") for item in result.get("content") or []
@@ -1290,14 +1325,24 @@ class McpServer:
                 raise McpError("; ".join(t for t in texts if t) or "MCP tool error")
             return result
         finally:
-            self._shutdown(process)
+            self._shutdown(process, stderr)
 
-    def _shutdown(self, process: subprocess.Popen) -> None:
+    def _shutdown(self, process: subprocess.Popen, stderr: Any = None) -> None:
         try:
             process.stdin.close()
             process.wait(timeout=5)
         except Exception:
             process.kill()
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
+        finally:
+            if stderr is not None:
+                try:
+                    stderr.close()
+                except Exception:
+                    pass
 
 
 def mcp_text(result: dict[str, Any], limit: int | None = 4000) -> str:

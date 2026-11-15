@@ -331,6 +331,21 @@ def _legacy_settings_overlay(path: Path) -> dict[str, Any]:
     timezone = legacy.get("timezone")
     if isinstance(timezone, str) and timezone.strip():
         overlay["timezone"] = timezone.strip()
+    # The pre-module settings file kept capability paths in a ``capabilities``
+    # group. Carry those paths over so an upgrade does not silently lose its
+    # MCP import file or skills directory.
+    capabilities = legacy.get("capabilities") or {}
+    if isinstance(capabilities, dict):
+        tools: dict[str, Any] = {}
+        for old_key, new_key in (
+            ("mcp_servers_file", "mcp_servers_file"),
+            ("skills_dir", "skills_dir"),
+        ):
+            value = capabilities.get(old_key)
+            if isinstance(value, str) and value.strip():
+                tools[new_key] = value.strip()
+        if tools:
+            overlay["tools"] = tools
     return overlay
 
 

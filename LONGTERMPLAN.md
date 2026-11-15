@@ -154,8 +154,8 @@ Rules:
 - A module in `draft` or `disabled` is never disclosed and never callable.
 - Skill content lives at `data/modules/skills/<id>/v<version>.md`.
 - MCP manifests are rows (editable from the UI); `env` holds variable names.
-- The legacy `tools.skills_dir` and `tools.mcp_servers_file` become one-time
-  import sources, then optional read-only mirrors.
+- The legacy `tools.skills_dir` and `tools.mcp_servers_file` are import
+  sources; the MCP file is re-read on startup and on explicit reload.
 
 ### 4.2 Per-run capability snapshot
 
@@ -346,8 +346,9 @@ SearXNG-backed MCP server.
 - Manifest fields: `transport` (`stdio` now), `command`, `args`, `env_names`,
   `domains`, `autoapprove`, `risk_default`, `tools_allow`, `tools_deny`,
   `read_only`, `side_effects`, `startup` (`eager|lazy`), `timeout_s`.
-- Import existing `examples/mcp_servers.yaml` / `tools.mcp_servers_file` into
-  module rows on first load; keep the file supported as an import source.
+- Import standard `mcpServers` JSON, `examples/mcp_servers.yaml`, and
+  `tools.mcp_servers_file` into module rows; re-read the file on startup and
+  on explicit reload so entry edits are picked up without deleting rows.
 - Domain scoping: `scope=global` or `scope=domain` + `module_bindings`.
 - Reload without restart:
   - `POST /api/modules/reload`

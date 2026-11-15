@@ -1786,6 +1786,9 @@ def _config_arg(argv: list[str]) -> str:
 def main() -> None:
     try:
         configure(_config_arg(sys.argv[1:]))
+        # Surface a missing/malformed endpoint at discovery time instead of
+        # registering tools that can only fail on their first call.
+        base_url()
     except CalendarError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1)

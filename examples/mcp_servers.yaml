@@ -1,17 +1,31 @@
 # Optional stdio MCP servers.
 #
+# Two equivalent formats are accepted (YAML or JSON):
+#
+#   servers:      # this list shape (harness-specific extras allowed)
+#     - name: ...
+#   mcpServers:   # the standard mapping shape used by MCP clients
+#     name: {command: ..., args: [...]}
+#
 # Point tools.mcp_servers_file in data/config.yaml at a copy of this file
-# (absolute path recommended). Entries are imported into module rows
-# (id: mcp:<name>) on first load; later edits to this file do not overwrite
-# an existing row. Use `python -m harness modules --reload mcp:<name>` after
-# changing a manifest directly in the database.
+# (absolute path recommended). If that key is empty, the harness automatically
+# uses <data_dir>/mcp.json, <data_dir>/mcp_servers.yaml, or
+# <data_dir>/mcp_servers.yml when one exists.
+#
+# Entries are imported into module rows (id: mcp:<name>) on first load. An
+# explicit reload (`python -m harness modules --reload`) re-reads the file and
+# updates existing rows, so editing an entry is a one-command operation.
+#
+# `${data_dir}` in command/args expands to the absolute data directory. Use it
+# for server config files so the same entry works locally and in Docker.
 #
 # Fields:
-#   transport     stdio only for now
+#   transport     stdio only for now (`type` is accepted as an alias)
 #   command       executable to launch (required)
 #   args          argument list
-#   env           variable names to forward from the harness environment;
-#                 values are never stored in editable state
+#   env           environment variables. Variable names are stored in the
+#                 module row; values are written to a private sidecar at
+#                 data/modules/mcp/<name>.env.json, never to SQLite.
 #   domains       bind the module to these domains (scope=domain).
 #                 Omit/empty for scope=global
 #   scope         explicit global|domain (inferred from domains when omitted)
@@ -48,13 +62,14 @@ servers:
 
   # Web search (SearXNG). The server owns its own config file; the harness
   # only knows the command line. Copy harness/modules/web/web.example.json to
-  # the data directory and adjust it. tool_prefix: "" keeps web_search stable.
+  # ${data_dir}/modules/mcp/web.json and adjust it. tool_prefix: "" keeps
+  # web_search stable.
   # - name: web
   #   command: python
   #   args:
   #     - harness/modules/web/server.py
   #     - --config
-  #     - /data/modules/mcp/web.json
+  #     - ${data_dir}/modules/mcp/web.json
   #   tool_prefix: ""
   #   tools_allow: [web_search]
   #   risk_default: low
@@ -72,7 +87,7 @@ servers:
   #   args:
   #     - harness/modules/calendar/server.py
   #     - --config
-  #     - /data/modules/mcp/calendar.json
+  #     - ${data_dir}/modules/mcp/calendar.json
   #   tool_prefix: ""
   #   risk_default: confirm
   #   side_effects: true

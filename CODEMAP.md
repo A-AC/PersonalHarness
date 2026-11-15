@@ -27,7 +27,7 @@ tests under the `live` marker.
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract; applied via `MemoryManager` with revisions; markdown change log per run |
 | `harness/modules/types.py` | `Module`, `ModuleBinding`, `ModuleTool` value objects over the v3 tables |
 | `harness/modules/registry.py` | Module persistence, domain eligibility, lazy skill manager, and the loader seam (`load_all`, `reload`, `set_enabled`, `health_tick`); skill imports and reloads route here |
-| `harness/modules/mcp.py` | Generic registry-backed MCP loader: import, manifests, discovery cache, per-domain visibility, reload, health, trusted/untrusted flags, retired-row migration, tool-name prefixing |
+| `harness/modules/mcp.py` | Generic registry-backed MCP loader: `servers:`/`mcpServers:` import, conventional `data/mcp.json` discovery, `${data_dir}` expansion, manifests, private env sidecars, discovery cache, per-domain visibility, reload sync, health, trusted/untrusted flags, retired-row migration, tool-name prefixing |
 | `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions, agent-owned edit guard) and `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
 | `harness/modules/web/server.py` | Self-contained stdio MCP server over SearXNG JSON with its own `--config`; bounded results, no `web_fetch` |
 | `harness/modules/calendar/server.py` | Self-contained stdio MCP server over CalDAV with its own `--config`; ETag-guarded VEVENT read/write tools |
@@ -39,6 +39,7 @@ tests under the `live` marker.
 | `scripts/container_check.py` | Build + start the compose stack, verify health/auth/API/endpoint, tear down |
 | `examples/mcp/echo_server.py` | Dependency-free stdio MCP echo/add server (also the test fixture) |
 | `examples/mcp_servers.yaml` | MCP server manifest/import example (stdio, scope, tool filters) |
+| `examples/mcp.json` | Standard `mcpServers` registration example (auto-detected at `data/mcp.json`) |
 | `examples/skills/weekly-review/SKILL.md` | Adaptive skill format example with preconditions |
 | `examples/inbox_curl.sh` | Authenticated `POST /api/inbox` example and duplicate/idempotency check |
 | `integrations/README.md` | Pusher contract for future mailbox/messaging bridges; no adapter ships in the core process |
@@ -116,6 +117,7 @@ heartbeat -> inbox.triage(new events, oldest first)
 | `artifacts/domains/…` | Reserved for future domain notes |
 | `modules/skills/<id>/v<n>.md` | Versioned skill bodies owned by `kind=skill` module rows; directory imports are one source, rows are authoritative |
 | `modules/mcp/<id>.json` | Server-owned config files (e.g. the migrated web config); MCP rows remain authoritative |
+| `modules/mcp/<id>.env.json` | Private sidecar for explicit `env` values from an `mcpServers` file (never stored in SQLite) |
 | `backups/harness-<ts>.zip` | DB snapshot + config + artifacts |
 | `logs/harness.log` | Rotating structured log |
 | `process.lock` | Writer lock held by `serve` (pid + heartbeat timestamp) |

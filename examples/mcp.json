@@ -1,0 +1,43 @@
+{
+  "mcpServers": {
+    "example_echo": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["examples/mcp/echo_server.py"],
+      "autoapprove": true,
+      "read_only": true,
+      "tools_allow": ["echo", "add"]
+    },
+    "web": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "harness/modules/web/server.py",
+        "--config",
+        "${data_dir}/modules/mcp/web.json"
+      ],
+      "tool_prefix": "",
+      "tools_allow": ["web_search"],
+      "risk_default": "low",
+      "autoapprove": true,
+      "read_only": true,
+      "side_effects": false,
+      "startup": "lazy",
+      "timeout_s": 60
+    },
+    "calendar": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "harness/modules/calendar/server.py",
+        "--config",
+        "${data_dir}/modules/mcp/calendar.json"
+      ],
+      "tool_prefix": "",
+      "risk_default": "confirm",
+      "side_effects": true,
+      "startup": "lazy",
+      "timeout_s": 60
+    }
+  }
+}
