@@ -21,7 +21,7 @@ from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Phase 3 memory lifetime: additive columns on ``memories`` plus a small
 # access table. ``archived_at`` marks an archived row without touching the
@@ -138,7 +138,7 @@ CREATE INDEX IF NOT EXISTS idx_automation_fires_event
 MODULE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS modules (
   id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK(kind IN ('skill','mcp','web')),
+  kind TEXT NOT NULL CHECK(kind IN ('skill','mcp')),
   name TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL CHECK(status IN ('draft','active','disabled','error')),
@@ -506,6 +506,44 @@ class Database:
             # Phase 5 adds tables only, so the migration is a pure create and
             # keeps every existing row untouched.
             self._conn.executescript(INBOX_SCHEMA)
+        if version < 7:
+            # Retire the built-in `web` module kind: every tool module is now
+            # an ordinary MCP row. Rebuild the table to drop the old CHECK
+            # constraint; the loader converts each legacy row's manifest on
+            # the next load.
+            self._conn.executescript("""
+DROP TABLE IF EXISTS modules_v7;
+CREATE TABLE modules_v7 (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('skill','mcp')),
+  name TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL CHECK(status IN ('draft','active','disabled','error')),
+  scope TEXT NOT NULL DEFAULT 'global'
+    CHECK(scope IN ('global','domain','adaptive')),
+  manifest TEXT NOT NULL,
+  content_path TEXT,
+  origin TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_loaded_at TEXT,
+  last_error TEXT,
+  usage_count INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO modules_v7(
+  id, kind, name, version, status, scope, manifest, content_path, origin,
+  provenance, created_by, created_at, updated_at, last_loaded_at, last_error,
+  usage_count
+)
+SELECT id, CASE WHEN kind = 'web' THEN 'mcp' ELSE kind END, name, version,
+  status, scope, manifest, content_path, origin, provenance, created_by,
+  created_at, updated_at, last_loaded_at, last_error, usage_count
+FROM modules;
+DROP TABLE modules;
+ALTER TABLE modules_v7 RENAME TO modules;
+""")
         if version < SCHEMA_VERSION:
             self._conn.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",

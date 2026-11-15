@@ -85,15 +85,48 @@ def test_config_file_wins_over_environment(tmp_path, monkeypatch):
         password="file-pass",
         calendar="Work",
     )
-    monkeypatch.setenv("HARNESS_CALENDAR_URL", "http://env.test/dav.php")
-    monkeypatch.setenv("HARNESS_CALENDAR_USER", "env-user")
-    monkeypatch.setenv("HARNESS_CALENDAR_PASSWORD", "env-pass")
+    monkeypatch.setenv("CALENDAR_URL", "http://env.test/dav.php")
+    monkeypatch.setenv("CALENDAR_USER", "env-user")
+    monkeypatch.setenv("CALENDAR_PASSWORD", "env-pass")
     module.configure(str(path))
 
     assert module.base_url() == "http://file.test/dav.php/"
     assert module.username() == "file-user"
     assert module.password() == "file-pass"
     assert module.configured_calendar() == "Work"
+
+
+def test_environment_fallback_uses_neutral_names(tmp_path, monkeypatch):
+    module = _load_module()
+    monkeypatch.setenv("CALENDAR_URL", "http://env.test/dav.php")
+    monkeypatch.setenv("CALENDAR_USER", "env-user")
+    monkeypatch.setenv("CALENDAR_PASSWORD", "env-pass")
+    monkeypatch.setenv("CALENDAR_NAME", "Env")
+    path = _config(
+        tmp_path / "calendar.json",
+        url="",
+        username="",
+        password="",
+        calendar="",
+    )
+    module.configure(str(path))
+
+    assert module.base_url() == "http://env.test/dav.php/"
+    assert module.username() == "env-user"
+    assert module.password() == "env-pass"
+    assert module.configured_calendar() == "Env"
+
+
+def test_legacy_environment_names_still_work(monkeypatch):
+    module = _load_module()
+    monkeypatch.setenv("HARNESS_CALENDAR_URL", "http://legacy.test/dav.php")
+    monkeypatch.setenv("HARNESS_CALENDAR_USER", "legacy-user")
+    monkeypatch.setenv("HARNESS_CALENDAR_PASSWORD", "legacy-pass")
+    module.configure("")
+
+    assert module.base_url() == "http://legacy.test/dav.php/"
+    assert module.username() == "legacy-user"
+    assert module.password() == "legacy-pass"
 
 
 def test_missing_config_file_is_a_clean_error(tmp_path):

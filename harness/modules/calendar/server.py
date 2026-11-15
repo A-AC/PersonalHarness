@@ -1,10 +1,9 @@
-"""Calendar module: a dependency-free stdio MCP server over CalDAV.
+"""Calendar MCP server: a dependency-free stdio server over CalDAV.
 
 The server is standalone on purpose: it is launched as its own process and
 imports nothing from the harness. Any MCP client can run it.
 
-Configuration is file-based, which is the right fit for a container where the
-harness launches this server with an explicit path:
+Configuration is file-based, so credentials never need to live in the client:
 
   server.py --config /data/calendar.json
 
@@ -20,11 +19,11 @@ The file is JSON (``.toml`` is also accepted). Keys:
   max_range_days / timeout_s
   read_only     true hides and refuses the write tools
 
-The ``HARNESS_CALENDAR_*`` environment variables of the same meaning are
-still read as a fallback for standalone/scripted use, but they are never
-required and file values win. Keeping credentials in the mounted data file
-(not in the harness database, process arguments, or environment) avoids
-leaking them into ``docker inspect``/``ps`` output.
+Neutral ``CALENDAR_*`` environment variables of the same meaning are read as
+a fallback for standalone/scripted use; legacy ``HARNESS_CALENDAR_*`` names
+are still accepted. They are never required and file values win. Keeping
+credentials in the mounted data file (not in a database, process arguments,
+or environment) avoids leaking them into ``docker inspect``/``ps`` output.
 
 Run ``server.py --config PATH --probe`` to check credentials and print the
 discovered calendars without starting the JSON-RPC loop.
@@ -153,36 +152,46 @@ def _file_value(name: str) -> object | None:
     return (_FILE_CONFIG or {}).get(name)
 
 
-def _pick(name: str, env_name: str) -> object:
+def _pick(name: str, env_name: str | tuple[str, ...]) -> object:
     """File value wins; environment is a standalone fallback."""
     value = _file_value(name)
     if value is not None and str(value).strip() != "":
         return value
-    return os.environ.get(env_name, "")
+    names = (env_name,) if isinstance(env_name, str) else env_name
+    for candidate in names:
+        if candidate in os.environ:
+            return os.environ.get(candidate)
+    return ""
 
 
-def _pick_str(name: str, env_name: str, default: str = "") -> str:
+def _pick_str(
+    name: str, env_name: str | tuple[str, ...], default: str = ""
+) -> str:
     value = _pick(name, env_name)
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value if value is not None else "").strip() or default
 
 
-def _pick_int(name: str, env_name: str, default: int) -> int:
+def _pick_int(
+    name: str, env_name: str | tuple[str, ...], default: int
+) -> int:
     try:
         return int(str(_pick(name, env_name) or default).strip())
     except (TypeError, ValueError):
         return default
 
 
-def _pick_float(name: str, env_name: str, default: float) -> float:
+def _pick_float(
+    name: str, env_name: str | tuple[str, ...], default: float
+) -> float:
     try:
         return float(str(_pick(name, env_name) or default).strip())
     except (TypeError, ValueError):
         return default
 
 
-def _pick_bool(name: str, env_name: str) -> bool:
+def _pick_bool(name: str, env_name: str | tuple[str, ...]) -> bool:
     value = _pick(name, env_name)
     if isinstance(value, bool):
         return value
@@ -190,9 +199,11 @@ def _pick_bool(name: str, env_name: str) -> bool:
 
 
 def base_url() -> str:
-    value = _pick_str("url", "HARNESS_CALENDAR_URL")
+    value = _pick_str("url", ("CALENDAR_URL", "HARNESS_CALENDAR_URL"))
     if not value:
-        value = _pick_str("dav_url", "HARNESS_CALENDAR_DAV_URL")
+        value = _pick_str(
+            "dav_url", ("CALENDAR_DAV_URL", "HARNESS_CALENDAR_DAV_URL")
+        )
     if not value:
         raise CalendarError(
             "calendar is not configured (set 'url' in the calendar config "
@@ -208,31 +219,41 @@ def base_url() -> str:
 
 
 def username() -> str:
-    return _pick_str("username", "HARNESS_CALENDAR_USER")
+    return _pick_str("username", ("CALENDAR_USER", "HARNESS_CALENDAR_USER"))
 
 
 def password() -> str:
-    return _pick_str("password", "HARNESS_CALENDAR_PASSWORD")
+    return _pick_str(
+        "password", ("CALENDAR_PASSWORD", "HARNESS_CALENDAR_PASSWORD")
+    )
 
 
 def configured_calendar() -> str:
-    return _pick_str("calendar", "HARNESS_CALENDAR_NAME")
+    return _pick_str("calendar", ("CALENDAR_NAME", "HARNESS_CALENDAR_NAME"))
 
 
 def configured_organizer() -> str:
-    return _pick_str("organizer", "HARNESS_CALENDAR_ORGANIZER")
+    return _pick_str(
+        "organizer", ("CALENDAR_ORGANIZER", "HARNESS_CALENDAR_ORGANIZER")
+    )
 
 
 def timeout_s() -> float:
     return max(
         0.5,
-        _pick_float("timeout_s", "HARNESS_CALENDAR_TIMEOUT_S", DEFAULT_TIMEOUT_S),
+        _pick_float(
+            "timeout_s",
+            ("CALENDAR_TIMEOUT_S", "HARNESS_CALENDAR_TIMEOUT_S"),
+            DEFAULT_TIMEOUT_S,
+        ),
     )
 
 
 def max_results() -> int:
     value = _pick_int(
-        "max_results", "HARNESS_CALENDAR_MAX_RESULTS", DEFAULT_MAX_RESULTS
+        "max_results",
+        ("CALENDAR_MAX_RESULTS", "HARNESS_CALENDAR_MAX_RESULTS"),
+        DEFAULT_MAX_RESULTS,
     )
     return max(1, min(MAX_EVENTS_HARD, value))
 
@@ -240,19 +261,21 @@ def max_results() -> int:
 def max_range_days() -> int:
     value = _pick_int(
         "max_range_days",
-        "HARNESS_CALENDAR_MAX_RANGE_DAYS",
+        ("CALENDAR_MAX_RANGE_DAYS", "HARNESS_CALENDAR_MAX_RANGE_DAYS"),
         DEFAULT_MAX_RANGE_DAYS,
     )
     return max(1, min(3660, value))
 
 
 def read_only() -> bool:
-    return _pick_bool("read_only", "HARNESS_CALENDAR_READ_ONLY")
+    return _pick_bool(
+        "read_only", ("CALENDAR_READ_ONLY", "HARNESS_CALENDAR_READ_ONLY")
+    )
 
 
 def local_tz() -> dt.tzinfo:
     for name in (
-        _pick_str("timezone", "HARNESS_CALENDAR_TZ"),
+        _pick_str("timezone", ("CALENDAR_TZ", "HARNESS_CALENDAR_TZ")),
         _env("HARNESS_TIMEZONE"),
         _env("TZ"),
     ):
@@ -339,7 +362,7 @@ class DavClient:
         url = self.url_for(href)
         request_headers = {
             "Authorization": self.auth,
-            "User-Agent": "personal-harness-calendar/1.0",
+            "User-Agent": "mcp-calendar/1.0",
             "Accept": "application/xml, text/calendar, */*",
         }
         request_headers.update(headers or {})
@@ -1809,7 +1832,7 @@ def main() -> None:
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
                     "serverInfo": {
-                        "name": "harness-calendar", "version": "1.0",
+                        "name": "calendar", "version": "1.0",
                     },
                 },
             })

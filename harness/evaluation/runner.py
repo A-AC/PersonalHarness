@@ -32,10 +32,10 @@ from .quality import evaluate_quality
 from .safety import prepare_sandbox, scenario_dir
 
 # Settings applied to every scenario unless it overrides them. They remove
-# background noise (auto-drafts, scheduled consolidation, web discovery) so a
+# background noise (auto-drafts, scheduled consolidation, MCP discovery) so a
 # failure names the behavior under test, not an unrelated tick.
 BASELINE: dict[str, Any] = {
-    "web": {"enabled": False},
+    "tools": {"mcp_servers_file": ""},
     "skills": {"auto_draft": False},
     "scheduler": {
         "enabled": False,

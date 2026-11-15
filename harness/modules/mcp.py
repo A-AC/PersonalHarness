@@ -1,9 +1,14 @@
-"""Registry-backed MCP and web module loading.
+"""Registry-backed MCP module loading.
 
-One loader owns every capability that contributes tools: MCP servers imported
-from the legacy YAML file and the shipped web-search module. Modules are rows
+One loader owns every capability that contributes tools. Modules are rows
 (``modules`` + ``module_bindings`` + ``module_tools``); discovery is cached in
 ``module_tools`` so a turn never launches a process just to build schemas.
+
+The loader is transport-only and deliberately knows nothing about individual
+servers: a server's endpoints, credentials, and options belong in that
+server's own configuration (passed through ``args``/``env_names``), never in
+``config.yaml`` or harness code. Any stdio MCP server listed in
+``tools.mcp_servers_file`` is treated exactly like every other one.
 
 Per-call process isolation is preserved: the stdio JSON-RPC client in
 ``harness/tools.py`` starts a fresh subprocess for every list/call. Health
@@ -15,7 +20,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,22 +43,22 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..tools import ToolRegistry
     from .registry import ModuleRegistry
 
-WEB_MODULE_ID = "web"
-WEB_SERVER = Path(__file__).resolve().parent / "web" / "server.py"
-
-# Config values the web MCP server reads from its environment. The manifest
-# stores these names, never the values (see invariant 11).
-WEB_ENV_NAMES = (
-    "HARNESS_WEB_SEARXNG_URL",
-    "HARNESS_WEB_MAX_RESULTS",
-    "HARNESS_WEB_TIMEOUT_S",
-    "HARNESS_WEB_CATEGORIES",
-    "HARNESS_WEB_SAFE_SEARCH",
-)
+# Old system-owned module rows that predate ordinary MCP registration. The
+# loader rewrites these once, using the row's own manifest plus any retired
+# config group kept by ``Config.removed``. No URL or credential is ever known
+# here: the retired group is serialized verbatim into the server's config file.
+RETIRED_MODULES = {"web": ""}
+MCP_JSON_PARSE_LIMIT = 1_000_000
 
 
 def _sanitize(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(value or "")).strip("_")
+
+
+def _sanitize_prefix(value: str) -> str:
+    """Keep underscores (a prefix usually ends with one)."""
+    return re.sub(r"[^a-zA-Z0-9_]", "_", str(value or ""))
+
 
 
 class McpModuleLoader:
@@ -82,10 +86,10 @@ class McpModuleLoader:
         report: dict[str, Any] = {"loaded": [], "skipped": [], "errors": []}
         if not bool(self.config.get("modules.enabled", True)):
             return report
+        self.migrate_retired_modules()
         self.import_legacy()
-        self.ensure_web_module()
         for module in self.registry.all():
-            if module.kind not in ("mcp", "web"):
+            if module.kind != "mcp":
                 continue
             if module.status in ("draft", "disabled", "error"):
                 report["skipped"].append(module.id)
@@ -204,7 +208,7 @@ class McpModuleLoader:
         return True
 
     # ------------------------------------------------------------------
-    # Legacy import and the shipped web module
+    # Legacy import and retired built-ins
     # ------------------------------------------------------------------
 
     def import_legacy(self) -> list[str]:
@@ -296,64 +300,113 @@ class McpModuleLoader:
             )
         return imported
 
-    def ensure_web_module(self) -> Module:
-        """Create/refresh the system-owned web-search module row."""
-        enabled = bool(self.config.get("web.enabled", True))
-        manifest = self._web_manifest()
-        existing = self.registry.get(WEB_MODULE_ID)
-        if existing is None:
-            now = util.iso()
-            module = Module(
-                id=WEB_MODULE_ID,
-                kind="web",
-                name="Web search (SearXNG)",
-                version=1,
-                status="active" if enabled else "disabled",
-                scope="global",
-                manifest=manifest,
-                origin="system",
-                provenance={"source": "builtin:web"},
-                created_by="system",
-                created_at=now,
-                updated_at=now,
-            )
-            self.registry.save(module)
-            return module
-        if existing.origin == "system":
-            # Refresh transport fields (server path, env names, timeout) while
-            # preserving the user's enable/disable decision. Setting
-            # web.enabled=false disables it; enabling again is an explicit
-            # API/CLI action.
-            status = existing.status
-            if not enabled:
-                status = "disabled"
-            refreshed = replace(
-                existing,
-                name="Web search (SearXNG)",
-                manifest={**existing.manifest, **manifest},
-                status=status,
-            )
-            return self.registry.save(refreshed)
-        return existing
+    def migrate_retired_modules(self) -> list[str]:
+        """Rewrite system-owned legacy rows as ordinary MCP modules.
 
-    def _web_manifest(self) -> dict[str, Any]:
-        timeout = max(1.0, float(self.config.get("web.timeout_s", 10.0) or 10.0))
-        return {
-            "transport": "stdio",
-            "command": sys.executable,
-            "args": [str(WEB_SERVER)],
-            "env_names": list(WEB_ENV_NAMES),
-            "domains": [],
-            "autoapprove": True,
-            "risk_default": RISK_LOW,
-            "tools_allow": ["web_search"],
-            "tools_deny": [],
-            "read_only": True,
-            "side_effects": False,
-            "startup": "lazy",
-            # The MCP request must outlive the HTTP request inside the server.
-            "timeout_s": timeout + 5.0,
-        }
+        The old row already carries its transport; the only extra input is the
+        retired config group from ``config.yaml``. It is serialized verbatim
+        into ``modules/mcp/<name>.json`` and passed with ``--config``, so the
+        harness stores no endpoint or credential knowledge of its own.
+        """
+        migrated: list[str] = []
+        removed = dict(getattr(self.config, "removed", {}) or {})
+        for legacy_id, default_prefix in RETIRED_MODULES.items():
+            module = self.registry.get(legacy_id)
+            if module is None or module.kind != "mcp":
+                continue
+            target_id = f"mcp:{legacy_id}"
+            if self.registry.get(target_id) is not None:
+                # Already re-registered by the user; drop the stale row.
+                self._delete_module_rows(legacy_id)
+                migrated.append(target_id)
+                continue
+            manifest = dict(module.manifest or {})
+            manifest.setdefault("tool_prefix", default_prefix)
+            # Keep the legacy variable names: they are generic transport
+            # metadata, contain no values, and let an existing environment
+            # override survive the migration (the server owns precedence).
+            manifest["env_names"] = [
+                str(name) for name in manifest.get("env_names") or []
+                if str(name).strip()
+            ]
+            config_path = ""
+            group = removed.get(legacy_id)
+            if isinstance(group, dict) and group:
+                config_path = self._write_mcp_config(legacy_id, group)
+                manifest["args"] = self._with_config_arg(
+                    [str(arg) for arg in manifest.get("args") or []],
+                    config_path,
+                )
+            updated = replace(
+                module,
+                id=target_id,
+                manifest=manifest,
+                provenance={
+                    **dict(module.provenance or {}),
+                    "migrated_from": legacy_id,
+                },
+                updated_at=util.iso(),
+            )
+            # Reparent cached discovery and bindings before replacing the row.
+            self.registry.db.execute(
+                "UPDATE module_tools SET module_id=? WHERE module_id=?",
+                (target_id, legacy_id),
+            )
+            self.registry.db.execute(
+                "UPDATE module_bindings SET module_id=? WHERE module_id=?",
+                (target_id, legacy_id),
+            )
+            self.registry.save(updated)
+            self.registry.db.execute(
+                "DELETE FROM modules WHERE id=?", (legacy_id,),
+            )
+            migrated.append(target_id)
+            self.events.record(
+                "module.migrated", data={
+                    "from": legacy_id,
+                    "to": target_id,
+                    "config_file": config_path,
+                },
+            )
+        return migrated
+
+    def _delete_module_rows(self, module_id: str) -> None:
+        self.registry.db.execute(
+            "DELETE FROM module_tools WHERE module_id=?", (module_id,),
+        )
+        self.registry.db.execute(
+            "DELETE FROM module_bindings WHERE module_id=?", (module_id,),
+        )
+        self.registry.db.execute(
+            "DELETE FROM modules WHERE id=?", (module_id,),
+        )
+
+    def _write_mcp_config(self, name: str, values: dict[str, Any]) -> str:
+        directory = self.registry.root / "mcp"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{_sanitize(name)}.json"
+        if not path.exists():
+            # Verbatim: this loader never interprets individual settings.
+            path.write_text(
+                util.dumps(values) + "\n", encoding="utf-8",
+            )
+        return str(path)
+
+    @staticmethod
+    def _with_config_arg(args: list[str], config_path: str) -> list[str]:
+        cleaned: list[str] = []
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "--config":
+                index += 2
+                continue
+            if arg.startswith("--config="):
+                index += 1
+                continue
+            cleaned.append(arg)
+            index += 1
+        return [*cleaned, "--config", config_path]
 
     @staticmethod
     def _manifest_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -376,6 +429,10 @@ class McpModuleLoader:
             manifest["risk_default"] = str(entry["risk_default"])
         if "side_effects" in entry:
             manifest["side_effects"] = bool(entry["side_effects"])
+        if "tool_prefix" in entry:
+            # Empty string is meaningful: register the server's own tool names
+            # verbatim instead of the default ``mcp_<server>_`` prefix.
+            manifest["tool_prefix"] = str(entry["tool_prefix"] or "")
         return manifest
 
     # ------------------------------------------------------------------
@@ -399,29 +456,14 @@ class McpModuleLoader:
         )
 
     def _env(self, module: Module) -> dict[str, str]:
+        """Forward only the variable names the server declared.
+
+        Values are read from the harness process environment; they are never
+        copied into editable state. Server-specific settings belong in the
+        server's own config file passed through ``args``.
+        """
         names = [str(name) for name in module.manifest.get("env_names") or []]
-        env = {name: os.environ[name] for name in names if name in os.environ}
-        if module.kind == "web":
-            # Values come from config at launch time; the manifest stores only
-            # the variable names, so secrets/config stay out of module rows.
-            env.update({
-                "HARNESS_WEB_SEARXNG_URL": str(
-                    self.config.get("web.searxng_url", "") or ""
-                ),
-                "HARNESS_WEB_MAX_RESULTS": str(
-                    self.config.get("web.max_results", 5)
-                ),
-                "HARNESS_WEB_TIMEOUT_S": str(
-                    self.config.get("web.timeout_s", 10.0)
-                ),
-                "HARNESS_WEB_CATEGORIES": str(
-                    self.config.get("web.categories", "general") or ""
-                ),
-                "HARNESS_WEB_SAFE_SEARCH": str(
-                    self.config.get("web.safe_search", 1)
-                ),
-            })
-        return env
+        return {name: os.environ[name] for name in names if name in os.environ}
 
     def _module_tools(
         self, module: Module, raw_tools: list[dict[str, Any]]
@@ -478,10 +520,13 @@ class McpModuleLoader:
         return tools
 
     def _registered_name(self, module: Module, tool_name: str) -> str:
-        if module.kind == "web":
-            return _sanitize(tool_name)
-        base = module.id.split(":", 1)[-1]
-        return f"mcp_{_sanitize(base)}_{_sanitize(tool_name)}"
+        manifest = module.manifest or {}
+        if "tool_prefix" in manifest:
+            prefix = _sanitize_prefix(str(manifest.get("tool_prefix") or ""))
+        else:
+            base = module.id.split(":", 1)[-1]
+            prefix = f"mcp_{_sanitize(base)}_"
+        return f"{prefix}{_sanitize(tool_name)}"
 
     def _register_tools(
         self, module: Module, tools: list[ModuleTool]
@@ -530,21 +575,14 @@ class McpModuleLoader:
 
         def handler(ctx, args: dict[str, Any]) -> dict[str, Any]:
             result = server.call(tool_name, args)
-            if module.kind == "web":
-                # Parse the module's structured JSON without the generic
-                # 4000-character observation clip; the tool result is clipped
-                # once by the executor. A malformed payload is a clean error.
-                text = "\n".join(
-                    str(item.get("text", ""))
-                    for item in result.get("content") or []
-                    if isinstance(item, dict) and item.get("type") == "text"
-                )
+            # A single JSON object is exposed as structured data (useful for
+            # taint provenance such as a source URL). Everything else stays
+            # plain MCP text, clipped once with the normal observation limit.
+            text = mcp_text(result, limit=None)
+            if text and len(text) <= MCP_JSON_PARSE_LIMIT:
                 parsed = util.loads(text, None)
-                if not isinstance(parsed, dict):
-                    raise ValueError(
-                        "web module returned a malformed JSON response"
-                    )
-                return parsed
+                if isinstance(parsed, dict):
+                    return parsed
             return {"content": mcp_text(result)}
 
         return handler
@@ -567,7 +605,7 @@ class McpModuleLoader:
             return report
         report["skipped"] = False
         for module in self.registry.all():
-            if module.kind not in ("mcp", "web") or module.status != "active":
+            if module.kind != "mcp" or module.status != "active":
                 continue
             report["module_ids"].append(module.id)
             report["checked"] += 1

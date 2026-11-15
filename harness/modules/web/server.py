@@ -1,17 +1,19 @@
-"""Web-search module: a dependency-free stdio MCP server over SearXNG.
+"""Web-search MCP server: a dependency-free stdio server over SearXNG.
 
 The server is standalone on purpose: it is launched as its own process and
-imports nothing from the harness. Configuration arrives through environment
-variables (the harness passes the values; the module manifest stores only the
-variable names).
+imports nothing from the harness. Configuration is this server's own file
+(JSON or TOML) passed with ``--config``; neutral ``WEB_*`` environment
+variables override it when set, and legacy ``HARNESS_WEB_*`` names still work.
+Nothing here is read from the harness configuration tree.
 
 Only ``web_search`` is provided. ``web_fetch`` is deliberately absent: fetching
 arbitrary URLs is an SSRF and prompt-injection surface and is deferred until
 it can be allowlisted and guarded.
 
-Every result is untrusted data. The harness marks the tool
-``untrusted_output=True``, so a result taints the run and any later
-side-effecting tool needs an explicit approval that names the source.
+Every result is untrusted data. Register the server with
+``untrusted_output=True`` semantics; the harness marks all MCP output that
+way, so a result taints the run and any later side-effecting tool needs an
+explicit approval that names the source.
 """
 
 from __future__ import annotations
@@ -19,14 +21,31 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 MAX_RESULTS_LIMIT = 10
 SNIPPET_CHARS = 400
 TITLE_CHARS = 200
 URL_CHARS = 500
+
+# Neutral names first; the HARNESS_* aliases keep standalone scripts written
+# before this server became self-contained working.
+ENV_URL = ("WEB_SEARXNG_URL", "HARNESS_WEB_SEARXNG_URL")
+ENV_MAX_RESULTS = ("WEB_MAX_RESULTS", "HARNESS_WEB_MAX_RESULTS")
+ENV_TIMEOUT = ("WEB_TIMEOUT_S", "HARNESS_WEB_TIMEOUT_S")
+ENV_CATEGORIES = ("WEB_CATEGORIES", "HARNESS_WEB_CATEGORIES")
+ENV_SAFE_SEARCH = ("WEB_SAFE_SEARCH", "HARNESS_WEB_SAFE_SEARCH")
+
+_FILE_CONFIG: dict[str, object] | None = None
+_CONFIG_PATH = ""
+
+
+class WebConfigError(RuntimeError):
+    """A clean, user-visible configuration failure."""
 
 
 def send(payload: dict) -> None:
@@ -34,39 +53,122 @@ def send(payload: dict) -> None:
     sys.stdout.flush()
 
 
-def _env_int(name: str, default: int) -> int:
+# ---------------------------------------------------------------------------
+# Configuration (server-owned; never harness state)
+# ---------------------------------------------------------------------------
+
+def load_config_file(path: str) -> dict[str, object]:
+    """Read a JSON or TOML search config file."""
+    file = Path(path).expanduser()
     try:
-        return int(str(os.environ.get(name, "") or default).strip())
+        text = file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        detail = getattr(exc, "strerror", None) or exc
+        raise WebConfigError(
+            f"cannot read web config file {file}: {detail}"
+        ) from exc
+    try:
+        if file.suffix.lower() in (".toml", ".tml"):
+            data = tomllib.loads(text)
+        else:
+            data = json.loads(text)
+    except (ValueError, tomllib.TOMLDecodeError) as exc:
+        raise WebConfigError(
+            f"web config file {file} is not valid JSON/TOML: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise WebConfigError(
+            f"web config file {file} must contain a JSON/TOML object"
+        )
+    return data
+
+
+def configure(path: str = "") -> None:
+    """Load this server's config file once at process start."""
+    global _FILE_CONFIG, _CONFIG_PATH
+    _CONFIG_PATH = str(path or "").strip()
+    _FILE_CONFIG = load_config_file(_CONFIG_PATH) if _CONFIG_PATH else {}
+
+
+def config_path() -> str:
+    return _CONFIG_PATH
+
+
+def _file_value(name: str) -> object | None:
+    return (_FILE_CONFIG or {}).get(name)
+
+
+def _pick(name: str, env_names: tuple[str, ...]) -> object:
+    """Environment overrides the file when set; the file supplies defaults.
+
+    Environment-first keeps container/secret overrides (``docker run -e``)
+    working without editing the mounted config file.
+    """
+    for env_name in env_names:
+        value = os.environ.get(env_name)
+        if value is not None and str(value).strip() != "":
+            return value
+    value = _file_value(name)
+    return value if value is not None else ""
+
+
+def _pick_str(name: str, env_names: tuple[str, ...], default: str = "") -> str:
+    value = _pick(name, env_names)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value if value is not None else "").strip() or default
+
+
+def _pick_int(name: str, env_names: tuple[str, ...], default: int) -> int:
+    try:
+        return int(str(_pick(name, env_names) or default).strip())
     except (TypeError, ValueError):
         return default
 
 
-def _env_float(name: str, default: float) -> float:
+def _pick_float(name: str, env_names: tuple[str, ...], default: float) -> float:
     try:
-        return float(str(os.environ.get(name, "") or default).strip())
+        return float(str(_pick(name, env_names) or default).strip())
     except (TypeError, ValueError):
         return default
 
 
 def base_url() -> str:
-    return str(os.environ.get("HARNESS_WEB_SEARXNG_URL", "") or "").strip()
+    value = _pick_str("searxng_url", ENV_URL)
+    if not value:
+        raise WebConfigError(
+            "web search is not configured (set 'searxng_url' in the web "
+            "config file passed with --config)"
+        )
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise WebConfigError(
+            "searxng_url must be an http(s) URL, e.g. http://127.0.0.1:8080"
+        )
+    return value.rstrip("/")
 
 
 def default_max_results() -> int:
-    return max(1, min(MAX_RESULTS_LIMIT, _env_int("HARNESS_WEB_MAX_RESULTS", 5)))
+    return max(
+        1,
+        min(
+            MAX_RESULTS_LIMIT,
+            _pick_int("max_results", ENV_MAX_RESULTS, 5),
+        ),
+    )
 
 
 def default_categories() -> str:
-    return str(os.environ.get("HARNESS_WEB_CATEGORIES", "general") or "").strip()
+    return _pick_str("categories", ENV_CATEGORIES, "general")
 
 
 def default_safe_search() -> int:
-    value = _env_int("HARNESS_WEB_SAFE_SEARCH", 1)
+    value = _pick_int("safe_search", ENV_SAFE_SEARCH, 1)
     return value if value in (0, 1, 2) else 1
 
 
 def timeout_s() -> float:
-    return max(0.5, _env_float("HARNESS_WEB_TIMEOUT_S", 10.0))
+    return max(0.5, _pick_float("timeout_s", ENV_TIMEOUT, 10.0))
 
 
 def _clip(value: str, limit: int) -> str:
@@ -80,9 +182,9 @@ def search(query: str, categories: str = "", max_results: int = 0) -> dict:
     if not query:
         raise ValueError("query must not be empty")
     base = base_url()
-    if not base:
-        raise RuntimeError("web search is not configured (no SearXNG URL)")
-    limit = max(1, min(MAX_RESULTS_LIMIT, int(max_results or default_max_results())))
+    limit = max(
+        1, min(MAX_RESULTS_LIMIT, int(max_results or default_max_results()))
+    )
     params = {
         "q": query,
         "format": "json",
@@ -94,7 +196,7 @@ def search(query: str, categories: str = "", max_results: int = 0) -> dict:
     url = base.rstrip("/") + "/search?" + urllib.parse.urlencode(params)
     request = urllib.request.Request(
         url, headers={"Accept": "application/json",
-                      "User-Agent": "personal-harness/1.0"}
+                      "User-Agent": "mcp-web-search/1.0"}
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_s()) as response:
@@ -202,7 +304,35 @@ def handle_call(name: str, arguments: dict) -> dict:
     }
 
 
+def _config_arg(argv: list[str]) -> str:
+    for index, arg in enumerate(argv):
+        if arg == "--config" and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith("--config="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
 def main() -> None:
+    try:
+        configure(_config_arg(sys.argv[1:]))
+    except WebConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+    if "--probe" in sys.argv:
+        try:
+            payload = search("probe", max_results=1)
+            print(json.dumps({
+                "config": config_path() or "environment",
+                "endpoint": base_url(),
+                "count": payload["count"],
+            }, indent=2))
+        except Exception as exc:
+            print(f"probe failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        return
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -219,7 +349,7 @@ def main() -> None:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "harness-web", "version": "1.0"},
+                    "serverInfo": {"name": "web-search", "version": "1.0"},
                 },
             })
         elif method == "notifications/initialized":

@@ -19,6 +19,8 @@
 #   risk_default  low|confirm (default: modules.default_mcp_risk)
 #   tools_allow   only expose these discovered tool names
 #   tools_deny    never expose these discovered tool names
+#   tool_prefix   prefix for registered tool names. Omit for the default
+#                 mcp_<server>_<tool>; set "" to keep the server's own names.
 #   read_only     true -> output cannot change the world; stays low-risk in a
 #                 tainted run. Default false: unknown provenance is
 #                 side-effecting.
@@ -43,6 +45,39 @@ servers:
     tools_allow:
       - echo
       - add
+
+  # Web search (SearXNG). The server owns its own config file; the harness
+  # only knows the command line. Copy harness/modules/web/web.example.json to
+  # the data directory and adjust it. tool_prefix: "" keeps web_search stable.
+  # - name: web
+  #   command: python
+  #   args:
+  #     - harness/modules/web/server.py
+  #     - --config
+  #     - /data/modules/mcp/web.json
+  #   tool_prefix: ""
+  #   tools_allow: [web_search]
+  #   risk_default: low
+  #   autoapprove: true
+  #   read_only: true
+  #   side_effects: false
+  #   startup: lazy
+  #   timeout_s: 60
+
+  # Calendar (CalDAV/Baikal). See harness/modules/calendar/README.md. Writes
+  # are confirm-risk; set read_only: true in the calendar config and here for
+  # a read-only surface.
+  # - name: calendar
+  #   command: python
+  #   args:
+  #     - harness/modules/calendar/server.py
+  #     - --config
+  #     - /data/modules/mcp/calendar.json
+  #   tool_prefix: ""
+  #   risk_default: confirm
+  #   side_effects: true
+  #   startup: lazy
+  #   timeout_s: 60
 
   # Domain-bound example: only eligible for tasks in dom_example. Enable the
   # binding with `python -m harness modules --enable mcp:example_domain`.

@@ -336,7 +336,7 @@ class ToolRegistry:
         total = sum(entry["tokens"] for entry in kept)
         if budget > 0:
             # Drop in reverse priority: the rest, global modules, domain-bound
-            # modules, web, trusted low-risk modules, then builtins. Within one
+            # modules, trusted low-risk modules, then builtins. Within one
             # priority the most recently registered tool is dropped first,
             # which keeps the long-standing core tools stable.
             order = sorted(
@@ -383,10 +383,8 @@ class ToolRegistry:
         """Lower is kept longer when the schema budget is tight."""
         if spec.module == "builtin":
             return 0
-        if spec.module != "web" and not spec.side_effects and spec.risk == RISK_LOW:
+        if not spec.side_effects and spec.risk == RISK_LOW:
             return 1
-        if spec.module == "web" or spec.module.startswith("web:"):
-            return 2
         if spec.scope == "domain":
             return 3
         if spec.scope == "global":
@@ -1302,12 +1300,13 @@ class McpServer:
             process.kill()
 
 
-def mcp_text(result: dict[str, Any]) -> str:
+def mcp_text(result: dict[str, Any], limit: int | None = 4000) -> str:
     parts = []
     for item in result.get("content") or []:
         if isinstance(item, dict) and item.get("type") == "text":
             parts.append(str(item.get("text", "")))
-    return "\n".join(parts)[:4000]
+    text = "\n".join(parts)
+    return text if limit is None else text[:limit]
 
 
 # MCP module loading lives in ``harness/modules/mcp.py``: it is registry-backed

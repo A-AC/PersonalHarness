@@ -1,9 +1,16 @@
 # Personal Harness - Long-Term Plan
 
 Status: in progress (Phase 5 complete)
-Last updated: 2026-11-13
-Scope: capability modules (skills + MCP + web), memory lifetime, autonomy,
+Last updated: 2026-11-15
+Scope: capability modules (skills + MCP servers), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture.
+
+Revision 2026-11-15: every add-on capability is a generic MCP module. The
+separate `web` module kind, the `web.*` config group, and the harness-side
+web endpoint knowledge are retired; the web and calendar servers are
+self-contained MCP servers registered through the MCP manifest. Phase 1 below
+records the original design and is superseded where it names a web module or
+`web.*` configuration.
 
 This document is the working plan. Each phase is one merge/commit unless a
 phase is explicitly split. Keeping the deterministic test suite green is a
@@ -16,8 +23,10 @@ precondition for every phase, not a follow-up task.
 1. **Capabilities become modules.** Skills and MCP servers are first-class,
    domain-bound, dynamically loadable units with manifests, provenance,
    versions, health, and an on/off switch.
-2. **The agent can reach the web** through the local SearXNG instance at
-   `192.168.50.40:8080`, with results treated as untrusted data.
+2. **The agent can reach the web** through an MCP server the user registers
+   (a SearXNG-based example ships in `harness/modules/web/`), with results
+   treated as untrusted data. Endpoints and credentials live in that server's
+   own config file, never in the harness config.
 3. **The agent can be woken by the outside world** through a durable inbox
    API and declarative automations, without becoming an uncontrolled loop.
 4. **The agent can build its own procedures** as draft skills that the user
@@ -91,14 +100,15 @@ New features attach to existing seams; they do not add a second loop.
 
 ### 4.1 Capability modules
 
-One record shape for every capability. Skills, MCP servers, and the web
-module are the same kind of thing to the runtime; they differ only in how
-they contribute capability.
+One record shape for every capability. Skills and MCP servers are the same
+kind of thing to the runtime; they differ only in how they contribute
+capability. A server's endpoints, credentials, and options belong to that
+server, not to the harness.
 
 ```sql
 CREATE TABLE modules (
   id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK(kind IN ('skill','mcp','web')),
+  kind TEXT NOT NULL CHECK(kind IN ('skill','mcp')),
   name TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL CHECK(status IN ('draft','active','disabled','error')),
@@ -241,7 +251,7 @@ miss and silently loses capabilities on a restore.
 | Phase | Theme | Depends on | Commit |
 | --- | --- | --- | --- |
 | 0 | Foundations and seams | - | one |
-| 1 | MCP modules, web module, trust flags | 0 | one |
+| 1 | MCP modules, first MCP server, trust flags | 0 | one |
 | 2 | Skill modules and self-building | 1 | one |
 | 3 | Memory lifetime and archive | 0 | one |
 | 4 | Sequential sub-agents | 1, 3 | one |
@@ -257,7 +267,7 @@ Ordering rationale:
 
 - Modules before everything: every later feature consumes the registry.
 - MCP before skills: it forces the hard parts (dynamic discovery, health,
-  per-domain visibility, schema budget) and the web module.
+  per-domain visibility, schema budget) and the first MCP server.
 - Trust flags in Phase 1: external content exists from then on.
 - Memory lifetime is independent and low-risk.
 - Sub-agents before inbox: stabilise decomposition before external systems
@@ -319,12 +329,14 @@ modules:
 
 ---
 
-### Phase 1 - MCP modules, dynamic loading, web module, trust flags
+### Phase 1 - MCP modules, dynamic loading, first MCP server, trust flags
 
-**Status:** complete (2026-11-09).
+**Status:** complete (2026-11-09); revised 2026-11-15 to remove the
+web-specific module kind and config group.
 
 **Goal:** MCP servers become domain-scoped modules that reload without a
-process restart, and the agent gets web search through SearXNG.
+process restart, and the agent gets web search through a self-contained
+SearXNG-backed MCP server.
 
 **Scope**
 
@@ -350,11 +362,14 @@ process restart, and the agent gets web search through SearXNG.
 - Taint enforcement in `_handle_tool_call`: escalation rule and approval
   provenance line. Persist `runs.meta.tainted_sources`.
 - Enforce run-snapshot visibility in `resolve()` and `execute()`.
-- Ship the web module: `modules/web/` stdio MCP server.
+- Ship the first MCP server: `harness/modules/web/` (self-contained; its own
+  `--config` file and neutral `WEB_*` env fallbacks). It registers like any
+  other MCP module, with `tool_prefix: ""` so its tool stays `web_search`.
   - `web_search(query, categories?, max_results?)` -> bounded
     `{title, url, snippet}`.
-  - Uses SearXNG's JSON API. Verified 2026-10-28:
-    `http://192.168.50.40:8080/search?q=test&format=json` returns 200 JSON.
+  - Uses SearXNG's JSON API. The first deployment verified 2026-10-28 that
+    the local instance's `/search?q=...&format=json` returns JSON; the
+    endpoint itself is server config, not harness config.
   - Results marked `untrusted_output=True`, each with its URL as provenance.
   - `web_fetch` is deferred (SSRF + injection surface; see section 9).
 - Do **not** add dynamic Python imports.
@@ -365,14 +380,14 @@ process restart, and the agent gets web search through SearXNG.
 modules:
   default_mcp_risk: confirm
   lazy_start: true
-web:
-  enabled: true
-  searxng_url: http://192.168.50.40:8080
-  max_results: 5
-  timeout_s: 10.0
-  categories: general
-  safe_search: 1
+tools:
+  mcp_servers_file: examples/mcp_servers.yaml
 ```
+
+The manifest file registers servers; runtime options live in each server's
+own config file (for the bundled web server: `WEB_SEARXNG_URL`,
+`WEB_MAX_RESULTS`, `WEB_TIMEOUT_S`, `WEB_CATEGORIES`, `WEB_SAFE_SEARCH`, or
+`--config`). No `web.*` group exists in the harness config.
 
 **Schema:** reuse v3 tables; `module_tools.side_effects/read_only` populated.
 
@@ -384,7 +399,7 @@ web:
 - Reload changes the registered toolset without restarting the app.
 - Unavailable module recorded and never blocks a turn.
 - Schema budget excludes a low-priority module and records why.
-- Web module against a local stub HTTP server; bounded output; untrusted
+- Web MCP server against a local stub HTTP server; bounded output; untrusted
   flag; malformed JSON is a clean error.
 - Taint: a low-risk side-effecting MCP tool becomes confirm after a web
   result, and the approval names the source.
@@ -808,7 +823,7 @@ guard.scanned / guard.verdict / guard.unavailable
 ### 7.3 Tests and fakes
 
 - Fake MCP stdio server in `tests/` for discovery, reload, failure.
-- Local HTTP stub for SearXNG; the web module must not require the LAN.
+- Local HTTP stub for SearXNG; the web MCP server must not require the LAN.
 - Fake guard classifier through `ScriptedModel` or a stub endpoint.
 - Inbox tests use the HTTP API and the heartbeat, never wall-clock sleeps.
 - Keep the ten acceptance scenarios passing; add one scenario per new
@@ -847,7 +862,7 @@ UI) and update this plan. Do not mix phases.
 | Inbox content drives outbound send | Data exfiltration | Untrusted taint, side-effect confirm, no autoapprove for untrusted runs | 1, 5 |
 | Guard model slow or down | Blocked work | Disabled by default; timeouts; cache; fail-closed only for side effects | 7 |
 | Backup omits modules | Capabilities lost on restore | Include `data/modules/`; round-trip test | 0 |
-| Port 8080 collision with SearXNG | Web module unreachable or harness unreachable | Document `HARNESS_PORT`; explicit `web.searxng_url` | 1 |
+| Port 8080 collision with SearXNG | Web search unreachable or harness unreachable | Document `HARNESS_PORT`; configure the web server's own URL | 1 |
 | UI rewrite churn | Lost time | Static split in Phase 0; panels incremental; no framework | 0, 6 |
 
 ---

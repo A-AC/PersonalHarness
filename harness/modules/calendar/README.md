@@ -1,4 +1,4 @@
-# Calendar module (CalDAV/Baikal)
+# Calendar MCP server (CalDAV/Baikal)
 
 A standalone stdio MCP server over CalDAV. It imports nothing from the
 harness and needs no harness code changes: register it like any other MCP
@@ -20,10 +20,12 @@ single-instance recurrence edits.
 | `calendar_update_event` | Change summary/description/location/times, ETag-guarded |
 | `calendar_delete_event` | Delete by UID, ETag-guarded |
 
-The harness prefixes generic MCP tool names with the module name, so a server
-entry named `calendar` exposes `mcp_calendar_calendar_list_events`,
-`mcp_calendar_calendar_create_event`, and so on. `calendar`'s
-`tools_allow`/`tools_deny` entries use the unprefixed names above.
+The harness prefixes generic MCP tool names with the module name by default,
+so a server entry named `calendar` exposes
+`mcp_calendar_calendar_list_events`, `mcp_calendar_calendar_create_event`,
+and so on. Set `tool_prefix: ""` in the entry to register the server's own
+names (`calendar_list_events`, ...). `tools_allow`/`tools_deny` entries always
+use the unprefixed names above.
 
 ## Configuration
 
@@ -33,7 +35,7 @@ environment variables, module rows, `config.yaml`, or SQLite. Copy
 
 ```json
 {
-  "url": "http://192.168.50.40:8383/dav.php",
+  "url": "http://127.0.0.1:8383/dav.php",
   "username": "your-baikal-user",
   "password": "replace-me",
   "calendar": "personal",
@@ -58,10 +60,11 @@ environment variables, module rows, `config.yaml`, or SQLite. Copy
 | `timeout_s` | HTTP timeout per request (default 10) |
 | `read_only` | `true` hides and refuses the write tools |
 
-File values win. `HARNESS_CALENDAR_*` variables of the same meaning
+File values win. Neutral `CALENDAR_*` variables of the same meaning
 (`URL`, `DAV_URL`, `USER`, `PASSWORD`, `NAME`, `ORGANIZER`, `TIMEOUT_S`,
 `MAX_RESULTS`, `MAX_RANGE_DAYS`, `READ_ONLY`, `TZ`) exist only as a fallback
-for standalone/scripted runs when no file is supplied. Keep the file private:
+for standalone/scripted runs when no file is supplied; legacy
+`HARNESS_CALENDAR_*` names are still accepted. Keep the file private:
 it contains a clear-text password (`chmod 600`, owned by the process user).
 
 Check credentials and discovery without starting the JSON-RPC loop:

@@ -9,7 +9,29 @@ covered by the CLI/server tests; it remains a compatibility aggregate.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from harness import util
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _install_echo(app, tmp_path: Path, name: str = "panel_echo") -> str:
+    import yaml
+
+    config_path = tmp_path / "mcp.yaml"
+    config_path.write_text(yaml.safe_dump({"servers": [{
+        "name": name,
+        "command": sys.executable,
+        "args": [str(REPO / "examples" / "mcp" / "echo_server.py")],
+        "autoapprove": True,
+        "read_only": True,
+        "tools_allow": ["echo"],
+    }]}), encoding="utf-8")
+    app.config.set("tools.mcp_servers_file", str(config_path))
+    app.modules.reload()
+    return f"mcp:{name}"
 
 
 def _manual_run(app, task, status="running"):
@@ -249,8 +271,9 @@ def test_consolidation_panel_contract(make_app, client):
 # -- System -----------------------------------------------------------------
 
 
-def test_modules_panel_contract_and_bindings(make_app, client):
+def test_modules_panel_contract_and_bindings(make_app, client, tmp_path):
     app = make_app.build(default="ok")
+    module_id = _install_echo(app, tmp_path)
     domain = app.domains.create(
         util.new_id("dom"), name="Panel", description="bind target",
         created_by="test",
@@ -262,36 +285,40 @@ def test_modules_panel_contract_and_bindings(make_app, client):
     assert set(payload["schema_budget"]) == {
         "tokens", "budget_tokens", "tool_count", "names", "exclusions",
     }
-    web = next(m for m in payload["modules"] if m["id"] == "web")
-    assert web["bound_domains"] == []
-    assert web["tools"][0]["name"] == "web_search"
-    assert "provenance" in web
+    module = next(item for item in payload["modules"]
+                  if item["id"] == module_id)
+    assert module["bound_domains"] == []
+    assert {tool["name"] for tool in module["tools"]} == {"echo"}
+    assert "provenance" in module
 
-    bound = http.post("/api/modules/web/bindings", json={
+    bound = http.post(f"/api/modules/{module_id}/bindings", json={
         "domain_id": domain["id"], "enabled": True,
     })
     assert bound.status_code == 200
     assert bound.json()["module"]["bound_domains"] == [domain["id"]]
     fresh = http.get("/api/modules").json()
-    web = next(m for m in fresh["modules"] if m["id"] == "web")
-    assert web["bound_domains"] == [domain["id"]]
-    assert web["bindings"][0]["enabled"] is True
+    module = next(item for item in fresh["modules"]
+                  if item["id"] == module_id)
+    assert module["bound_domains"] == [domain["id"]]
+    assert module["bindings"][0]["enabled"] is True
 
-    unbound = http.post("/api/modules/web/bindings", json={
+    unbound = http.post(f"/api/modules/{module_id}/bindings", json={
         "domain_id": domain["id"], "enabled": False,
     })
     assert unbound.json()["module"]["bound_domains"] == []
 
 
-def test_tools_panel_contract(make_app, client):
+def test_tools_panel_contract(make_app, client, tmp_path):
     app = make_app.build(default="ok")
+    module_id = _install_echo(app, tmp_path)
     http = client(app)
     payload = http.get("/api/tools").json()
     names = {tool["name"] for tool in payload["tools"]}
-    assert {"web_search", "search_knowledge"} <= names
+    assert {"mcp_panel_echo_echo", "search_knowledge"} <= names
     assert isinstance(payload["mcp_status"], dict)
-    tool = next(t for t in payload["tools"] if t["name"] == "web_search")
-    assert tool["module"] == "web"
+    tool = next(t for t in payload["tools"]
+                if t["name"] == "mcp_panel_echo_echo")
+    assert tool["module"] == module_id
     assert {"risk", "side_effects", "read_only", "untrusted_output"} <= set(
         tool
     )
@@ -307,8 +334,9 @@ def test_events_panel_contract(make_app, client):
     assert {"type", "level", "ts", "data"} <= set(events[0])
 
 
-def test_system_panel_contract(make_app, client):
+def test_system_panel_contract(make_app, client, tmp_path):
     app = make_app.build(default="ok")
+    module_id = _install_echo(app, tmp_path)
     http = client(app)
     payload = http.get("/api/system").json()
     assert set(payload["counts"]) == {
@@ -317,7 +345,7 @@ def test_system_panel_contract(make_app, client):
     }
     assert payload["working_task"] is None
     assert set(payload["scheduler"]) == {"last_tick", "last_report", "enabled"}
-    assert any(m["id"] == "web" for m in payload["modules"])
+    assert any(m["id"] == module_id for m in payload["modules"])
     assert set(payload["model"]) == {"base_url", "name"}
     assert payload["system_timezone"] == util.system_tz_name()
 

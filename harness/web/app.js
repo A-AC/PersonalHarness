@@ -1656,7 +1656,7 @@ function renderModules(side) {
     ['schema tokens', budget.tokens || 0],
   ]));
   head.appendChild(el('div', 'small',
-    'One record shape for skills, MCP servers, and the web module. A draft, ' +
+    'One record shape for skills and MCP servers. A draft, ' +
     'disabled, or error module is never disclosed and never callable. ' +
     'Reload changes the toolset without restarting the process.'));
   const btns = el('div', 'btns');
@@ -1994,7 +1994,7 @@ function renderPersona(side) {
 /* --------------------------------------------------------------- settings */
 
 const SETTING_GROUPS = ['limits', 'context', 'domains', 'memory', 'tools',
-                        'modules', 'skills', 'subagents', 'web', 'scheduler',
+                        'modules', 'skills', 'subagents', 'scheduler',
                         'consolidation', 'approvals', 'inbox', 'automations'];
 
 function renderSettings(side) {

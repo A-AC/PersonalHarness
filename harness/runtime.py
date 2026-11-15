@@ -281,8 +281,12 @@ class AgentRuntime:
         sources = self._run_meta(run_id).get("tainted_sources")
         return sources if isinstance(sources, list) else []
 
-    def _taint_origin(self, result: Any) -> str:
-        """Name the external origin an approval prompt must identify."""
+    def _taint_origin(self, result: Any, tool: str = "") -> str:
+        """Name the external origin an approval prompt must identify.
+
+        Only generic keys are inspected: a server is free to return a URL or a
+        list of source URLs; anything else falls back to its own text.
+        """
         if isinstance(result, dict):
             sources = result.get("sources")
             if isinstance(sources, list):
@@ -293,7 +297,7 @@ class AgentRuntime:
                 if result.get(key):
                     return util.clip(str(result[key]), 300)
             if result.get("query"):
-                return f"web results for '{result['query']}'"
+                return f"{tool or 'tool'} results for '{result['query']}'"
             content = result.get("content")
             if isinstance(content, str) and content.strip():
                 return util.clip(content.strip(), 300)
@@ -794,7 +798,7 @@ class AgentRuntime:
             if spec is not None and spec.untrusted_output:
                 self._mark_tainted(
                     run["id"], call.name, spec.module,
-                    self._taint_origin(outcome.get("result")),
+                    self._taint_origin(outcome.get("result"), call.name),
                 )
         self.approvals.mark_executed(approval["id"])
         self._append_tool_result(
@@ -1471,7 +1475,7 @@ class AgentRuntime:
         if outcome.get("status") == "succeeded" and spec.untrusted_output:
             self._mark_tainted(
                 run_id, call.name, spec.module,
-                self._taint_origin(outcome.get("result")),
+                self._taint_origin(outcome.get("result"), call.name),
             )
         return outcome
 

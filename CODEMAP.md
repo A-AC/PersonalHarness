@@ -11,8 +11,8 @@ tests under the `live` marker.
 | Path | Responsibility |
 | --- | --- |
 | `harness/util.py` | UTC timestamps, ids, JSON helpers, keyword extraction, clipping |
-| `harness/config.py` | Defaults, YAML load/validate, env overrides, save; unknown keys fail fast |
-| `harness/db.py` | SQLite schema (WAL), FTS5 external-content tables + triggers, transactions, schema version (v6 inbox/automations), online backup |
+| `harness/config.py` | Defaults, YAML load/validate, env overrides, save; unknown keys fail fast; retired groups are accepted for one-time module migration |
+| `harness/db.py` | SQLite schema (WAL), FTS5 external-content tables + triggers, transactions, schema version (v7 mcp-only module kinds), online backup |
 | `harness/logging.py` | Structured stdout + rotating file logs |
 | `harness/model.py` | `ModelClient` (OpenAI-compatible chat completions, native tool calls, Hermes fallback parsing, bounded retries, probe); `ScriptedModel` for tests |
 | `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + deterministic routing), `Tasks` (statuses, resume-candidate scoring, parent/child tree relationships) |
@@ -27,9 +27,10 @@ tests under the `live` marker.
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract; applied via `MemoryManager` with revisions; markdown change log per run |
 | `harness/modules/types.py` | `Module`, `ModuleBinding`, `ModuleTool` value objects over the v3 tables |
 | `harness/modules/registry.py` | Module persistence, domain eligibility, lazy skill manager, and the loader seam (`load_all`, `reload`, `set_enabled`, `health_tick`); skill imports and reloads route here |
-| `harness/modules/mcp.py` | Registry-backed MCP/web loader: legacy import, manifests, discovery cache, per-domain visibility, reload, health, trusted/untrusted flags |
+| `harness/modules/mcp.py` | Generic registry-backed MCP loader: import, manifests, discovery cache, per-domain visibility, reload, health, trusted/untrusted flags, retired-row migration, tool-name prefixing |
 | `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions, agent-owned edit guard) and `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
-| `harness/modules/web/server.py` | Shipped web-search stdio MCP server over SearXNG JSON; bounded results, no `web_fetch` |
+| `harness/modules/web/server.py` | Self-contained stdio MCP server over SearXNG JSON with its own `--config`; bounded results, no `web_fetch` |
+| `harness/modules/calendar/server.py` | Self-contained stdio MCP server over CalDAV with its own `--config`; ETag-guarded VEVENT read/write tools |
 | `harness/app.py` | `App` composition root, startup recovery, `ProcessLock` (single writer), backup/restore, graceful shutdown; `build_app` test helper |
 | `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; per-panel endpoints (`/api/summary`, `/api/messages`, `/api/tasks` with optional `include_subagents=1`, `/api/approvals`, `/api/schedules`, `/api/inbox`, `/api/automations`, `/api/memories`, `/api/domains`, `/api/skills`, `/api/consolidations`, `/api/modules`, `/api/tools`, `/api/events`, `/api/system`, `/api/config`, `/api/backups`), memory edit/retract and skill draft/delete and module-binding mutations, task detail with each run's full persisted model transcript/context sources and the child tree (children hidden from the default task list), `/api/state` as a compatibility aggregate for the CLI; authenticated static UI assets |
 | `harness/web/` | Zero-build UI: `index.html` (grouped Conversation/Work/Knowledge/System navigation, working-task strip, task drawer), `app.js` (per-panel loading; polls `/api/summary` plus only the active panel and the chat feed; inline memory/skill/domain editors; recursive sub-agent detail), `style.css` (served only through the authenticated handler) |
@@ -114,7 +115,7 @@ heartbeat -> inbox.triage(new events, oldest first)
 | `artifacts/subagents/<task_id>.md` | Completed child result, goal, parent-supplied brief, and run reference |
 | `artifacts/domains/…` | Reserved for future domain notes |
 | `modules/skills/<id>/v<n>.md` | Versioned skill bodies owned by `kind=skill` module rows; directory imports are one source, rows are authoritative |
-| `modules/mcp/<id>.yaml` | Reserved export/backup mirror for MCP manifests (rows remain authoritative; not written yet) |
+| `modules/mcp/<id>.json` | Server-owned config files (e.g. the migrated web config); MCP rows remain authoritative |
 | `backups/harness-<ts>.zip` | DB snapshot + config + artifacts |
 | `logs/harness.log` | Rotating structured log |
 | `process.lock` | Writer lock held by `serve` (pid + heartbeat timestamp) |
@@ -150,9 +151,11 @@ heartbeat -> inbox.triage(new events, oldest first)
 | `tests/test_time.py` | System-time default, local rendering, naive `at_ts` semantics, explicit-zone override, timezone validation, UI local timestamps |
 | `tests/test_approvals.py` | Exact action binding, quick confirm (keyword/model/ambiguous), rejection/cancellation/expiry/staleness, untrusted-output immunity, no shell tools, risk override validation |
 | `tests/test_recovery.py` | Restart preservation, interrupted-run resume without repeats, unknown outcomes, graceful shutdown, backup/restore round trip, writer lock, concurrent web+CLI with one scheduler |
-| `tests/test_modules_foundations.py` | UI shell/assets, registry loader, v3 schema migration, backup/restore of `modules/`, module API/toggle/reload, heartbeat health, tool-schema budget and run snapshots |
+| `tests/test_modules_foundations.py` | UI shell/assets, registry loader, v3→v7 schema migration, backup/restore of `modules/`, module API/toggle/reload, heartbeat health, tool-schema budget and run snapshots, retired web-row migration |
 | `tests/test_skills.py` | Front-matter import, global/domain/adaptive disclosure, proposal/edit approval lifecycle, in-approval refinement, agent ownership refusal, cross-run denial, bounded validation, dedupe, taint refusal, builder batching/limits/failure, skills API |
-| `tests/test_tools_mcp.py` | Registry-backed MCP discovery/risk/round trip/bounded results/unavailable servers, domain scope and refusal, reload, schema budget priority, web search stub (bounded/untrusted/malformed), taint escalation with source provenance, skill disclosure |
+| `tests/test_tools_mcp.py` | Generic MCP discovery/risk/round trip/bounded results/unavailable servers, domain scope and refusal, reload, schema budget priority, self-contained web search (bounded/untrusted/malformed), taint escalation with source provenance, skill disclosure |
+| `tests/test_calendar_mcp.py` | Calendar server config file precedence, read-only tool surface, iCalendar parse/serialize edge cases, CalDAV discovery/CRUD round trip, ETag conflicts, out-of-collection refusal |
+| `tests/test_web_mcp.py` | Web server config file/env precedence (neutral and legacy names), JSON/TOML loading, clean config errors, bounded/untrusted tool surface |
 | `tests/test_subagents.py` | Parent delegation/result return, child context isolation, reduced toolset/depth/confirm refusal, blocked limits, goal-hash reuse, child budgets/caps, crash-mid-child unknown recovery, v5 migration, task-detail child tree |
 | `tests/test_inbox.py` | Inbox idempotency/API bounds, dedupe, automation task/cooldown, hourly breaker, tainted run approval, quiet hours, self-scheduling caps/depth, inbox-before-schedule ordering, v6 migration |
 | `tests/test_ui_panels.py` | Phase 6 panel contracts: summary/messages/tasks (full model transcript + context sources)/approvals/schedules/inbox/automations/memory/domains/skills/consolidation/modules/tools/events/system/config/backups, memory edit/retract, skill draft/delete, module bindings, guard placeholder |

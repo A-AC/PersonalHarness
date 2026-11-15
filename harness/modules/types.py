@@ -1,4 +1,4 @@
-"""Capability module records: one shape for skills, MCP servers, and web.
+"""Capability module records: one shape for skills and MCP servers.
 
 These are value objects over the ``modules``, ``module_bindings``, and
 ``module_tools`` tables. The registry (see ``registry.py``) owns persistence
@@ -12,7 +12,7 @@ from typing import Any
 
 from .. import util
 
-KINDS = ("skill", "mcp", "web")
+KINDS = ("skill", "mcp")
 STATUSES = ("draft", "active", "disabled", "error")
 SCOPES = ("global", "domain", "adaptive")
 ORIGINS = ("user", "agent", "system", "import")

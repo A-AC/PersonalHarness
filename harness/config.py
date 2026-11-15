@@ -105,8 +105,8 @@ DEFAULTS: dict[str, Any] = {
         "disallowed_prefixes": [],     # extra name prefixes banned outright
     },
     "modules": {
-        # Capability records (skills, MCP, web) share one registry. MCP and
-        # web register tools; skills contribute disclosure text only.
+        # Capability records (skills and MCP servers) share one registry. MCP
+        # servers register tools; skills contribute disclosure text only.
         "enabled": True,
         "dir": "modules",              # relative to the data dir
         "health_interval_s": 300.0,
@@ -138,16 +138,6 @@ DEFAULTS: dict[str, Any] = {
         "max_seconds": 180.0,
         "max_result_chars": 4000,
         "allow_confirm_risk": False,
-    },
-    "web": {
-        # The shipped web module is a stdio MCP server using SearXNG's JSON
-        # API. Results are untrusted data and taint the run.
-        "enabled": True,
-        "searxng_url": "http://192.168.50.40:8080",
-        "max_results": 5,
-        "timeout_s": 10.0,
-        "categories": "general",
-        "safe_search": 1,
     },
     "inbox": {
         # External systems POST to /api/inbox; the API is the durable
@@ -231,17 +221,20 @@ ENV_OVERRIDES = {
     "HARNESS_MODEL_NAME": ("model", "name"),
     "HARNESS_MODEL_API_KEY": ("model", "api_key"),
     "HARNESS_TIMEZONE": ("timezone",),
-    "HARNESS_WEB_ENABLED": ("web", "enabled", lambda value: str(value).lower()
-                            in ("1", "true", "yes", "on")),
-    "HARNESS_WEB_SEARXNG_URL": ("web", "searxng_url"),
 }
 
 # Keys a user may edit through the UI/CLI without a restart hazard.
 EDITABLE_KEYS = {
     "persona", "limits", "context", "domains", "memory", "tools",
-    "modules", "skills", "subagents", "web", "scheduler", "consolidation",
+    "modules", "skills", "subagents", "scheduler", "consolidation",
     "approvals", "inbox", "automations", "timezone",
 }
+
+# Configuration groups that belonged to retired built-in modules. They are
+# accepted-but-ignored on load so an upgrade never fails fast, then handed to
+# the module loader for a one-time migration into that server's own config
+# file. New installs never materialize these groups.
+RETIRED_GROUPS = frozenset({"web"})
 
 
 class ConfigError(RuntimeError):
@@ -361,9 +354,15 @@ def _apply_env(cfg: dict, environ: dict[str, str] | None) -> None:
 class Config:
     """Resolved configuration tree with dotted-path access."""
 
-    def __init__(self, data: dict[str, Any], path: Path | None):
+    def __init__(
+        self, data: dict[str, Any], path: Path | None,
+        removed: dict[str, Any] | None = None,
+    ):
         self._data = data
         self.path = path
+        # Retired groups found in the file; the module loader uses these for a
+        # one-time migration. They are never part of the live configuration.
+        self.removed = copy.deepcopy(removed or {})
 
     def get(self, dotted: str, default: Any = None) -> Any:
         node: Any = self._data
@@ -401,6 +400,7 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
     file = data_dir / "config.yaml"
     legacy = data_dir / "settings.yaml"
     overlay: dict[str, Any] = {}
+    removed: dict[str, Any] = {}
     migrated = False
     timezone_migrated = False
     if file.exists():
@@ -411,6 +411,9 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
         if not isinstance(loaded, dict):
             raise ConfigError(f"{file} must contain a mapping")
         overlay = loaded
+        for key in RETIRED_GROUPS:
+            if key in overlay:
+                removed[key] = overlay.pop(key)
         if overlay.get("timezone") == LEGACY_DEFAULT_TIMEZONE:
             overlay["timezone"] = "system"
             timezone_migrated = True
@@ -419,7 +422,7 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
         migrated = True
     merged = _merge(DEFAULTS, overlay)
     _apply_env(merged, environ)
-    config = Config(merged, file)
+    config = Config(merged, file, removed)
     if not file.exists():
         data_dir.mkdir(parents=True, exist_ok=True)
         file.write_text(
@@ -434,8 +437,12 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
     elif timezone_migrated:
         # Persist the system-time migration so the file reflects reality.
         # Only the file's own values are written back; env stays runtime-only.
+        # Retired groups stay on disk until the module loader completes its
+        # one-time migration.
         try:
-            save_config(Config(copy.deepcopy(overlay), file))
+            kept = copy.deepcopy(overlay)
+            kept.update(removed)
+            save_config(Config(kept, file))
         except OSError:
             pass
     return config

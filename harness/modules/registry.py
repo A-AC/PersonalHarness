@@ -1,9 +1,9 @@
 """Module registry: persistence, eligibility, and the loader seam.
 
-``load_all`` imports the legacy MCP servers file, creates the shipped web
-module, discovers/caches tools, registers callable specs, and imports
-``SKILL.md`` skills into ``kind=skill`` rows. Skills contribute disclosure
-text only; they never register tools.
+``load_all`` imports configured MCP servers, migrates retired built-in rows,
+discovers/caches tools, registers callable specs, and imports ``SKILL.md``
+skills into ``kind=skill`` rows. Skills contribute disclosure text only; they
+never register tools.
 
 The registry is also the single place that answers "which modules are active
 for this domain?", so the runtime never re-implements binding rules.

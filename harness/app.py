@@ -143,9 +143,9 @@ class App:
         self.modules = ModuleRegistry(
             self.db, self.events, self.config, data_dir, tools=self.tools
         )
-        # Phase 1: the registry is authoritative for MCP and web modules. It
-        # imports the legacy servers file once, creates the shipped web
-        # module, discovers/caches tools, and registers callable specs.
+        # The registry is authoritative for MCP modules: it imports the
+        # servers file once, discovers/caches tools, and registers callable
+        # specs. No server-specific behavior lives here.
         self.modules.load_all()
         self.approvals = Approvals(self.db, self.events, self.config, self.model)
         self.context = ContextBuilder(

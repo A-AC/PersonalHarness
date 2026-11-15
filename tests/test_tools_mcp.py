@@ -33,7 +33,7 @@ def _configure_mcp(
     tools_deny: list[str] | None = None,
     name: str = "test_echo",
 ) -> Path:
-    """Write a legacy import file, then reload the registry."""
+    """Write an import file, then reload the registry."""
     import yaml
 
     entry: dict = {
@@ -56,6 +56,47 @@ def _configure_mcp(
     app.config.set("tools.mcp_servers_file", str(config_path))
     app.modules.reload()
     return config_path
+
+
+def _configure_web(app, tmp_path: Path, url: str) -> None:
+    """Register the self-contained web server through a generic MCP entry."""
+    import yaml
+
+    config_path = tmp_path / "web.json"
+    config_path.write_text(json.dumps({
+        "searxng_url": url,
+        "max_results": 5,
+        "timeout_s": 5,
+        "categories": "general",
+        "safe_search": 1,
+    }), encoding="utf-8")
+    entry = {
+        "name": "web",
+        "command": sys.executable,
+        "args": [
+            str(REPO / "harness" / "modules" / "web" / "server.py"),
+            "--config",
+            str(config_path),
+        ],
+        "tool_prefix": "",
+        "tools_allow": ["web_search"],
+        "risk_default": "low",
+        "autoapprove": True,
+        "read_only": True,
+        "side_effects": False,
+        "timeout_s": 30,
+    }
+    servers_file = tmp_path / "mcp_servers.yaml"
+    existing = {}
+    if servers_file.exists():
+        existing = yaml.safe_load(servers_file.read_text(encoding="utf-8"))
+    entries = list((existing or {}).get("servers") or [])
+    entries.append(entry)
+    servers_file.write_text(
+        yaml.safe_dump({"servers": entries}), encoding="utf-8",
+    )
+    app.config.set("tools.mcp_servers_file", str(servers_file))
+    app.modules.reload()
 
 
 def _call(name: str, arguments: dict) -> ToolCall:
@@ -235,7 +276,6 @@ def test_schema_budget_excludes_low_priority_module_and_records_why(
     make_app, tmp_path
 ):
     app = make_app.build(default="ok")
-    app.config.set("web.enabled", False)
     _configure_mcp(app, tmp_path, autoapprove=True)
 
     builtin_tokens = sum(
@@ -305,7 +345,7 @@ def _web_search(app, query: str = "test") -> dict:
     )
 
 
-def test_web_search_is_bounded_structured_and_untrusted(make_app):
+def test_web_search_is_bounded_structured_and_untrusted(make_app, tmp_path):
     app = make_app.build(default="ok")
     many = [
         {"title": "t" * 500, "url": f"http://example.test/{i}",
@@ -313,8 +353,7 @@ def test_web_search_is_bounded_structured_and_untrusted(make_app):
         for i in range(20)
     ]
     with _searx_stub(results=many) as url:
-        app.config.set("web.searxng_url", url)
-        app.modules.reload("web")
+        _configure_web(app, tmp_path, url)
         outcome = _web_search(app, "bounded")
 
     assert outcome["status"] == "succeeded"
@@ -327,17 +366,17 @@ def test_web_search_is_bounded_structured_and_untrusted(make_app):
     assert len(result["sources"]) == result["count"]
 
     spec = app.tools.resolve("web_search")
+    assert spec.module == "mcp:web"
     assert spec.risk == "low"
     assert spec.read_only is True
     assert spec.side_effects is False
     assert spec.untrusted_output is True
 
 
-def test_web_search_malformed_json_is_a_clean_error(make_app):
+def test_web_search_malformed_json_is_a_clean_error(make_app, tmp_path):
     app = make_app.build(default="ok")
     with _searx_stub(malformed=True) as url:
-        app.config.set("web.searxng_url", url)
-        app.modules.reload("web")
+        _configure_web(app, tmp_path, url)
         outcome = _web_search(app, "broken")
     assert outcome["status"] == "failed"
     assert "malformed" in outcome["error"]
@@ -361,8 +400,7 @@ def test_taint_escalates_side_effecting_tool_and_names_the_source(
     ])
     _configure_mcp(app, tmp_path, autoapprove=True)  # low risk, side effects
     with _searx_stub() as url:
-        app.config.set("web.searxng_url", url)
-        app.modules.reload("web")
+        _configure_web(app, tmp_path, url)
         result = app.runtime.submit_user_message("search then act")
 
     assert result.status == "waiting_approval"
@@ -388,6 +426,22 @@ def test_taint_escalates_side_effecting_tool_and_names_the_source(
     events = [event["type"] for event in app.events.list()]
     assert "trust.tainted" in events
     assert "trust.escalated" in events
+
+
+def test_taint_origin_prefers_urls_then_labels_by_tool(make_app):
+    app = make_app.build(default="ok")
+    origin = app.runtime._taint_origin
+    assert origin(
+        {"sources": ["http://a.test/1", "http://a.test/2"]},
+        "mcp_demo_search",
+    ) == "http://a.test/1"
+    assert origin({"url": "http://b.test/"}, "mcp_demo_search") == (
+        "http://b.test/"
+    )
+    assert origin({"query": "rack height"}, "mcp_demo_search") == (
+        "mcp_demo_search results for 'rack height'"
+    )
+    assert origin({"content": "plain text"}, "mcp_demo_search") == "plain text"
 
 
 # ---------------------------------------------------------------------------

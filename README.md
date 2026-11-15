@@ -513,24 +513,23 @@ confirm-risk unless the manifest sets `autoapprove: true`;
 skills are untrusted data: they can never change risk classes or bypass
 approvals (regression-tested).
 
-**Capability modules.** MCP servers and the shipped web module are database
-rows (`modules`, `module_bindings`, `module_tools`) owned by
-`harness/modules/`. Each row has a kind, status, scope, manifest,
-provenance, version, health, and cached discovery. `scope=global` is
-always eligible; `scope=domain` requires an enabled binding for the task's
-domain. A draft, disabled, or error module is never disclosed and never
-callable. Reloading a module changes the registered toolset without a
-process restart. Each run keeps a capability snapshot, so a reload cannot
-silently change the tools mid-run; an explicit `use_domain` change
-recomputes once and records `toolset.changed`.
+**Capability modules.** Skills and MCP servers are database rows (`modules`,
+`module_bindings`, `module_tools`) owned by `harness/modules/`. Each row has a
+kind, status, scope, manifest, provenance, version, health, and cached
+discovery. `scope=global` is always eligible; `scope=domain` requires an
+enabled binding for the task's domain. A draft, disabled, or error module is
+never disclosed and never callable. Reloading a module changes the registered
+toolset without a process restart. Each run keeps a capability snapshot, so a
+reload cannot silently change the tools mid-run; an explicit `use_domain`
+change recomputes once and records `toolset.changed`.
 
 **MCP servers.** Set `tools.mcp_servers_file` to a YAML file listing stdio
 servers (see `examples/mcp_servers.yaml`). The file is an import source:
 entries become module rows on first load and are never overwritten by later
 edits. Manifest fields include `transport` (stdio), `command`, `args`,
 `env_names`, `domains`, `autoapprove`, `risk_default`, `tools_allow`,
-`tools_deny`, `read_only`, `side_effects`, `startup` (`eager`/`lazy`), and
-`timeout_s`:
+`tools_deny`, `tool_prefix`, `read_only`, `side_effects`, `startup`
+(`eager`/`lazy`), and `timeout_s`:
 
 ```yaml
 servers:
@@ -541,8 +540,16 @@ servers:
     read_only: true             # echo cannot change external state
     # domains: [dom_example]    # domain-bound instead of global
     # tools_allow: [echo, add]
+    # tool_prefix: ""           # keep the server's names (default: mcp_<name>_)
     # startup: lazy             # default; use cached discovery
 ```
+
+Registered names default to `mcp_<server>_<tool>`. Set `tool_prefix: ""` when
+a server should keep its own tool names. Server-specific settings — endpoints,
+credentials, categories — belong in that server's own config file passed
+through `args`; the harness never stores or reads them. Two self-contained
+examples ship in the repo: `harness/modules/web/server.py` (SearXNG search)
+and `harness/modules/calendar/server.py` (CalDAV).
 
 Servers are launched per call for isolation; a server that fails to start
 is reported as unavailable and never blocks turns. Discovery is cached in
@@ -557,22 +564,25 @@ Manage modules from the API or CLI:
 python -m harness modules                  # status, health, tool counts
 python -m harness modules --reload         # reload every module
 python -m harness modules --reload mcp:example_echo
-python -m harness modules --disable web
-python -m harness modules --enable web
+python -m harness modules --disable mcp:example_echo
+python -m harness modules --enable mcp:example_echo
 ```
 
 The same actions are available as `GET /api/modules`,
 `POST /api/modules/reload`, and
 `POST /api/modules/{id}/reload|enable|disable`.
 
-**Web search.** The shipped `web` module is a small stdio MCP server that
-queries SearXNG's JSON API and returns bounded `{title, url, snippet}`
-results. Configure it with `web.searxng_url` (verified against
-`http://192.168.50.40:8080`). Results are marked `untrusted_output`, so
-they taint the run: after web content enters a run, any side-effecting
-tool is escalated to confirm-risk and the approval names the source URL.
-Read-only tools stay low-risk. `web_fetch` is deliberately not provided
-(SSRF and injection surface).
+**Web search.** `harness/modules/web/server.py` is a self-contained stdio
+MCP server that queries SearXNG's JSON API and returns bounded
+`{title, url, snippet}` results. It ships with a `--config` file
+(`web.example.json`), not harness configuration keys; `WEB_*` environment
+variables override the file when set. Register it through
+`tools.mcp_servers_file` with `tool_prefix: ""` and `tools_allow:
+[web_search]`. See `harness/modules/web/README.md`. Results are untrusted
+data, so they taint the run: after web content enters a run, any
+side-effecting tool is escalated to confirm-risk and the approval names the
+source URL. Read-only tools stay low-risk. `web_fetch` is deliberately not
+provided (SSRF and injection surface).
 
 > Port note: the harness also defaults to port 8080. Do not run it and
 > SearXNG on the same host unless you change `HARNESS_PORT` or
@@ -672,8 +682,7 @@ Settings live in `data/config.yaml` (created with defaults on first start)
 and are validated at startup: unknown keys fail fast. Environment
 overrides: `HARNESS_DATA_DIR`, `HARNESS_HOST`, `HARNESS_PORT`,
 `HARNESS_TOKEN`, `HARNESS_MODEL_BASE_URL`, `HARNESS_MODEL_NAME`,
-`HARNESS_MODEL_API_KEY`, `HARNESS_TIMEZONE`, `HARNESS_WEB_ENABLED`,
-`HARNESS_WEB_SEARXNG_URL`.
+`HARNESS_MODEL_API_KEY`, `HARNESS_TIMEZONE`.
 
 Timestamps are stored in UTC and shown in the host's local time. The
 `timezone` setting defaults to `system`; set an IANA name only to override
@@ -703,8 +712,6 @@ Main groups:
 - `subagents.*`: enabled, max depth, children per run, child iteration/
   tool-call/seconds budgets, result size, and the reserved
   `allow_confirm_risk` flag (always false in v1: children stay low-risk)
-- `web.*`: enabled, `searxng_url`, `max_results`, `timeout_s`,
-  `categories`, `safe_search`
 - `scheduler.*`: enabled, tick interval, missed policy and grace,
   interrupted-run resume, per-tick run/retry caps, retry cooldown and
   exponential backoff, permanent-failure policy, user-activity grace,
