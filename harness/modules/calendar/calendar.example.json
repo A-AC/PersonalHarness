@@ -1,0 +1,12 @@
+{
+  "url": "http://192.168.50.40:8383/dav.php",
+  "username": "your-baikal-user",
+  "password": "replace-me",
+  "calendar": "personal",
+  "organizer": "",
+  "timezone": "system",
+  "max_results": 100,
+  "max_range_days": 366,
+  "timeout_s": 10,
+  "read_only": false
+}
