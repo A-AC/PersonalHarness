@@ -3,7 +3,7 @@
  * keeps no authoritative state, only the last payload it was shown. */
 
 let state = {
-  summary: {}, counts: {}, config: { persona: {} }, domains: [],
+  summary: {}, counts: {}, config: { persona: {} }, domains: [], modelMeta: null,
   messages: [], tasks: [], open_tasks: [], approvals: [], schedules: [],
   memories_all: [], memory_counts: {}, memory_kinds: [],
   artifact_problems: [],
@@ -26,9 +26,20 @@ let skillEditId = null;
 let showSubagents = false;
 let configMeta = null;
 let toastTimer = null;
+let modelAttempted = false;
+let modelLoading = false;
 const approvalCardStates = Object.create(null);
 
 const $ = (id) => document.getElementById(id);
+
+function esc(text) {
+  return String(text == null ? '' : text)
+    .replace(/&/g, '\u0026')
+    .replace(/</g, '\u003c')
+    .replace(/>/g, '\u003e')
+    .replace(/"/g, '\u0022')
+    .replace(/'/g, '\u0027');
+}
 
 async function api(path, opts) {
   opts = opts || {};
@@ -265,6 +276,22 @@ function renderAll(force) {
 
 /* ------------------------------------------------------------------ chat */
 
+async function loadModels(force) {
+  if (modelLoading) return;
+  if (modelAttempted && !force) return;
+  modelLoading = true;
+  modelAttempted = true;
+  try {
+    const data = await api('/api/models');
+    if (!data) return;
+    state.modelMeta = data;
+    renderHeader();
+    if (tab === 'settings') renderSide(false);
+  } finally {
+    modelLoading = false;
+  }
+}
+
 function renderHeader() {
   const persona = (state.config && state.config.persona) || {};
   $('who').textContent = persona.speaker_label || persona.name || 'Assistant';
@@ -294,6 +321,8 @@ function renderHeader() {
     banner.style.display = 'none';
   }
   renderDomainPicker();
+  renderModelPicker();
+  loadModels(false);
 }
 
 function renderDomainPicker() {
@@ -310,6 +339,116 @@ function renderDomainPicker() {
     pick.dataset.html = html;
     pick.value = wanted || '';
   }
+}
+
+function modelPickerData() {
+  const meta = state.modelMeta || {};
+  const summaryModel = (state.summary || {}).model || {};
+  const configModel = (state.config || {}).model || {};
+  const current = meta.current ||
+    (summaryModel.name ? summaryModel : null) ||
+    (configModel.name ? configModel : null) || {};
+  const catalogue = meta.models || [];
+  const providerPayloads = meta.providers || [];
+  const providerIds = [];
+  for (const provider of providerPayloads) {
+    if (!providerIds.includes(provider.id)) providerIds.push(provider.id);
+  }
+  for (const model of catalogue) {
+    if (!providerIds.includes(model.provider)) providerIds.push(model.provider);
+  }
+  const contextWindow = meta.context_window != null
+    ? meta.context_window
+    : (current.context_window != null
+      ? current.context_window
+      : (summaryModel.context_window != null
+        ? summaryModel.context_window
+        : (configModel.context_window || 0)));
+  const wanted = current.provider
+    ? current.provider + '::' + current.name : current.name;
+  return {
+    meta: meta,
+    current: current,
+    catalogue: catalogue,
+    providerPayloads: providerPayloads,
+    providerIds: providerIds,
+    contextWindow: contextWindow,
+    wanted: wanted,
+  };
+}
+
+function modelOptionsHtml(catalogue, providerPayloads, providerIds, current) {
+  let html = '';
+  if (catalogue.length) {
+    for (const providerId of providerIds) {
+      const provider = providerPayloads.find(p => p.id === providerId) || {};
+      const groupLabel = providerId +
+        (provider.reachable === false ? ' (unreachable)' : '');
+      html += '<optgroup label="' + esc(groupLabel) + '">';
+      for (const model of catalogue.filter(m => m.provider === providerId)) {
+        let label = model.name;
+        if (model.current) label += ' - current';
+        if (model.reachable === false) label += ' - offline';
+        const value = providerId + '::' + model.name;
+        html += '<option value="' + esc(value) + '">' +
+          esc(label) + '</option>';
+      }
+      html += '</optgroup>';
+    }
+  } else if (current.name) {
+    const value = current.provider
+      ? current.provider + '::' + current.name : current.name;
+    html = '<option value="' + esc(value) + '">' +
+      esc(current.name) + '</option>';
+  }
+  return html;
+}
+
+function renderModelPicker() {
+  const pick = $('modelpick');
+  if (!pick) return;
+  const data = modelPickerData();
+  const html = modelOptionsHtml(
+    data.catalogue, data.providerPayloads, data.providerIds, data.current);
+
+  if (pick.dataset.html !== html) {
+    pick.innerHTML = html;
+    pick.dataset.html = html;
+  }
+  if (data.wanted &&
+      Array.from(pick.options).some(option => option.value === data.wanted)) {
+    pick.value = data.wanted;
+  }
+  pick.title = 'Used for new turns. Configured context window: ' +
+    data.contextWindow +
+    ' tokens. A run in progress keeps the model it started with.';
+}
+
+async function setModelSelection(name, provider) {
+  const out = await api('/api/model', {
+    method: 'POST',
+    body: {name: name, provider: provider || ''},
+  });
+  if (out) {
+    let message = 'Model set to ' + out.model + ' (' + out.provider + ')';
+    if (out.verified === false) {
+      message += ' - unverified, provider unreachable';
+    }
+    toast(message);
+    await loadModels(true);
+  } else {
+    await loadModels(true);
+  }
+  refresh(true);
+  return out;
+}
+
+async function switchModelSelection(raw) {
+  const separator = raw.indexOf('::');
+  const provider = separator >= 0 ? raw.slice(0, separator) : '';
+  const name = separator >= 0 ? raw.slice(separator + 2) : raw;
+  if (!name) return null;
+  return setModelSelection(name, provider);
 }
 
 function shortHash(text) {
@@ -668,6 +807,10 @@ function runBlock(run, open) {
     det.appendChild(el('div', 'small',
       'tainted by: ' + run.tainted_sources.map(s => s.origin || s.tool)
         .join(', ')));
+  }
+  if (run.model) {
+    det.appendChild(el('div', 'small',
+      'model: ' + run.model + ' (provider ' + (run.provider || 'unknown') + ')'));
   }
   det.appendChild(modelMessagesBlock(run, open));
   det.appendChild(contextSourcesBlock(
@@ -2414,6 +2557,94 @@ const SETTING_GROUPS = ['limits', 'context', 'domains', 'memory', 'tools',
                         'modules', 'skills', 'subagents', 'scheduler',
                         'consolidation', 'approvals', 'inbox', 'automations'];
 
+function modelCard() {
+  const card = el('div', 'card');
+  const data = modelPickerData();
+  const meta = data.meta;
+  const current = data.current;
+  const contextWindow = data.contextWindow;
+
+  card.appendChild(el('h3', null, 'Model'));
+  card.appendChild(el('div', 'small',
+    'Current: ' + (current.name || 'unknown') +
+    ' (' + (current.provider || 'unknown') + ')  |  context window: ' +
+    contextWindow + ' tokens'));
+
+  const modelSelect = el('select', 'modelselect');
+  modelSelect.id = 'modelselect';
+  modelSelect.innerHTML = modelOptionsHtml(
+    data.catalogue, data.providerPayloads, data.providerIds, data.current);
+  if (data.wanted &&
+      Array.from(modelSelect.options).some(
+        option => option.value === data.wanted)) {
+    modelSelect.value = data.wanted;
+  }
+  modelSelect.title = 'Switching applies to the next model turn without a ' +
+    'restart. A run in progress keeps its snapshot model.';
+  modelSelect.onchange = async () => {
+    await switchModelSelection(modelSelect.value);
+  };
+  const modelRow = el('div', 'field');
+  const modelLabel = el('label', null, 'Model');
+  modelLabel.htmlFor = modelSelect.id;
+  modelRow.appendChild(modelLabel);
+  modelRow.appendChild(modelSelect);
+  card.appendChild(modelRow);
+
+  card.appendChild(el('div', 'small',
+    'Switching applies to the next model turn without a restart. A run in ' +
+    'progress keeps its snapshot model. Every run records the model and ' +
+    'provider it used.'));
+
+  const providers = meta.providers || [];
+  if (!providers.length) {
+    card.appendChild(el('div', 'small',
+      'The provider catalogue has not been loaded yet.'));
+  }
+  for (const provider of providers) {
+    const providerCard = el('div', 'card');
+    providerCard.appendChild(el('h3', null,
+      provider.id + (provider.builtin ? ' (built-in)' : '')));
+    providerCard.appendChild(el('div', 'small mono',
+      provider.base_url || ''));
+    const status = el('div', 'row');
+    status.appendChild(pill(
+      provider.reachable === false ? 'offline' : 'reachable'));
+    providerCard.appendChild(status);
+    if (provider.error) {
+      providerCard.appendChild(el('div', 'small', provider.error));
+    }
+
+    const providerModels = provider.models || (meta.models || []).filter(
+      model => model.provider === provider.id);
+    for (const model of providerModels) {
+      const row = el('div', 'row');
+      row.appendChild(el('span', 'small', model.name));
+      const statusName = model.current
+        ? 'current' : (model.reachable === false ? 'offline' : 'reachable');
+      row.appendChild(pill(statusName));
+      const modelContext = model.context_window != null
+        ? model.context_window : contextWindow;
+      row.appendChild(el('span', 'small', 'ctx ' + modelContext));
+      if (!model.current) {
+        row.appendChild(btn('Use this model', null, () =>
+          setModelSelection(model.name, provider.id)));
+      }
+      providerCard.appendChild(row);
+    }
+    card.appendChild(providerCard);
+  }
+
+  const actions = el('div', 'btns');
+  actions.appendChild(btn('Refresh catalogue', null, () => loadModels(true)));
+  card.appendChild(actions);
+  card.appendChild(el('div', 'small',
+    'Providers live under providers in config.yaml as ' +
+    '{id, base_url, api_key_env, models}; model.allowed narrows the ' +
+    'advertised list. Secrets stay in environment variables.'));
+  return card;
+}
+
 function renderSettings(side) {
   if (!configMeta) {
     api('/api/config').then(data => {
@@ -2429,6 +2660,7 @@ function renderSettings(side) {
     head.appendChild(el('div', 'small', 'File: ' + configMeta.config_path));
   }
   side.appendChild(head);
+  side.appendChild(modelCard());
 
   for (const group of SETTING_GROUPS) {
     const values = state.config[group];
@@ -2662,6 +2894,9 @@ async function send() {
 }
 
 $('send').onclick = send;
+$('modelpick').onchange = async () => {
+  await switchModelSelection($('modelpick').value);
+};
 $('input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });

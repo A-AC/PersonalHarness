@@ -346,7 +346,9 @@ def test_system_panel_contract(make_app, client, tmp_path):
     assert payload["working_task"] is None
     assert set(payload["scheduler"]) == {"last_tick", "last_report", "enabled"}
     assert any(m["id"] == module_id for m in payload["modules"])
-    assert set(payload["model"]) == {"base_url", "name"}
+    assert set(payload["model"]) == {
+        "provider", "base_url", "name", "context_window",
+    }
     assert payload["system_timezone"] == util.system_tz_name()
 
 

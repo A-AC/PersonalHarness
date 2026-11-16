@@ -20,6 +20,7 @@ import httpx
 
 from . import util
 from .config import Config
+from .providers import ModelSelectionError, Provider, get_provider
 
 # Markers used by servers that embed tool requests in content. Built by
 # concatenation so the literal sequences never need to appear in this file.
@@ -144,6 +145,8 @@ class Model(Protocol):
         max_tokens: int | None = None,
         thinking: bool | None = None,
         recovery: bool = True,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> ModelReply: ...
 
     def probe(self) -> dict[str, Any]: ...
@@ -167,21 +170,32 @@ class ModelClient:
 
     # -- endpoints --------------------------------------------------------
 
-    def _chat_url(self) -> str:
-        base = str(self.config.get("model.base_url", "")).rstrip("/")
+    def _chat_url(self, provider_id: str | None = None) -> str:
+        provider = get_provider(self.config, provider_id)
+        return self._chat_url_for(provider)
+
+    def _chat_url_for(self, provider: Provider) -> str:
+        base = provider.base_url.rstrip("/")
         path = str(self.config.get("model.chat_path", "/v1/chat/completions"))
         return base + path
 
-    def _models_url(self) -> str:
-        base = str(self.config.get("model.base_url", "")).rstrip("/")
+    def _models_url(self, provider_id: str | None = None) -> str:
+        provider = get_provider(self.config, provider_id)
+        return self._models_url_for(provider)
+
+    def _models_url_for(self, provider: Provider) -> str:
+        base = provider.base_url.rstrip("/")
         path = str(self.config.get("model.models_path", "/v1/models"))
         return base + path
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, provider_id: str | None = None) -> dict[str, str]:
+        provider = get_provider(self.config, provider_id)
+        return self._headers_for(provider)
+
+    def _headers_for(self, provider: Provider) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        key = str(self.config.get("model.api_key", "") or "")
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
+        if provider.api_key:
+            headers["Authorization"] = f"Bearer {provider.api_key}"
         return headers
 
     def _payload(
@@ -190,9 +204,10 @@ class ModelClient:
         tools: list[dict[str, Any]],
         max_tokens: int | None,
         thinking: bool | None = None,
+        model_name: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "model": self.config.get("model.name", ""),
+            "model": model_name or self.config.get("model.name", ""),
             "messages": messages,
             "max_tokens": int(
                 max_tokens or self.config.get("model.max_tokens", 2048)
@@ -223,6 +238,8 @@ class ModelClient:
         max_tokens: int | None = None,
         thinking: bool | None = None,
         recovery: bool = True,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> ModelReply:
         """One completion, with a single controlled recovery for empty replies.
 
@@ -236,7 +253,12 @@ class ModelClient:
         )
         try:
             return self._chat_once(
-                messages, tools, max_tokens=max_tokens, thinking=thinking
+                messages,
+                tools,
+                max_tokens=max_tokens,
+                thinking=thinking,
+                model=model,
+                provider=provider,
             )
         except ModelEmptyReply:
             if not recovery or not effective_thinking:
@@ -246,7 +268,12 @@ class ModelClient:
             int(self.config.get("model.empty_retry_max_tokens", 4096)),
         )
         return self._chat_once(
-            messages, tools, max_tokens=retry_tokens, thinking=False
+            messages,
+            tools,
+            max_tokens=retry_tokens,
+            thinking=False,
+            model=model,
+            provider=provider,
         )
 
     def _chat_once(
@@ -256,9 +283,18 @@ class ModelClient:
         *,
         max_tokens: int | None = None,
         thinking: bool | None = None,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> ModelReply:
-        url = self._chat_url()
-        payload = self._payload(messages, tools, max_tokens, thinking)
+        try:
+            selected_provider = get_provider(self.config, provider)
+        except ModelSelectionError as exc:
+            raise ModelResponseError(str(exc)) from exc
+        url = self._chat_url_for(selected_provider)
+        headers = self._headers_for(selected_provider)
+        payload = self._payload(
+            messages, tools, max_tokens, thinking, model_name=model
+        )
         retries = max(0, int(self.config.get("model.connect_retries", 2)))
         backoff = float(self.config.get("model.retry_backoff_s", 2.0))
         last_error: Exception | None = None
@@ -266,7 +302,7 @@ class ModelClient:
             started = time.monotonic()
             try:
                 response = self._client.post(
-                    url, json=payload, headers=self._headers()
+                    url, json=payload, headers=headers
                 )
                 duration_ms = int((time.monotonic() - started) * 1000)
                 if response.status_code >= 500:
@@ -354,10 +390,12 @@ class ModelClient:
 
     # -- diagnostics ------------------------------------------------------
 
-    def probe(self) -> dict[str, Any]:
+    def probe(self, provider_id: str | None = None) -> dict[str, Any]:
         """Check connectivity and the configured model without side effects."""
+        provider = get_provider(self.config, provider_id)
         result: dict[str, Any] = {
-            "base_url": self.config.get("model.base_url"),
+            "provider": provider.id,
+            "base_url": provider.base_url,
             "model": self.config.get("model.name"),
             "reachable": False,
             "model_listed": None,
@@ -367,7 +405,8 @@ class ModelClient:
         }
         try:
             response = self._client.get(
-                self._models_url(), headers=self._headers()
+                self._models_url_for(provider),
+                headers=self._headers_for(provider),
             )
             result["reachable"] = response.status_code < 500
             if response.status_code == 200:
@@ -384,6 +423,7 @@ class ModelClient:
                 tools=[],
                 # Thinking models need headroom before visible content.
                 max_tokens=1024,
+                provider=provider.id,
             )
             result["chat_ok"] = bool(
                 (reply.content or "").strip() or (reply.reasoning or "").strip()
@@ -411,11 +451,84 @@ class ModelClient:
                 ],
                 tools=[probe_tool],
                 max_tokens=512,
+                provider=provider.id,
             )
             result["tool_call_ok"] = bool(reply.tool_calls)
         except (ModelUnavailable, ModelResponseError) as exc:
             result["detail"] = f"tool probe failed: {exc}"
         return result
+
+    def list_models(
+        self, provider_id: str | None = None, timeout_s: float = 4.0,
+    ) -> dict[str, Any]:
+        """List models advertised by one provider without raising on failure."""
+        requested = str(provider_id or "").strip()
+        try:
+            provider = get_provider(self.config, provider_id)
+        except ModelSelectionError as exc:
+            return {
+                "provider": requested,
+                "base_url": "",
+                "reachable": False,
+                "models": [],
+                "error": str(exc),
+            }
+
+        timeout = httpx.Timeout(
+            timeout_s, connect=min(2.0, timeout_s)
+        )
+        try:
+            response = self._client.get(
+                self._models_url_for(provider),
+                headers=self._headers_for(provider),
+                timeout=timeout,
+            )
+        except httpx.HTTPError as exc:
+            return {
+                "provider": provider.id,
+                "base_url": provider.base_url,
+                "reachable": False,
+                "models": [],
+                "error": f"models probe failed: {exc}",
+            }
+
+        if response.status_code != 200:
+            return {
+                "provider": provider.id,
+                "base_url": provider.base_url,
+                "reachable": response.status_code < 500,
+                "models": [],
+                "error": (
+                    f"endpoint returned {response.status_code}: "
+                    f"{response.text[:200]}"
+                ),
+            }
+
+        try:
+            data = response.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                raise ValueError("expected an object with a data list")
+        except (TypeError, ValueError) as exc:
+            return {
+                "provider": provider.id,
+                "base_url": provider.base_url,
+                "reachable": True,
+                "models": [],
+                "error": f"malformed models response: {exc}",
+            }
+
+        models = [
+            str(item["id"])
+            for item in data["data"]
+            if isinstance(item, dict) and item.get("id")
+        ]
+        return {
+            "provider": provider.id,
+            "base_url": provider.base_url,
+            "reachable": True,
+            "models": models,
+            "error": "",
+        }
 
 
 class ScriptedModel:
@@ -434,9 +547,14 @@ class ScriptedModel:
         self,
         scripts: list[dict[str, Any] | str] | None = None,
         default: str = "",
+        *,
+        models: list[str] | None = None,
+        reachable: bool = True,
     ):
         self.scripts: list[dict[str, Any] | str] = list(scripts or [])
         self.default = default
+        self.models: list[str] = list(models or [])
+        self.reachable = bool(reachable)
         self.calls: list[dict[str, Any]] = []
 
     def _next(self) -> dict[str, Any] | str:
@@ -452,12 +570,16 @@ class ScriptedModel:
         max_tokens: int | None = None,
         thinking: bool | None = None,
         recovery: bool = True,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> ModelReply:
         self.calls.append({
             "messages": messages,
             "tools": tools,
             "max_tokens": max_tokens,
             "thinking": thinking,
+            "model": model,
+            "provider": provider,
         })
         script = self._next()
         if isinstance(script, str):
@@ -494,6 +616,15 @@ class ScriptedModel:
             "chat_ok": True,
             "tool_call_ok": True,
             "detail": "scripted",
+        }
+
+    def list_models(self, provider_id: str | None = None) -> dict[str, Any]:
+        return {
+            "provider": provider_id or "default",
+            "base_url": "",
+            "reachable": bool(self.reachable),
+            "models": list(self.models) if self.reachable else [],
+            "error": "" if self.reachable else "scripted model is unreachable",
         }
 
     @property

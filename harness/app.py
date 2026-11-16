@@ -19,9 +19,9 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from . import util
+from . import providers, util
 from .approvals import Approvals
-from .config import Config, load_config
+from .config import Config, load_config, save_config
 from .consolidation import Consolidation
 from .context import ContextBuilder
 from .db import Database, rows_to_dicts
@@ -566,6 +566,64 @@ class App:
             messages=self.messages, skills=self.modules.skills,
             subagents=self.subagents, scheduler=self.scheduler, role=role,
         )
+
+    def _model_lister(self):
+        """Return the model client's provider lister when it has one."""
+        lister = getattr(self.model, "list_models", None)
+        return lister if callable(lister) else None
+
+    def model_catalogue(self) -> dict[str, Any]:
+        """Return the provider/model catalogue for the settings picker."""
+        return providers.provider_catalogue(
+            self.config, self._model_lister()
+        )
+
+    def set_model(
+        self, name: str, provider_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Select and persist one provider/model without requiring a restart."""
+        selected_name = name.strip() if isinstance(name, str) else ""
+        provider, verified, info = providers.verify_model_selection(
+            self.config,
+            selected_name,
+            provider_id,
+            self._model_lister(),
+        )
+        old_model = self.config.get("model.name")
+        try:
+            old_provider = providers.current_provider(self.config).id
+        except providers.ModelSelectionError:
+            old_provider = providers.configured_provider_id(self.config)
+        old = {"model": old_model, "provider": old_provider}
+        changed = old_model != selected_name or old_provider != provider.id
+
+        self.config.set("model.name", selected_name)
+        self.config.set(
+            "model.provider", "" if provider.builtin else provider.id
+        )
+        save_config(self.config)
+
+        reachable = bool(info.get("reachable"))
+        if changed:
+            self.events.record("model.changed", data={
+                "from": old_model,
+                "to": selected_name,
+                "from_provider": old_provider,
+                "to_provider": provider.id,
+                "verified": verified,
+                "reachable": reachable,
+                "source": "api",
+            })
+        return {
+            "status": "saved",
+            "changed": changed,
+            "model": selected_name,
+            "provider": provider.id,
+            "verified": verified,
+            "reachable": reachable,
+            "restart_required": False,
+            "previous": old,
+        }
 
     # ------------------------------------------------------------------
     # Backup / restore

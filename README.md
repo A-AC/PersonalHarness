@@ -171,6 +171,20 @@ The configured endpoint is `http://192.168.50.40:8181/` serving
 - Unknown model names return 400 with a JSON error body.
 - No authentication is sent unless `model.api_key` is configured.
 
+Each provider has one OpenAI-compatible endpoint. `providers` is a list of
+`{id, base_url, api_key_env, models}`; `model.provider` selects one. The
+built-in `default` provider is synthesized from `model.base_url`/`model.api_key`,
+so existing single-endpoint configs keep working. `model.allowed` narrows the
+advertised names. A switch is explicit (by the user or a future router), is
+recorded as a `model.changed` event, and never falls back. Every run records
+`model` and `provider` in `runs.meta`; a run in flight keeps its snapshot model,
+while resuming after an explicit switch uses the new one and records the
+change. `GET /api/models` lists the catalogue with provider reachability and the
+configured context window; `POST /api/model {name, provider?}` validates and
+applies the selection without a restart. The header picker and Settings card
+are the UI. An unreachable provider is reported rather than silently used, and
+a name is only accepted while unverified when a configured allowlist names it.
+
 Configure via `data/config.yaml` (`model.base_url`, `model.name`,
 `model.api_key`, `model.chat_path`) or the environment variables
 `HARNESS_MODEL_BASE_URL`, `HARNESS_MODEL_NAME`, `HARNESS_MODEL_API_KEY`.
@@ -308,6 +322,7 @@ value in `data/config.yaml`.
 | `eval` | Run scenario evaluations in-process (deterministic or live); `--list`, `--list-models`, `--summary`, `--compare`, `--aggregate` |
 | `backup` / `restore ZIP --yes` | Snapshot / restore state |
 | `config` | Effective configuration (secrets redacted) |
+| `models [--set NAME] [--provider ID]` | List provider/model choices or switch the active model |
 | `endpoint-check` | Probe the configured model endpoint directly |
 
 Example schedule creation (single quotes on POSIX shells):
@@ -755,9 +770,10 @@ clock matches your zone. Configs still carrying the old hard-coded default
 
 Main groups:
 
-- `model.*`: endpoint, model name, api key, paths, timeout, retries,
-  max_tokens, temperature, `enable_thinking`, `context_window`,
-  `empty_retry_max_tokens`
+- `model.*`: endpoint, model name, selected `provider`, allowed model names,
+  api key, paths, timeout, retries, max_tokens, temperature, `enable_thinking`,
+  `context_window`, `empty_retry_max_tokens`
+- `providers`: list of `{id, base_url, api_key_env, models}` provider records
 - `server.*`: host, port, access token
 - `limits.*`: iteration/tool/time budgets per run, tool result size
 - `context.*`: token budgets, reserved output and tool-schema headroom,
@@ -804,7 +820,8 @@ Everything important is inspectable without exposing chain-of-thought:
 - `tool_executions` rows: status (including `unknown`), arguments,
   bounded results, errors, approval links, durations
 - `runs` rows: status, decision ("why it stopped"), iterations, tool-call
-  count, context sources with reasons
+  count, context sources with reasons, and the model/provider attribution used
+  by that run
 - `memory_revisions` rows: before/after, changed-by, reason
 - `memory_access` rows: which memory was disclosed to which run, and when
 - The CLI `events`, `tasks ID`, and `memories` commands and the web UI's

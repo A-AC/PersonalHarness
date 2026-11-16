@@ -34,6 +34,7 @@ from .model import (
     ModelUnavailable,
     ToolCall,
 )
+from .providers import configured_provider_id
 from .store import Domains, Events, Messages, Tasks
 from .tools import ToolError, validate_arguments
 
@@ -176,6 +177,13 @@ class AgentRuntime:
                 "domain_id", "role", "names", "modules", "exclusions",
                 "tokens", "budget_tokens",
             )
+        }
+
+    def _model_stamp(self) -> dict[str, str]:
+        """The model/provider a run records and keeps for its own turns."""
+        return {
+            "model": str(self.config.get("model.name", "")),
+            "provider": configured_provider_id(self.config),
         }
 
     def _run_meta(self, run_id: str) -> dict[str, Any]:
@@ -723,6 +731,7 @@ class AgentRuntime:
         parent_run_id = trigger.get("parent_run_id") or task.get("parent_run_id")
         run_meta: dict[str, Any] = {
             "toolset": self._toolset_snapshot(selection),
+            **self._model_stamp(),
         }
         # Inbox content is untrusted by definition. Seed the same taint list
         # that untrusted tool output uses, so every later side-effecting tool
@@ -1316,6 +1325,32 @@ class AgentRuntime:
     def _loop(self, run: dict[str, Any], trigger: dict[str, Any]) -> RunResult:
         started_monotonic = time.monotonic()
         run_id = run["id"]
+        run_meta = util.loads(run.get("meta") or "", {})
+        if not isinstance(run_meta, dict):
+            run_meta = {}
+        snapshot_model = str(run_meta.get("model") or "")
+        snapshot_provider = str(run_meta.get("provider") or "")
+        current = self._model_stamp()
+        if not snapshot_model:
+            self._save_meta(run_id, {**run_meta, **current})
+            snapshot_model = current["model"]
+            snapshot_provider = current["provider"]
+        elif (snapshot_model, snapshot_provider) != (
+            current["model"], current["provider"]
+        ):
+            self._save_meta(run_id, {**run_meta, **current})
+            self.events.record(
+                "model.changed", task_id=run["task_id"], run_id=run_id,
+                data={
+                    "from": snapshot_model,
+                    "to": current["model"],
+                    "from_provider": snapshot_provider,
+                    "to_provider": current["provider"],
+                    "source": "resume",
+                },
+            )
+            snapshot_model = current["model"]
+            snapshot_provider = current["provider"]
         task = self.tasks.get(run["task_id"])
         max_iterations, max_tool_calls, max_seconds = self._limits_for(task)
         self.tasks.clear_retry(task["id"], reset_count=False)
@@ -1356,7 +1391,10 @@ class AgentRuntime:
                     run_id=run_id, data={"repairs": repairs[:8]},
                 )
             try:
-                reply = self.model.chat(prompt, tools_schema)
+                reply = self.model.chat(
+                    prompt, tools_schema,
+                    model=snapshot_model, provider=snapshot_provider,
+                )
             except ModelContextError as exc:
                 if context_retry_used:
                     return self._model_failed(
@@ -1375,7 +1413,10 @@ class AgentRuntime:
                     data={"budget_tokens": tighter, "repairs": extra[:8]},
                 )
                 try:
-                    reply = self.model.chat(prompt, tools_schema)
+                    reply = self.model.chat(
+                        prompt, tools_schema,
+                        model=snapshot_model, provider=snapshot_provider,
+                    )
                 except (ModelUnavailable, ModelResponseError) as retry_exc:
                     return self._model_failed(
                         run, task, str(retry_exc),
@@ -1397,6 +1438,8 @@ class AgentRuntime:
                     "prompt_tokens": reply.prompt_tokens,
                     "completion_tokens": reply.completion_tokens,
                     "tool_calls": [c.name for c in reply.tool_calls],
+                    "model": snapshot_model,
+                    "provider": snapshot_provider,
                 },
             )
             self._save_run(run_id, iterations=iterations + 1)

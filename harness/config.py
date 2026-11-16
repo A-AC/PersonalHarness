@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,8 @@ DEFAULTS: dict[str, Any] = {
         "base_url": "http://192.168.50.40:8181",
         "name": "qwen3.5-9b",
         "api_key": "",
+        "provider": "",          # provider id; empty selects the built-in default
+        "allowed": [],           # optional model-name allowlist; empty allows all
         "chat_path": "/v1/chat/completions",
         "models_path": "/v1/models",
         "timeout_s": 180.0,
@@ -44,6 +47,9 @@ DEFAULTS: dict[str, Any] = {
         # One recovery attempt for an empty/thinking-only reply uses this.
         "empty_retry_max_tokens": 4096,
     },
+    # Provider records: {id, base_url, api_key_env, models}. An empty list
+    # keeps the single-endpoint model configuration working.
+    "providers": [],
     "approvals": {
         # 0 = never expire. A week is long enough to survive a vacation while
         # keeping abandoned actions from accumulating forever.
@@ -237,7 +243,7 @@ ENV_OVERRIDES = {
 EDITABLE_KEYS = {
     "persona", "limits", "context", "domains", "memory", "tools",
     "modules", "skills", "subagents", "scheduler", "consolidation",
-    "approvals", "inbox", "automations", "timezone",
+    "approvals", "inbox", "automations", "timezone", "providers",
 }
 
 # Configuration groups that belonged to retired built-in modules. They are
@@ -249,6 +255,98 @@ RETIRED_GROUPS = frozenset({"web"})
 
 class ConfigError(RuntimeError):
     pass
+
+
+def validate_allowed_models(value: Any) -> list[str]:
+    """Validate and normalise the optional model-name allowlist."""
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        raise ConfigError(
+            "configuration key model.allowed must be a list of strings"
+        )
+
+    allowed: list[str] = []
+    seen: set[str] = set()
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, str) or not candidate.strip():
+            raise ConfigError(
+                f"configuration key model.allowed[{index}] must be a "
+                "non-empty string"
+            )
+        name = candidate.strip()
+        if name not in seen:
+            seen.add(name)
+            allowed.append(name)
+    return allowed
+
+
+def validate_providers(value: Any) -> list[dict[str, Any]]:
+    """Validate and normalise configured OpenAI-compatible providers."""
+    if not isinstance(value, list):
+        raise ConfigError("configuration key providers must be a list")
+
+    allowed_keys = {"id", "base_url", "api_key_env", "models"}
+    providers: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"providers.{index} must be a mapping")
+        for key in entry:
+            if key not in allowed_keys:
+                raise ConfigError(
+                    f"providers.{index} has unknown key: {key}"
+                )
+
+        provider_id = entry.get("id")
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            raise ConfigError(
+                f"providers.{index}.id must be a non-empty string"
+            )
+        provider_id = provider_id.strip()
+        if provider_id in seen_ids:
+            raise ConfigError(
+                f"providers.{index}.id duplicates provider id: {provider_id}"
+            )
+
+        base_url = entry.get("base_url")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ConfigError(
+                f"providers.{index}.base_url must be a non-empty string"
+            )
+
+        api_key_env = entry.get("api_key_env", "")
+        if not isinstance(api_key_env, str):
+            raise ConfigError(
+                f"providers.{index}.api_key_env must be a string"
+            )
+
+        raw_models = entry.get("models", [])
+        if isinstance(raw_models, str):
+            raw_models = [raw_models]
+        elif not isinstance(raw_models, list):
+            raise ConfigError(
+                f"providers.{index}.models must be a list or string"
+            )
+        models: list[str] = []
+        for model_index, model_name in enumerate(raw_models):
+            if not isinstance(model_name, str) or not model_name.strip():
+                raise ConfigError(
+                    f"providers.{index}.models[{model_index}] must be a "
+                    "non-empty string"
+                )
+            models.append(model_name.strip())
+
+        seen_ids.add(provider_id)
+        providers.append({
+            "id": provider_id,
+            "base_url": base_url.strip(),
+            "api_key_env": api_key_env.strip(),
+            "models": models,
+        })
+    return providers
 
 
 def _merge(defaults: dict, overlay: dict, path: str = "") -> dict:
@@ -290,7 +388,12 @@ def _merge(defaults: dict, overlay: dict, path: str = "") -> dict:
         elif isinstance(base, str):
             out[key] = str(value)
         elif isinstance(base, list):
-            out[key] = list(value) if isinstance(value, list) else [value]
+            if loc == "providers":
+                out[key] = validate_providers(value)
+            elif loc == "model.allowed":
+                out[key] = validate_allowed_models(value)
+            else:
+                out[key] = list(value) if isinstance(value, list) else [value]
         else:  # pragma: no cover - defaults are fully typed
             out[key] = value
     return out
@@ -318,6 +421,8 @@ def validate_group_update(
             except Exception as exc:
                 raise ConfigError(f"unknown timezone: {name}") from exc
         return name
+    if group == "providers":
+        return validate_providers(value)
     if not isinstance(value, dict):
         raise ConfigError(f"configuration key {group} must be a mapping")
     current = config.get(group)

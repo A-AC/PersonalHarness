@@ -563,6 +563,42 @@ def cmd_config(args: argparse.Namespace) -> None:
     print(json.dumps(out.get("config", {}), indent=2, default=str))
 
 
+def cmd_models(args: argparse.Namespace) -> None:
+    client = Client(_base_url(args), _token(args))
+    if args.set:
+        body: dict = {"name": args.set}
+        if args.provider:
+            body["provider"] = args.provider
+        out = client.call("POST", "/api/model", body)
+        print(json.dumps(out, indent=2, default=str))
+        return
+
+    out = client.call("GET", "/api/models")
+    current = out.get("current") or {}
+    print("== model ==")
+    print(
+        f"  {current.get('name') or '-'}  "
+        f"provider={current.get('provider') or '-'}  "
+        f"context_window={current.get('context_window') or 0}"
+    )
+    print("== providers ==")
+    for provider in out.get("providers", []):
+        builtin = " (built-in)" if provider.get("builtin") else ""
+        reachable = "reachable" if provider.get("reachable") else "unreachable"
+        print(
+            f"  {provider.get('id') or '-'}{builtin}  "
+            f"base_url={provider.get('base_url') or '-'}  {reachable}"
+        )
+        if provider.get("error"):
+            print(f"    error: {provider['error']}")
+        for model in provider.get("models", []):
+            marker = "*" if model.get("current") else " "
+            print(
+                f"    {marker} {model.get('name') or '-'}  "
+                f"ctx {model.get('context_window') or 0}"
+            )
+
+
 def cmd_eval(args: argparse.Namespace) -> None:
     """Run scenarios in-process; never touches the deployed data directory."""
     from .evaluation.cli import cmd_eval as run_eval
@@ -722,6 +758,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("config", help="show the effective configuration")
     common(p); p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser("models", help="list models or switch the active model")
+    common(p)
+    p.add_argument("--set", metavar="NAME", default=None,
+                   help="switch to this model name")
+    p.add_argument("--provider", metavar="ID", default=None,
+                   help="select the provider for --set")
+    p.set_defaults(func=cmd_models)
 
     p = sub.add_parser(
         "eval",

@@ -23,10 +23,12 @@ class BlockingModel(ScriptedModel):
         self.started = started
         self.release = release
 
-    def chat(self, messages, tools, *, max_tokens=None):
+    def chat(self, messages, tools, *, max_tokens=None, **kwargs):
         self.started.set()
         self.release.wait(10)
-        return super().chat(messages, tools, max_tokens=max_tokens)
+        return super().chat(
+            messages, tools, max_tokens=max_tokens, **kwargs
+        )
 
 
 def test_slow_message_does_not_block_health(make_app):

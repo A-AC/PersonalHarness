@@ -27,6 +27,7 @@ from .db import SCHEMA_VERSION
 from .inbox import InboxError, InboxTooLarge
 from .memory import KINDS as MEMORY_KINDS
 from .modules.types import ModuleBinding
+from .providers import ModelSelectionError, configured_provider_id
 from .tools import ToolError
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -278,6 +279,13 @@ class Server:
                 "modules": len([m for m in modules if m.kind != "skill"]),
             },
             "working_task": working,
+            "model": {
+                "provider": configured_provider_id(app.config),
+                "name": app.config.get("model.name"),
+                "context_window": int(
+                    app.config.get("model.context_window", 0) or 0
+                ),
+            },
             "persona": app.config.get("persona", {}),
             "domains": [
                 {"id": d["id"], "name": d["name"], "status": d["status"]}
@@ -418,6 +426,8 @@ class Server:
             meta = util.loads(item.pop("meta", None) or "{}", {})
             item["toolset"] = meta.get("toolset")
             item["tainted_sources"] = meta.get("tainted_sources", [])
+            item["model"] = meta.get("model")
+            item["provider"] = meta.get("provider")
             # The full model request is the persisted transcript: system
             # prompt, user turn, assistant/tool turns, and tool results. The
             # UI shows it verbatim instead of an abstracted summary.
@@ -1250,8 +1260,12 @@ class Server:
                 for m in app.modules.all()
             ],
             "model": {
+                "provider": configured_provider_id(app.config),
                 "base_url": app.config.get("model.base_url"),
                 "name": app.config.get("model.name"),
+                "context_window": int(
+                    app.config.get("model.context_window", 0) or 0
+                ),
             },
             "now": util.iso(),
             "system_timezone": util.system_tz_name(),
@@ -1301,6 +1315,26 @@ class Server:
         if not self._authorized(request):
             return _err("unauthorized", 401)
         return _json(await run_in_threadpool(self.app.model.probe))
+
+    async def models_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        return _json(await run_in_threadpool(self.app.model_catalogue))
+
+    async def model_set(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        body = await self._body(request)
+        provider = str(body.get("provider") or "").strip() or None
+        try:
+            result = await run_in_threadpool(
+                self.app.set_model, str(body.get("name") or ""), provider
+            )
+        except ModelSelectionError as exc:
+            return _err(str(exc), exc.status)
+        except (ConfigError, OSError, ValueError, TypeError) as exc:
+            return _err(f"rejected: {exc}", 400)
+        return _json(result)
 
     # -- config / maintenance -------------------------------------------------------
 
@@ -1431,6 +1465,8 @@ class Server:
                   methods=["POST"]),
             Route("/api/system", self.system_overview, methods=["GET"]),
             Route("/api/endpoint-probe", self.endpoint_probe, methods=["GET"]),
+            Route("/api/models", self.models_list, methods=["GET"]),
+            Route("/api/model", self.model_set, methods=["POST"]),
             Route("/api/config", self.config_get, methods=["GET"]),
             Route("/api/config", self.config_update, methods=["POST"]),
             Route("/api/backup", self.backup, methods=["POST"]),

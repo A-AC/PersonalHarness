@@ -1,7 +1,7 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phases 0-6 and 8 complete in code; Phase 7 waits on LaYa; Phases 9-13 proposed; Phase 8 staging and live-model runs pending)
-Last updated: 2026-11-15
+Status: in progress (Phases 0-6 and 8 complete; 9A implemented; Phase 7 waits on LaYa; 9B and Phases 10-13 proposed)
+Last updated: 2026-11-16
 Scope: capability modules (skills + MCP servers), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture, approvals,
 model selection/routing, domains as work environments, install/setup, multi-user.
@@ -1068,7 +1068,20 @@ Decisions to test:
 
 ### Phase 9 - Provider, model selection, and model router
 
-**Status:** proposed.
+**Status:** 9A implemented (2026-11-16); 9B proposed.
+
+**Implementation notes (9A).**
+
+- Provider records are configured under `providers`, with a synthesized
+  built-in `default` provider for existing single-endpoint configurations.
+- Model/provider selection is explicit and has no fallback.
+- Config loading validates `providers` records and the `model.allowed` list.
+- The catalogue and selection API expose provider reachability, current model,
+  and configured context window through `GET /api/models` and `POST /api/model`.
+- Runs record `model` and `provider`; each loop pins its snapshot, while a
+  resume after an explicit switch records the change with `source: resume`.
+- The header picker and Settings card show provider reachability, model state,
+  and context window and can apply a selection without a restart.
 
 **9A - Change Model setting**
 
@@ -1698,6 +1711,7 @@ automation.fired / automation.disabled
 guard.scanned / guard.verdict / guard.unavailable
 approval.edited / approval.revised / approval.superseded
 memory.refused / module.created / router.escalated
+model.changed
 domain.entered / domain.corrected / domain.suggested
 ```
 
@@ -1888,6 +1902,10 @@ log before starting the next one.
 | 2026-11-15 | Add a capability track and gate the real-use domain cycle on it | Domains need real tools to be judged |
 | 2026-11-15 | `update_task_notes` is not treated as a side effect under taint | Per-task scratch; escalation would cause approval spam |
 | 2026-11-15 | 12A is Docker-first; native installers are optional | The deployed form is a container on Ares |
+| 2026-11-16 | Synthesize the built-in `default` provider from `model.*`; additional providers are opt-in through `model.provider` | Existing single-endpoint configs keep working while multi-provider selection remains explicit |
+| 2026-11-16 | Pin a run's model/provider snapshot for the whole loop invocation; a resume after a switch records `model.changed` with `source: resume` | A run in flight stays reproducible while a later resumption follows the newly selected model |
+| 2026-11-16 | An unreachable provider may accept only a name named by a configured allowlist | Reachability cannot be verified, so the static allowlist is the only bounded authorization |
+| 2026-11-16 | Use the dedicated `POST /api/model` for switching rather than making the `model` config group editable | Selection needs validation, attribution, and an explicit no-fallback contract |
 
 ---
 
