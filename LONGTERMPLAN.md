@@ -1,9 +1,10 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phase 5 complete)
+Status: in progress (Phases 0-6 complete; Phase 7 waits on LaYa; Phases 8-13 proposed)
 Last updated: 2026-11-15
 Scope: capability modules (skills + MCP servers), memory lifetime, autonomy,
-sub-agents, prompt-injection defence, UI information architecture.
+sub-agents, prompt-injection defence, UI information architecture, approvals,
+model selection/routing, domains as work environments, install/setup, multi-user.
 
 Revision 2026-11-15: every add-on capability is a generic MCP module. The
 separate `web` module kind, the `web.*` config group, and the harness-side
@@ -12,7 +13,15 @@ self-contained MCP servers registered through the MCP manifest. Phase 1 below
 records the original design and is superseded where it names a web module or
 `web.*` configuration.
 
-This document is the working plan. Each phase is one merge/commit unless a
+Revision 2026-11-15 (b): added Phases 8-13 after reviewing the harness code:
+approval rework and MCP/taint fixes (8), model selection and router (9),
+domains as work environments (10), UI overhaul (11), install/reset/MCP setup UI
+(12), and multi-user (13). The injection guard stays Phase 7 and still waits on
+LaYa. Phase 6 is complete; the Phase 5 status line above was stale.
+
+This document is the working plan. Section 7.7 describes the session and
+deployment workflow (Claude Code on Windows, one session per phase, deployed to
+Ares in Docker). Each phase is one merge/commit unless a
 phase is explicitly split. Keeping the deterministic test suite green is a
 precondition for every phase, not a follow-up task.
 
@@ -41,6 +50,11 @@ precondition for every phase, not a follow-up task.
 8. **The UI explains the system.** Modules, skills, memories (including
    archived), automations, sub-agent trees, and guard verdicts are visible
    and controllable.
+9. **Domains are work environments.** A domain bundles memories, skills,
+   instructions, and exclusive tools; entering one is reliable, visible, and
+   correctable, and never causes the agent to forget the user.
+10. **Approvals feel conversational.** The user can approve, reject, give
+    feedback, or edit a proposed action without restarting the request.
 
 ---
 
@@ -258,12 +272,37 @@ miss and silently loses capabilities on a restore.
 | 5 | Inbox, automations, self-scheduling | 1, 3, 4 | one |
 | 6 | UI information architecture | all above | one |
 | 7 | Injection guard (LaYa) | 1, 5, 6 | one |
+| 8 | Deployment safety, approval rework, MCP read-risk, taint gaps, web hardening | 1, 5 | four sessions (8.0, 8A, 8B-1, 8B-2) |
+| 9 | Model selection and router | 0 | two (9A, 9B) |
+| 10 | Domains as work environments | 3, 6 | eight sessions (10A-10D, 10E-1, 10E-2, 10F, 10G) |
+| 11 | UI overhaul | 8, 10 | three sessions (11A-11C) |
+| 12 | Install, reset, doctor, MCP setup UI | 1, 6 | two (12A, 12B) |
+| 13 | Multi-user and shared spaces | all above | four sessions (13A-13D) |
+| C | Capability track (new MCP servers, parallel) | 8.1, 12B | one session per server |
 
 Parallelism: Phase 3 can run any time after Phase 0 and is a good early win.
 Phase 6 panels are added incrementally as phases land; the phase-6 commit is
 the navigation and information-architecture pass.
 
-Ordering rationale:
+### 5.1 Recommended order after Phase 6
+
+| Order | Session(s) | Why now |
+| --- | --- | --- |
+| 1 | 8.0 deployment safety and staging | Every later phase migrates real data on Ares; backups, a staging instance, and a runbook come first |
+| 2 | 8.2 memory-write taint | Real security gap, tiny change |
+| 3 | 8A (8.1 per-tool MCP risk, 8.3 reject repro, 8.4 web hardening) | Small, independent, user-visible |
+| 4 | 8B-1 then 8B-2 (approval rework) | Biggest UX win; unblocks "edit requests" |
+| 5 | 9A Change Model | Small; needed by evals and the router |
+| 6 | 12B MCP setup UI, then the first capability-track servers | Domains only prove themselves with real tools; adding a tool must stop requiring file edits |
+| 7 | 10A-10D (baseline, routing evidence, entry, soft memory) | The core idea; now has tools to work with |
+| 8 | 10E-1, 10E-2 (visibility and correction loop) | Starts producing labelled real-use data |
+| 9 | 12A install, reset, doctor | Makes testing from zero routine |
+| 10 | 11A-11C UI overhaul | Easier once approvals, settings schema, and domain cards exist |
+| 11 | Real-use cycle on Ares, then 10F-10G and 9B (shadow -> enable) | Need real data; not session-completable |
+| 12 | 13A-13D multi-user | Largest; prep migration earlier |
+| 13 | Phase 7 guard | When LaYa is online |
+
+Ordering rationale (original):
 
 - Modules before everything: every later feature consumes the registry.
 - MCP before skills: it forces the hard parts (dynamic discovery, health,
@@ -736,6 +775,8 @@ sub-agent work without reading the source.
 
 ### Phase 7 - Injection guard with the LaYa CPU model
 
+**Status:** pending (LaYa is not online yet).
+
 **Goal:** add a classifier layer on top of the trust policy when LaYa is
 online. The system must be fully functional and safe before this phase.
 
@@ -790,7 +831,819 @@ guard:
 **Exit criteria:** LaYa can be enabled with one config change; disabling it
 restores exactly the Phase 6 behaviour.
 
+**Integration points prepared by Phase 8:** the per-call nonce envelope around
+untrusted tool output (8.4), trusted-annotation handling (8.1), and the memory-write
+taint rule (8.2). Phase 10F's model routing never sees untrusted text, so the guard
+need not cover it.
+
 **Commit:** `Phase 7: optional LaYa-backed injection classification on top of trust policy`
+
+---
+
+### Findings that motivate Phases 8-13
+
+Verified in the code of the 2026-11-15 ZIP:
+
+- **MCP risk is per module, not per tool.** `modules/mcp.py::_module_tools`
+  applies one `risk`/`read_only`/`side_effects` to every tool of a server. That
+  is why calendar reads need approval: the server also has write tools, so the
+  module cannot be `autoapprove`/`read_only`.
+- **Non-decision replies are rejected, not used.** While an approval is pending,
+  anything that is not a clear yes/no gets "I did not apply that reply..."
+  (`runtime._ask_which_approval`). A natural "make it 4pm" is a dead end, which
+  is most of the "clumsy" feeling. Only skills have in-place refinement.
+- **Reject re-enters the loop with a denied tool result.** The model can answer
+  and then re-propose the same call, producing a second, identical "I want to
+  run X" note. This is the leading suspect for the repeated message (see 8.3).
+- **Taint does not cover memory writes.** `remember`/`update_memory`/
+  `retract_memory` have no `side_effects` flag, so after a web result they run
+  unescalated. Injected text can become durable memory. Skills are guarded;
+  memory is not.
+- **Model name is config-only.** `model.name` lives in `config.yaml`; changing
+  it is documented as needing a restart. `ModelClient.probe()` already lists
+  models, so a dropdown has its data source.
+
+---
+
+### Phase 8 - Approval rework and the quick-fix batch
+
+**Status:** proposed.
+
+Split into two commits. 8A is small and independent; 8B changes the approval
+interaction model.
+
+#### 8.0 - Deployment safety and staging (own session, do first)
+
+**Goal:** make every later phase safe to deploy to Ares, where real memory and
+history live. Nothing here changes agent behaviour.
+
+- **Pre-migration backup.** When startup finds a schema version lower than the
+  code's, write `backups/pre-migrate-v<old>-to-v<new>-<ts>.zip` first and abort
+  with a clear message if the backup fails. Never migrate unbacked-up data.
+- **Version visibility.** Embed version and git sha in the image (build arg) and
+  report `{version, git_sha, schema_version}` on the authenticated `/api/system`
+  and in `harness status`. `/health` stays unauthenticated and minimal.
+- **Staging instance.** `docker-compose.stage.yml` (or documented `-p` project
+  flags): separate volume, separate `HARNESS_PORT` (not 8080, which SearXNG
+  uses), separate token, same model endpoint. One writer per data directory is
+  preserved. Used to try a phase, to test a migration on a restored production
+  backup, and to reinstall from zero.
+- **Runbook** `docs/DEPLOY.md`: build, back up, deploy to staging, run
+  `scripts/container_check.py`, run live evals, promote, roll back (restore the
+  backup and run the previous image tag; tag images per phase).
+- **Portability guards.** `.gitattributes` forcing LF for shell scripts and the
+  Dockerfile (a CRLF script authored on Windows fails in the Linux container);
+  a cheap test that fails if a shell script contains `\r`.
+- **Container test target.** A Docker build target (or documented command) that
+  runs the deterministic suite inside the image, so "green on Windows" is
+  confirmed on Linux before promotion.
+
+**Tests:** migration writes a pre-migrate backup and aborts when the backup
+fails; `/api/system` reports version and schema; the LF test; the suite passes
+inside the container target.
+
+**Exit criteria:** the runbook exists and has been followed once end to end on
+staging; a version bump leaves a restorable backup.
+
+**Commit:** `Phase 8.0: pre-migration backups, version reporting, staging, and deploy runbook`
+
+#### 8A - Fixes (one commit)
+
+**8.1 Per-tool risk for MCP (calendar reads without approval)**
+
+Hypothesis: honouring the MCP-standard `annotations.readOnlyHint` per tool
+removes the approval friction without weakening the trust model.
+
+- Servers declare `annotations: {readOnlyHint: true}` on read tools
+  (calendar: `list_calendars`, `list_events`, `get_event`; web: `web_search`).
+- `_module_tools` reads the annotation per tool and sets `read_only=True`,
+  `side_effects=False`, `risk=low` for those tools only.
+- **Annotations are claims, not facts.** Honour them only when the manifest has
+  `trust_annotations: true` (set for the bundled web/calendar servers by their
+  templates). A third-party server cannot downgrade its own write tools.
+- Manifest/UI per-tool override: `tool_risk: {name: low|confirm}` so the user
+  can correct a server.
+- Keep `untrusted_output=True` on reads: a calendar event body is attacker
+  controllable (invites). Reads stay low-risk; the run becomes tainted; later
+  writes still escalate. This preserves invariant 4.
+- Test first: fake MCP server with one annotated read and one write; read runs
+  without approval, write needs it; an un-trusted server's annotation is
+  ignored; calendar read taints, subsequent `calendar_create_event` is confirm.
+
+**8.2 Close the memory-write taint gap (security, do before anything else)**
+
+- Mark `remember`, `update_memory`, and `retract_memory` as `side_effects=True`
+  (they change durable cross-run state; a retract could erase real memory on
+  injected instruction). Leave `update_task_notes` alone: it is per-task scratch
+  text, and escalating it would produce approval spam after every web search.
+- Policy experiment, pick by test: (a) tainted run -> memory write becomes
+  confirm-risk with the untrusted origin named, or (b) tainted run -> memory
+  write refused like skills, plus `memory.refused` event. Recommend (a) first
+  because "remember this from the page I just read" is a legitimate use.
+- Provenance already records run/task; add `tainted: true` to the memory row's
+  provenance so the UI and consolidation can show/ignore it.
+- Test first: scripted run where a web result says "remember X"; assert no
+  memory row appears without an approval that names the URL.
+
+**8.3 Repeated message on reject**
+
+Do not fix until reproduced. Two hypotheses, one test discriminates them:
+
+- H1: the model re-proposes the same tool call after the denial, creating a
+  second approval with an identical note.
+- H2: the same event emits text from two places (approval note, park note,
+  model reply echoing the rejection).
+- Test first: scripted model, reject via (a) the Approvals button and (b) the
+  chat quick path ("no"); count `messages` rows and approvals created after the
+  reject. Whichever fails is the bug.
+- Likely fix for H1 regardless: a deterministic **denial memory** per run. After
+  a rejection, the same `(tool, args-hash)` in that run returns `denied`
+  immediately without creating an approval. The model is not trusted to obey
+  "do not try again".
+
+**8.4 Web MCP injection hardening**
+
+Server-side, in `modules/web/server.py`, all deterministic:
+
+1. Normalise every string: NFKC, strip control, zero-width and bidi override
+   characters, strip HTML tags, collapse whitespace, then clip.
+2. Only `http`/`https` result URLs; drop `javascript:`, `data:`, `file:`;
+   optionally drop private-range hosts and userinfo URLs.
+3. Heuristic `flags` per result (instruction-override phrases, role/tool
+   spoofing like "system:" or "tool_call", "ignore previous", base64 blobs,
+   long URLs with query payloads). Flags are labels only, never instructions;
+   flagged snippets are replaced by a short placeholder plus the title/URL.
+4. Output envelope: results come back as data with a per-call random nonce
+   (`<web_results nonce="...">`) and the explicit statement that the content is
+   not instructions. The nonce stops content from forging the closing tag.
+5. Query hygiene: cap query length (about 200 chars). A tainted run could try to
+   smuggle memory content out through the search query (exfiltration channel);
+   the cap bounds it. Experiment: also log queries in the event stream.
+6. Result count and per-result size already bounded; keep.
+
+Harness-side (generic, benefits every MCP): wrap all `untrusted_output` tool
+results in the same nonce delimiter before they enter the transcript
+("spotlighting"). Guard (Phase 7) later plugs into the same seam.
+
+- Test first: stub SearXNG returning a corpus of payloads (override phrases,
+  hidden unicode, markdown image exfil `![](http://x/?q=...)`, fake tool-call
+  JSON). Assert output is sanitised and flagged; assert no tool call proceeds
+  without approval. Live scenario `i_live_hostile_web` run against both
+  `qwen3.5-9b` and `minicpm5-2B`, measuring `flags_untrusted_input` (the 2B model
+  already failed this criterion on hostile inbox, so expect to learn something).
+
+#### 8B - Approval interaction rework (two sessions: 8B-1 backend and decision model; 8B-2 cards, edit form, and tray in the UI)
+
+Goal: approving, rejecting, and *changing* an action feels like a conversation,
+not a form.
+
+Decisions to test:
+
+1. **One decision model, four outcomes.** Approve, Reject, Reject with feedback,
+   Edit. "Reject with feedback" is the general mechanism; "Edit" is its
+   structured cousin.
+2. **Non-decision replies become feedback.** While one approval is pending, a
+   reply that is not clearly yes/no is treated as revision feedback: the
+   approval closes as `revised`, the model receives
+   `{status: "revision_requested", feedback: <text>}`, and re-proposes. This
+   replaces the "I did not apply that reply" dead end.
+   - Risk: a genuinely unrelated message gets swallowed. Experiment: use the
+     existing resume-candidate scoring (keyword overlap) to tell "feedback on
+     this" from "new topic"; unrelated text starts a new task and leaves the
+     approval pending.
+3. **Revision chain, not in-place mutation.** Skills today refine the pending
+   approval in place. For general tools, test creating a new approval with
+   `supersedes_id` and marking the old one `superseded`. This keeps the
+   "approvals are immutable" invariant and gives an audit trail. Compare with
+   in-place on complexity before choosing; if in-place wins, generalise the
+   existing skill path instead.
+4. **Direct user edit.** The approval card shows arguments as a form generated
+   from the tool's JSON schema. The user edits fields and approves in one step;
+   the harness re-validates against the schema, records the diff
+   (`approval.edited`), and executes the *edited* arguments. The model sees
+   what actually ran.
+5. **Cards, not prose notes.** Replace "reply approve/reject, or use the
+   Approvals panel" text notes with an inline chat card: summary line, key
+   arguments, source/taint reason, buttons (Approve, Edit, Reject, optional
+   reason box). Keyboard shortcuts. The text reply path keeps working.
+6. **Human summaries.** Optional per-tool `summary_template`
+   (calendar: "Create 'Dentist' Tue 16:00-17:00") so cards read naturally and
+   fall back to the clipped JSON when absent.
+7. **"Always allow" with limits.** Approve-and-remember writes a
+   `risk_override` for that tool, but only for tools without `side_effects` in
+   tainted context; a tainted run still escalates. Show and revoke these in
+   the UI.
+8. **Batch and expiry.** Multiple pending approvals listed in one tray with
+   approve-all-safe; reminders already exist.
+
+- Test first: a scripted multi-turn scenario per outcome; edit changes executed
+  arguments exactly; superseded approvals can never execute; free-text feedback
+  resumes the same run once; unrelated message does not consume the approval.
+
+---
+
+### Phase 9 - Provider, model selection, and model router
+
+**Status:** proposed.
+
+**9A - Change Model setting**
+
+- `GET /api/models`: advertised models from `models_path`, intersected with an
+  optional `model.allowed: []` allowlist (empty = everything advertised).
+- `POST /api/model {name}`: validates against that list, writes config, applies
+  without a restart (ModelClient reads `model.name` per call; verify by test).
+- Record `model` and `provider` on every run (`runs.meta`) so evals, history,
+  and the router can attribute behaviour.
+- Introduce `providers:` as a list `[{id, base_url, api_key_env, models}]` with
+  `model.provider` + `model.name` selecting one. Single provider stays the
+  default so existing configs keep working. "Never silently fall back" stays:
+  switching is always an explicit user or router decision, recorded.
+- UI: dropdown in the header and in Settings; shows reachability and context
+  window per model.
+- Test first: switch model mid-session; a run in flight keeps its snapshot
+  model; invalid names refused; unreachable provider reports cleanly.
+
+**9B - Model router (shadow mode first)**
+
+Hypothesis: a deterministic router can send trusted, short, low-risk requests
+to the fast model with no loss in correctness and a clear latency win.
+
+Rules, in order (all deterministic, no model call):
+
+1. Quality path always for: inbox/automation origin, tainted runs, prompts that
+   mention credentials/secrets, anything with a confirm-risk tool in the
+   snapshot that the message plausibly invokes, multi-action instructions.
+2. Fast path candidates: user-origin, trusted, short, resolves to read-only or
+   memory/schedule-lookup tools.
+3. **Escalate mid-run.** If a fast-path run becomes tainted, proposes a
+   confirm-risk tool, or hits a malformed-output retry, re-run that turn on the
+   quality model with the same transcript (OpenAI-format transcripts are
+   portable). Record `router.escalated` with the reason.
+
+Experiments, in this order. The implementation session delivers shadow mode,
+the logging, and the comparison report; the measurements below run on Ares
+after deployment, and their results are recorded before enabling the router:
+
+- **Shadow mode:** log what the router *would* choose for every real request for
+  a week; no behaviour change. Measure the fast-path share.
+- **Swap cost:** if both models are not resident on the P100s, a model swap may
+  cost more than it saves. Measure load time first; if it dominates, the router
+  is only worth it with both resident.
+- **Eval replay:** run the behavior + holdout suites with the router on, compare
+  against single-model baselines with the existing `--aggregate` tooling.
+- Only then enable it, per-domain or globally, with a UI toggle and a visible
+  "answered by" label.
+
+---
+
+### Phase 10 - Domains as work environments (routing, entry, memory, feedback)
+
+**Status:** proposed. Sub-phases 10A-10G, one commit each, in order. Every sub-phase
+is a hypothesis plus an experiment; quoted targets are initial and expected to be
+revised after each test/refine cycle.
+
+**Owner decisions (2026-11-15):** real domains will arrive over time (Health first;
+later home automation, language learning, and others), so the test corpus uses
+placeholders. General holds no separate memory. Domains own instructions,
+capabilities, tools, skills, and context. A visible "entering <domain>" status
+line is wanted.
+
+#### Goal
+
+A domain is not a project folder. It is a **work environment**: when the agent
+is "in" Health it has that domain's memories, skills, instructions, and
+exclusive tools, and it behaves as one continuous entity that also remembers
+who the user is everywhere else.
+
+Two things must both be true:
+
+1. **Entering is reliable.** Work reaches the right domain without the user
+   naming it, and a wrong guess is cheap to correct.
+2. **Being in a domain adds capability without causing amnesia.** Tools and
+   skills may be exclusive; what the agent knows about the user must not be.
+
+#### Findings this phase fixes (verified in code)
+
+| # | Finding | Where |
+| --- | --- | --- |
+| F1 | Routing is lexical overlap on name+description with no stemming. The 2.0 threshold equals name (1.5) + one description word (0.5), so in practice the message must contain the domain's literal name. Simulated: "nutritional info for chicken tikka masala", "calories in a big mac", "protein in greek yogurt" all route to General; only "my health goals" routes to Health. | `store.Domains.route` |
+| F2 | The model fallback is weak: the prompt lists `Name (id)` without descriptions, and the rule only says to call `use_domain` when the domain "is wrong". | `context.py` state block |
+| F3 | `use_domain` recomputes the toolset but the context is built once in `start_run`. Memories, skills, and the "Active domain" line stay stale for the rest of the run. | `runtime.start_run` is the only `context.build` call |
+| F4 | Memory is a hard partition: a sibling domain's memories are invisible even on an exact keyword hit. A misrouted request loses what the agent knows. | `memory._scope_visible` |
+| F5 | A domain-bound tool is invisible elsewhere and nothing tells the model it exists. | `ToolRegistry.schemas_for` exclusions are recorded, not disclosed |
+| F6 | No feedback loop: a wrong route leaves no labelled trace, so the router cannot be measured or tuned from real use. | - |
+
+#### Design principles
+
+1. **Exclusive tools and skills, soft memory.** Exclusivity protects the schema
+   budget and limits what can run; applied to memory it only causes amnesia.
+2. **Deterministic first, model second.** Evidence-based routing stays the
+   backbone. A model tie-break is added in shadow mode and never for untrusted
+   text.
+3. **Entering a domain is one operation** that updates context, tools, and
+   state together and records why.
+4. **Every correction is data.** A user moving a task becomes a labelled eval
+   case and a keyword suggestion.
+5. **Domains never widen permissions.** Unchanged invariant. Risk classes,
+   approvals, and taint rules ignore the domain.
+
+#### Invariants checked
+
+- Invariant 4 (data, not instructions): domain `instructions` are user-written;
+  the model may only propose a change through an approval-gated tool, never in a
+  tainted run, and never writes one directly.
+- Invariant 6: every new inclusion is a recorded context source
+  (`domain:hint`, `domain:briefing`, `memory:cross:<domain>`).
+- Invariant 9: all new tests are deterministic; the model tie-break uses a
+  scripted classifier.
+- Invariant 10: UI stays zero-build.
+- Taint: `use_domain` may run in a tainted run (injected text could ask for a
+  domain that exposes more tools). That is acceptable only because exposure
+  never changes risk: every side-effecting tool in the new domain still
+  escalates. This must be tested (10C).
+
+#### Schema (v8, additive, one migration)
+
+```sql
+ALTER TABLE domains ADD COLUMN keywords     TEXT NOT NULL DEFAULT '[]';  -- JSON list
+ALTER TABLE domains ADD COLUMN examples     TEXT NOT NULL DEFAULT '[]';  -- JSON list of phrases
+ALTER TABLE domains ADD COLUMN instructions TEXT NOT NULL DEFAULT '';    -- user-authored, bounded
+
+CREATE TABLE routing_feedback (
+  id TEXT PRIMARY KEY,
+  task_id TEXT,
+  message_text TEXT NOT NULL,
+  routed_domain TEXT NOT NULL,
+  correct_domain TEXT NOT NULL,
+  evidence TEXT NOT NULL DEFAULT '{}',   -- routing breakdown at the time
+  source TEXT NOT NULL,                  -- ui | tool | cli
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE domain_suggestions (
+  id TEXT PRIMARY KEY,
+  terms TEXT NOT NULL,                   -- JSON list
+  task_ids TEXT NOT NULL,                -- JSON list
+  status TEXT NOT NULL CHECK(status IN ('open','created','dismissed')),
+  created_at TEXT NOT NULL
+);
+```
+
+Coordination note: Phase 13 (multi-user) also wants an additive prep migration
+(`user_id` columns). Land them in the same version bump or sequence them; do not
+interleave two migrations in one commit.
+
+#### Config additions
+
+```yaml
+domains:
+  routing_threshold: 2.0          # retune from the 10A sweep
+  ambiguity_margin: 0.75
+  weights:
+    name: 1.5
+    keyword: 1.0
+    example: 0.75
+    description: 0.5
+    learned_cap: 2.0              # cap on memory/skill/task vocabulary evidence
+  stemming: true
+  hint_min_score: 0.5             # below threshold but worth hinting to the model
+  briefing_chars: 1800
+  instructions_max_chars: 1200
+  model_routing: off              # off | shadow | on (10F)
+  model_routing_timeout_s: 3.0
+  status_line: true               # visible "Entering <domain>" chip
+  suggestions:
+    enabled: true
+    min_tasks: 6
+    window_days: 30
+memory:
+  cross_domain: boost             # off | boost | search; chosen by the 10D experiment
+  cross_domain_max: 3
+  core_profile_chars: 1200
+```
+
+---
+
+#### 10A - Baseline: measure routing and recall before changing anything
+
+**Goal:** make the problem a number.
+
+**Scope**
+- New eval suites `eval/scenarios/k_routing.yaml` and `k_memory_recall.yaml`.
+  - Routing corpus: about 40 labelled messages across 4-5 domains (Health,
+    Home automation, Language learning, Clothing, General; placeholders until
+    the real domains exist), including the nutrition cases, composite messages
+    such as "what should I wear given the weather",
+    paraphrases without the domain name, ambiguous messages, and genuine
+    General chatter.
+  - Memory corpus: facts stored in one domain, asked about from another domain
+    and from General, with paraphrases.
+- Assertion kind for routing (`routing.domain`) reading the `domain.routed`
+  event, if the evaluation package lacks one.
+- Metrics: accuracy, General-fallback rate, **false-positive rate** (routed to
+  the wrong specific domain; worse than General), and per-domain confusion.
+  Memory: recall@k and context-budget share.
+- Sweep script: run the router over the corpus for a grid of thresholds and
+  margins and write a report.
+
+**Tests:** corpus loads; the baseline report is deterministic.
+
+**Experiment:** record the current numbers. Prediction: near-zero accuracy on
+messages that lack the literal domain name.
+
+**Exit criteria:** baseline report committed under `eval/results/`; no
+behaviour change.
+
+**Commit:** `Phase 10A: routing and cross-domain recall baseline suites`
+
+---
+
+#### 10B - Routing evidence v2 (deterministic)
+
+**Hypothesis:** richer evidence plus stemming moves routing accuracy from near
+zero to most of the corpus without adding model calls.
+
+**Scope**
+- Schema v8 domain columns (`keywords`, `examples`, `instructions`).
+- `util.stem()`: a small deterministic suffix stripper (plurals, -ing, -ed,
+  -al/-ional to the root so "nutritional" matches "nutrition"). Applied to both
+  message and domain vocabulary. Unit-tested with a fixed table.
+- `Domains.route` scoring terms: name, user keywords, example phrases,
+  description (capped), plus **learned vocabulary**:
+  - `MemoryManager.domain_affinity(text)`: FTS over active, non-archived
+    memories scoped to each domain, plus bound skills and past task objectives,
+    normalised and capped by `weights.learned_cap`. A domain that already holds
+    "calories" in its memories wins without anyone listing the word.
+- General stays a fallback (the existing 0.5x factor), but a clear single
+  winner above threshold always beats it.
+- The `domain.routed` event carries a **per-term breakdown** (which words
+  matched which signal) so every decision is explainable.
+- `create_domain` requires `keywords` and `examples` (the model proposes, the
+  approval shows them); the UI/API edit them for existing domains. Empty lists
+  remain valid for old rows.
+- Retune `routing_threshold` and `ambiguity_margin` from the 10A sweep.
+
+**Tests**
+- The nutrition cases route to Health with a Health domain that has sensible
+  keywords; with only name+description they route better than baseline.
+- Learned vocabulary: a domain with relevant memories wins with no keywords.
+- No cross-domain false positives on the General chatter set.
+- Stemming table; v7 -> v8 migration opens an existing database.
+- Routing never creates a domain (existing guarantee).
+
+**Targets (initial):** routing accuracy >= 85% on the corpus, false-positive
+rate <= 5%.
+
+**Commit:** `Phase 10B: routing evidence v2 with keywords, stemming, and learned vocabulary`
+
+---
+
+#### 10C - Entering a domain: briefing, hints, and tool discovery
+
+**Hypothesis:** if entering a domain delivers its context in the same step,
+the model behaves as if it were "in" the environment.
+
+**Scope**
+- **Domain instructions block:** when a run is in a domain, the context builder
+  adds its `instructions` (bounded by `instructions_max_chars`) as a recorded
+  source. User-authored only.
+- **Domain list with descriptions** in the state block (bounded), replacing
+  `Name (id)`-only lines.
+- **Routing hint:** when routing lands in General but a domain scored between
+  `hint_min_score` and the threshold, add one line: "Possible domain: Health
+  (matched: calories, protein). Call use_domain if the work belongs there."
+  Recorded as `domain:hint`.
+- **`use_domain` returns a briefing:** a bounded result (`briefing_chars`) with
+  the domain description, instructions, its top memories for the task
+  objective, active skill names and one-line descriptions, and the tools that
+  just became available. The toolset recompute already exists.
+  - Experiment: compare (a) briefing inside the tool result against (b)
+    rewriting the system message in the transcript. Prefer (a) first because it
+    works with any chat template and keeps the persisted transcript append-only.
+    Choose by scripted and live scenario results.
+- **Tool discovery line:** when schema selection excludes tools for domain
+  reasons, add one bounded line naming them and their domain: "Tools in other
+  domains: calendar (Planning). use_domain to enter." Names only, no schemas.
+  This is the cheap answer to F5; a full `find_tools` meta-tool stays deferred.
+- **Taint safety:** `use_domain` stays allowed in a tainted run, and a test
+  proves tools exposed by a mid-run switch still escalate side effects.
+- Sub-agents inherit the parent's *current* task domain; a test pins this.
+- **Visible "entering" status line (owner request).** Whenever the active domain
+  changes (routing at task start, `use_domain`, or a user correction) the
+  runtime records a `domain.entered` event and one compact visible status
+  message, for example "Entering Health - matched: calories, protein". General
+  never shows one, a task that stays in its domain shows it once, and
+  `domains.status_line: false` silences it. The UI renders it as a small chip,
+  not a chat bubble.
+- **Two candidates in the hint.** Composite requests ("what should I wear given
+  the weather" touches Clothing and general weather) list up to two possible
+  domains; the briefing for the entered domain may pull the second's top
+  memories through the soft-memory path (10D).
+
+**Tests**
+- After `use_domain`, the next model turn sees the briefing and the new tools;
+  the old domain's tools are gone; `toolset.changed` is recorded.
+- A misrouted request with the hint present: the scripted model calls
+  `use_domain` and then completes with the right memory visible.
+- Tainted run switches domain: side-effecting tools in the new domain still
+  need approval and name the untrusted source.
+- Discovery line is bounded and lists names only.
+- The status line appears once per domain change, never for General, and is silenced by config.
+
+**Commit:** `Phase 10C: domain entry briefing, routing hints, and cross-domain tool discovery`
+
+---
+
+#### 10D - Soft memory and a core profile
+
+**Hypothesis:** letting memory span domains with the current domain boosted
+improves recall without noticeably polluting context. This is the step that
+decides whether the single-entity goal is reachable.
+
+**Scope**
+- `memory.cross_domain`:
+  - `off`: today's behaviour.
+  - `boost`: all active, non-archived memories are eligible; scope priority is
+    current domain > global > other domains. Other-domain memories enter
+    context only above a lexical relevance floor (never as no-hit fillers),
+    capped by `cross_domain_max`, and labelled `from: Health`.
+  - `search`: context stays as today, but `search_knowledge` searches every
+    domain by default and labels the origin.
+- Keep the visibility rule in one place (`_scope_visible`) so Phase 13 can add
+  the per-user filter there. A domain is a relevance boundary, not a security
+  boundary.
+- **Core profile:** pinned `global` memories form an always-on block
+  (`core_profile_chars`), editable in the UI. This is the part that makes the
+  agent know the user in every domain, including General.
+- Memory writes: sharpen the `remember` guidance so facts about the user
+  (preferences, constraints, identity) default to `global`, and domain facts to
+  the domain.
+- Record `memory:cross:<domain>` sources with a reason.
+- **General has no memory silo of its own (owner decision).** General is the
+  unscoped interface: rows scoped to `domain:general` are treated as `global` at
+  read time (no data rewrite), and new memories saved from General default to
+  `global`. Domain-specific memories still surface in General through the soft
+  path when relevant, and global tools (web, weather) stay available inside
+  domains. That is what makes "what should I wear based on the weather" work from
+  General (Clothing memories surface) and from Clothing (the global weather tool
+  is present).
+
+**Experiment:** run `k_memory_recall` in `off`, `search`, and `boost`; compare
+recall@k and context-budget share; choose the default from the numbers.
+
+**Tests**
+- Cross-domain fact recalled from General in `boost`, labelled with its origin.
+- No other-domain filler without a lexical hit.
+- Archived and retracted rows never cross over.
+- Core profile always present, bounded, and recorded as a source.
+- Composite scenario: Clothing memories and a global weather tool combine for one answer, from General and from Clothing.
+- `domain:general` rows are readable as global; new memories from General are saved as global.
+- Consolidation unaffected (ignores archived rows).
+
+**Commit:** `Phase 10D: soft cross-domain memory and an always-on core profile`
+
+---
+
+#### 10E - Routing visibility and the correction loop (two sessions: 10E-1 backend, API, CLI, export; 10E-2 UI)
+
+**Goal:** wrong routes are visible and fixable in one click, and every fix feeds
+the eval suite.
+
+**Scope**
+- Task header: domain chip with a "why" popover (candidates, scores, matched
+  terms, hint shown, model tie-break result if any).
+- `POST /api/tasks/{id}/domain {domain_id, reason}`: moves the task, records
+  `domain.corrected`, writes a `routing_feedback` row with the evidence. A
+  correct move also offers up to three **suggested keywords** (message terms
+  not already in the domain); the user ticks which to add. Nothing is added
+  automatically.
+- `POST /api/domains/route-preview {text}`: returns scores and breakdown with
+  no side effects, for a "test routing" box.
+- Domains panel as an environment card: description, keywords, examples,
+  instructions editor, counts (memories, skills, bound modules, tasks, last
+  used), routing stats (routed here / corrected away / corrected in), archive.
+- CLI/API: `domains --export-feedback` writes `k_routing`-format scenarios from
+  `routing_feedback`, closing the test/refine loop.
+- Core profile editor (pinned global memories) in the Knowledge group.
+- **Per-domain instructions (owner decision: yes).** The environment card edits
+  `instructions`, alongside the domain's memories, skills, module bindings, and
+  tools. The agent may *propose* an instruction change through a confirm-risk
+  `edit_domain` tool (approval shows the full bounded text; the same pattern as
+  skills) and is refused in a tainted run. Only an approved change is written.
+
+**Tests**
+- Correction moves the task and context for the next run, records feedback, and
+  never changes permissions.
+- Export produces scenarios the eval loader accepts.
+- `route-preview` has no side effects (no events, no tasks).
+- API contract tests per new endpoint; panel smoke test.
+
+**Commit:** `Phase 10E: routing visibility, corrections, and domain environment cards`
+
+---
+
+#### 10F - Model-assisted tie-break (shadow first)
+
+**Hypothesis:** when deterministic evidence is weak, one tiny constrained call
+picks better than falling back to General, at acceptable latency.
+
+**Scope**
+- `domains.model_routing: off | shadow | on`.
+- Trigger: best deterministic score below threshold or an ambiguous margin, and
+  at least one non-General active domain.
+- One call, same pattern as the quick-confirm classifier: names, descriptions,
+  and keywords of active domains plus the message; output is one domain id or
+  `general`; small `max_tokens`, no thinking, `model_routing_timeout_s`.
+  Invalid output, timeout, or an unknown id means General (today's behaviour).
+- Uses the fast model when the Phase 9B router exists, otherwise the main model.
+- **Trusted input only.** Inbox and automation text never decides the domain
+  (attacker-controlled text would pick which tools appear); those use the
+  automation's configured domain or deterministic routing.
+- The output is a label, never injected as instructions.
+- `shadow`: record the model's choice on `domain.routed` without acting. Compare
+  with corrections and the 10A corpus.
+
+**Tests:** scripted classifier; invalid/timeout/unknown id -> General; shadow
+never changes the route; untrusted origin never calls the classifier.
+
+**Experiment (post-deploy, on Ares):** run shadow for about a week of real use, then replay on the
+corpus; enable only if it beats deterministic routing on false-positive rate as
+well as accuracy.
+
+**Commit:** `Phase 10F: optional model tie-break for weak domain evidence`
+
+---
+
+#### 10G - Domain suggestions from usage
+
+**Goal:** the creation threshold stays high, but the user is nudged when General
+is clearly hiding a domain.
+
+**Scope**
+- Heartbeat pass (deterministic): over General tasks in `window_days`, find term
+  sets shared by at least `min_tasks` tasks and not covered by any domain.
+- Write a `domain_suggestions` row and one visible note: proposed name, keywords,
+  and the tasks involved, with a create button that opens the domain form
+  pre-filled. **Never auto-creates.** Dismissals are remembered so the same
+  cluster is not re-suggested.
+- Optional: suggest archiving a domain unused for 60 days.
+
+**Tests:** cluster detection on a fixed corpus; dismissed clusters stay
+dismissed; no suggestion when a domain already covers the terms; bounded per tick.
+
+**Commit:** `Phase 10G: usage-based domain suggestions`
+
+---
+
+#### Test/refine cycle after implementation
+
+(Post-deploy work on Ares, not part of any implementation session. It needs at
+least two domain-bound capability-track servers in daily use first.)
+
+After 10G, repeat on real use:
+
+1. Use the harness normally for a week with 3-4 domains and real MCPs.
+2. Correct every wrong route in the UI (feeds `routing_feedback`).
+3. Weekly: export feedback to scenarios, rerun `k_routing` and
+   `k_memory_recall`, and read the confusion table.
+4. Adjust one variable at a time: weights, threshold, `cross_domain` mode,
+   keywords, model tie-break. Record the before/after in the decision log.
+5. Promote any hard-won failure case to the permanent suite.
+
+Initial targets (revise freely): routing accuracy >= 85%, false-positive <= 5%,
+General-fallback only on genuinely domainless messages, cross-domain recall@5 no
+worse than in-domain recall, and added context cost from cross-domain memory
+under 10% of the memory budget.
+
+---
+
+### Phase 11 - UI overhaul (settings, discoverability, approvals)
+
+**Status:** proposed. Three sessions: 11A typed settings schema and generated forms;
+11B navigation regroup plus approval tray and domain cards integration; 11C `app.js`
+ES-module split and per-panel smoke tests (screenshots via Playwright).
+
+Observed from the structure: one 2,000-line `app.js`, config edited as whole
+raw groups, many features reachable only by knowing they exist.
+
+- **Typed settings.** Add schema metadata next to config defaults (type, label,
+  help, range, restart-required). Generate forms from it, with search and
+  "modified from default" markers. Replace raw group editing.
+- **Fewer, clearer destinations:** Chat, Work (tasks + approvals + inbox),
+  Knowledge, Connections (MCP/skills), Settings. Demote read-only diagnostics
+  (events, tools) to a System/Advanced area.
+- **Approvals inline in chat** (8B) and a pending-count badge everywhere.
+- **First-run checklist / health page** ("model reachable, web module
+  configured, calendar connected, backup taken") that doubles as the doctor
+  output from Phase 12.
+- **Zero-build, but modular:** split `app.js` into native ES modules per panel;
+  no bundler, still invariant 10.
+- **Process:** screenshot every panel with Playwright, list hidden or
+  underworked features, then design a pass with the frontend-design skill
+  before touching code. Test first: a smoke test per panel that loads without
+  console errors, and the existing `test_ui_panels` contract tests.
+
+---
+
+### Phase 12 - Install, reset, doctor, and MCP setup UI
+
+**Status:** proposed.
+
+**12A - Docker-first install, reset, and doctor**
+- The deployed form stays a container on Ares; the goal is that setup from zero
+  needs no hand-edited files and no compose file. Document a single
+  `docker run` (image, volume, port, env) as the compose-free path; Compose stays
+  optional.
+- First-run web wizard when no config exists: set the token, enter the model
+  endpoint with a live probe and model pick, timezone, optional modules.
+  `harness init --non-interactive` reads the same values from `HARNESS_*`
+  environment variables so the container entrypoint can bootstrap itself.
+- `harness reset [--keep-config] --yes`: takes a backup first, then wipes. In
+  Docker: `docker compose exec harness python -m harness reset`; on staging,
+  deleting the stage volume is the reset.
+- `harness doctor` (also runs inside the container): Python version, data volume
+  writable by the container user (UID 10001), endpoint reachable *from inside the
+  container*, port in use (8080 collision with SearXNG), writer lock, module
+  health, disk.
+- Optional, low priority: native installers (pipx entry point, systemd unit,
+  Windows task). Windows development already works with `pip install -e`.
+- Test first: scripted smoke (fresh data dir -> init -> start -> `/health` ->
+  one message -> reset) in the Windows session; the same smoke runs in the Linux
+  container target at promotion.
+
+**12B - MCP management UI**
+- Add/edit/remove server forms in Modules: command, args, env names, domains.
+- "Test connection": launch, `initialize` + `tools/list`, show tools,
+  annotations, and the stderr tail, before saving.
+- Per-tool risk table (low/confirm, read-only, side effects) writing
+  `tool_risk` from 8.1.
+- Secret inputs write to the private sidecar; the UI never displays values
+  (invariant 11).
+- Bundled templates for web and calendar render a form from a
+  `config.schema.json` each ships, writing `modules/mcp/<id>.json`.
+- **Decision needed:** a UI that can create stdio servers can launch arbitrary
+  commands for anyone holding the token. Editing `mcp.json` has the same effect
+  today, but a UI widens the exposure. Test two mitigations: command allowlist
+  (`python`, `node`, `npx`, `uvx`, bundled servers) with an explicit override,
+  and a re-confirm step with an `module.created` event.
+
+---
+
+### Phase 13 - Multi-user and shared spaces
+
+**Status:** proposed; do last. Four sessions: 13A prep migration (`user_id` columns, no behaviour
+change); 13B identity, per-user tokens, roles; 13C scopes and SQL-layer isolation with
+the leak scenario; 13D shared spaces and approval ownership.
+
+Do this last; it touches every table. Prepare cheaply earlier.
+
+- **Prep (can ride along with Phase 10):** additive migration adding
+  `user_id TEXT NOT NULL DEFAULT 'owner'` to messages, tasks, memories,
+  domains, schedules, approvals, inbox_events. No behaviour change.
+- **Identity:** `users` and hashed per-user API tokens; roles
+  (owner, member). Channel identities (e.g. a messaging pusher) map to users.
+- **Scopes:** extend memory/domain scope from `global|domain` to
+  `private|space`. A *space* (household) has members; modules and memories can
+  be bound to a space. Home automation = a space-bound MCP module.
+- **Isolation at the SQL layer,** not in prompts: every read in context
+  building, `search_knowledge`, and history search filters by the actor's
+  visible users/spaces.
+- **Approvals belong to the actor.** A roommate's task cannot be approved by
+  you, and a shared-space action may need the module owner's approval.
+- **Trust question to test:** content authored by another user inside a shared
+  space is trusted as a person but is third-party text for the agent; test
+  whether it should taint for side effects.
+- **Concurrency:** the single `RLock` serialises all users on one model
+  (about 27 tok/s on the quality path). Measure queue latency with two active
+  users; the router (9B) is the first mitigation, parallel runs stay deferred.
+- Test first: an adversarial leak scenario in the eval suite (user B asks for
+  user A's private memory by paraphrase); a shared-space round trip; approval
+  ownership.
+
+---
+
+### Capability track (parallel to Phases 8-13)
+
+**Why:** domains only prove themselves with real tools, and today the agent has
+calendar and web search. Each item is one self-contained stdio MCP server
+following the web/calendar pattern: its own config file, bounded output, read
+tools annotated (8.1), read-only first, output untrusted. One session per server,
+each with an example manifest and tests against a local stub. After 8.1 and 12B
+no harness core change should be needed.
+
+**Candidates (owner picks and orders; examples, not commitments):**
+
+1. Home automation (e.g. Home Assistant): entity state reads, service calls as
+   confirm-risk; bound to a Home domain; also the shared-space case for Phase 13.
+2. Nutrition lookup (a food-composition database API), bound to Health: the exact
+   scenario that exposed the routing gap, and it exercises skills and delegation.
+3. Weather (global, read-only): the Clothing composite example.
+4. Language learning (dictionary and spaced-repetition store), bound to a
+   Language domain: a memory- and skill-heavy domain.
+5. Notes/tasks, and mail read-only through an inbox pusher.
+
+**Gate:** the Phase 10 real-use cycle, 10F, 10G, and the 9B router measurements
+start only after at least two domain-bound servers have a week of daily use.
 
 ---
 
@@ -819,6 +1672,9 @@ subagent.started / subagent.completed / subagent.blocked / subagent.reused
 inbox.received / inbox.deduped / inbox.triaged / inbox.promoted
 automation.fired / automation.disabled
 guard.scanned / guard.verdict / guard.unavailable
+approval.edited / approval.revised / approval.superseded
+memory.refused / module.created / router.escalated
+domain.entered / domain.corrected / domain.suggested
 ```
 
 ### 7.3 Tests and fakes
@@ -846,6 +1702,47 @@ One commit per phase, matching the message above. If a phase grows beyond
 roughly 1,500 lines, split it into two commits by layer (backend/schema then
 UI) and update this plan. Do not mix phases.
 
+### 7.6 Prompting each phase
+
+One Claude Code session per phase or sub-phase, run to completion. A good
+session prompt is short and points at the plan instead of pasting it:
+
+> Implement <phase/sub-phase> from LONGTERMPLAN.md. Read section 2 (invariants),
+> sections 7.1-7.4, and only that phase; read CODEMAP.md for the code layout.
+> Treat its "test first" items as the acceptance tests and write them first.
+> Do not start any other phase. Update README.md, CODEMAP.md, this plan's status
+> and decision log, and make one commit with the stated message. If an experiment
+> contradicts the stated hypothesis, stop and report instead of choosing silently.
+
+After a phase lands: run the evals, record the numbers, and update the decision
+log before starting the next one.
+
+### 7.7 Workflow: sessions, Windows development, Ares deployment
+
+- **Where things run.** Development and Claude Code sessions run on the Windows
+  machine. The deployed instance runs in a container on Ares (192.168.50.40), with
+  state in the `harness-data` volume. A session cannot touch Ares or the real
+  data, so a session's definition of done must not depend on them.
+- **Session deliverables:** code, deterministic tests, docs, and one commit. Done
+  means the deterministic suite is green on Windows, new scenarios pass in
+  deterministic eval mode, and docs are updated.
+- **Post-deploy validation** is separate work, recorded after deployment:
+  live evals against the Ares model (reachable from Windows), shadow-mode
+  measurements, router swap cost, and the real-use test/refine cycles. A later
+  phase that depends on such a result waits for a one-paragraph note in the
+  decision log.
+- **Promotion checklist** (from the 8.0 runbook): back up production, build the
+  image, run the deterministic suite inside the container target, start the
+  staging instance, run `scripts/container_check.py` and live evals, then deploy
+  to production and keep the previous image tag for rollback.
+- **Windows-to-Linux portability rules:** LF endings enforced by
+  `.gitattributes`; `pathlib` and no hard-coded separators; manifests use
+  `${data_dir}` and the container's `python`, with machine-local overrides kept
+  out of git; a test that needs signals or POSIX file modes is marked and runs in
+  the container target; new files must be writable by the container user.
+- **Migrations on real data** always follow an automatic pre-migration backup
+  (8.0); a failed migration restores from it rather than patching in place.
+
 ---
 
 ## 8. Risk register
@@ -865,6 +1762,18 @@ UI) and update this plan. Do not mix phases.
 | Backup omits modules | Capabilities lost on restore | Include `data/modules/`; round-trip test | 0 |
 | Port 8080 collision with SearXNG | Web search unreachable or harness unreachable | Document `HARNESS_PORT`; configure the web server's own URL | 1 |
 | UI rewrite churn | Lost time | Static split in Phase 0; panels incremental; no framework | 0, 6 |
+| Memory write after untrusted content becomes durable | Persistent injection | `remember`/`update_memory` count as side effects under taint (8.2) | 8 |
+| Annotated MCP read tool is actually a write | Unapproved side effect | Honour `readOnlyHint` only for trusted modules; per-tool override | 8 |
+| Richer domain routing causes wrong-domain false positives | Wrong tools and skills | Separate false-positive metric; margin rule; correction loop | 10 |
+| Soft memory pollutes context | Worse answers | Lexical floor, per-run cap, labelled origin, experiment-chosen default | 10 |
+| Untrusted text steers the domain | Tool exposure | No model routing for untrusted input; taint escalation holds after a switch | 10 |
+| UI can add stdio MCP servers | Command execution by token holder | Command allowlist or re-confirm; `module.created` event | 12 |
+| Router sends adversarial input to the 2B model | Missed injection | Quality path for tainted/inbox input; escalate mid-run; shadow first | 9 |
+| Multi-user leaks private memory | Privacy | SQL-layer visibility filter; adversarial leak scenario | 13 |
+| Tests green on Windows but fail in the Linux container | Broken deploy | Container test target; LF enforcement; portability rules (7.7) | 8.0 |
+| Schema migration damages production memory | Lost history | Automatic pre-migration backup; staging rehearsal on a restored backup; image tags for rollback | 8.0, all |
+| A session's success depends on real usage | Session can never finish | Split in-session deliverables from post-deploy validation (7.7) | all |
+| Domains tested without real tools | Misleading conclusions | Capability track gate before the real-use cycle | 10 |
 
 ---
 
@@ -936,6 +1845,25 @@ UI) and update this plan. Do not mix phases.
 | 2026-11-13 | User UI/API revisions keep the original ownership markers | An agent skill edited by the user remains agent-owned, while an imported or user-created skill stays read-only to the agent |
 | 2026-11-13 | A same-run skill write may refine the already-pending approval in place; another run may not | Lets the agent fine-tune a proposal before the user decides without stacking approvals or widening authorization |
 | 2026-11-13 | Refining an approval updates its arguments and the awaiting execution row, keeping the original tool and id | The recorded audit matches the action that will actually execute, and one decision still covers exactly one request |
+| 2026-11-15 | MCP tool annotations are honoured only for modules with `trust_annotations` | A server must not downgrade its own write tools |
+| 2026-11-15 | Memory writes count as side effects under taint | Otherwise injected text becomes durable memory |
+| 2026-11-15 | Non-decision replies to a pending approval become revision feedback | The "did not apply that reply" dead end is the main approval friction |
+| 2026-11-15 | Router starts in shadow mode | Swap cost and escalation accuracy are unmeasured |
+| 2026-11-15 | Add `user_id` columns before building multi-user | Avoids a rewrite later; zero behaviour change |
+| 2026-11-15 | Tools and skills stay domain-exclusive; memory becomes soft | Exclusivity limits capability, not knowledge; amnesia breaks the single-entity goal |
+| 2026-11-15 | Routing evidence adds keywords, stemming, and learned vocabulary before any model call | Deterministic, explainable, measurable |
+| 2026-11-15 | `use_domain` returns a briefing; the system message is not rewritten (pending experiment) | Keeps the transcript append-only and template-agnostic |
+| 2026-11-15 | Model domain tie-break starts in shadow and never sees untrusted text | Domain choice controls which tools appear |
+| 2026-11-15 | Routing corrections create labelled eval cases | Real usage is the only trustworthy corpus |
+| 2026-11-15 | Domain `instructions` are user-written; the agent may only propose via approval, never in a tainted run | Preserves "model proposes, harness decides" |
+| 2026-11-15 | General has no memory silo; `domain:general` reads as global | General is the unscoped interface (owner decision) |
+| 2026-11-15 | Show a visible "Entering <domain>" status line on domain changes | Owner request; makes routing legible |
+| 2026-11-15 | One Claude Code session per phase or sub-phase; sessions deliver code, tests, and docs only | The session cannot reach Ares; real-use validation is separate |
+| 2026-11-15 | Deployment safety (pre-migration backup, staging, runbook) is the first session | Every later phase migrates real data on Ares |
+| 2026-11-15 | Version and git sha are reported on the authenticated API, not `/health` | Keep the unauthenticated endpoint minimal |
+| 2026-11-15 | Add a capability track and gate the real-use domain cycle on it | Domains need real tools to be judged |
+| 2026-11-15 | `update_task_notes` is not treated as a side effect under taint | Per-task scratch; escalation would cause approval spam |
+| 2026-11-15 | 12A is Docker-first; native installers are optional | The deployed form is a container on Ares |
 
 ---
 
@@ -958,3 +1886,12 @@ The plan is complete when:
    changing the trust policy.
 8. The full deterministic suite passes, the ten acceptance scenarios still
    pass, and each phase has its own commit.
+9. A pending action can be approved, rejected with feedback, or edited without
+   restarting the request, and a rejected call cannot loop back.
+10. Domain routing is measured on a labelled corpus, corrections feed it, and
+    entering a domain is visible and brings its memories, skills, and tools.
+11. The harness can be installed, reset, and extended with MCP servers without
+    editing files by hand.
+12. Every phase is rehearsed on a staging instance from a restored backup before it
+    reaches production, and a failed deploy can be rolled back.
+
