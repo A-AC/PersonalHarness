@@ -16,7 +16,7 @@ services:
     volumes:
       - harness-data:/data
       - /opt/harness-mcp/mcp.json:/data/mcp.json:ro
-      - /opt/harness-mcp/modules:/data/modules/mcp:ro
+      - /opt/harness-mcp/modules/mcp:/data/modules/mcp:ro
       # Optional: use the MCP registrations/configs from this checkout.
       # Create data/mcp.json and data/modules/mcp/ first, then uncomment.
       # - ./data/mcp.json:/data/mcp.json:ro
