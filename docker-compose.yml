@@ -15,6 +15,8 @@ services:
       HARNESS_TIMEZONE: "${HARNESS_TIMEZONE:-}"
     volumes:
       - harness-data:/data
+      - /opt/harness-mcp/mcp.json:/data/mcp.json:ro
+      - /opt/harness-mcp/modules:/data/modules/mcp:ro
       # Optional: use the MCP registrations/configs from this checkout.
       # Create data/mcp.json and data/modules/mcp/ first, then uncomment.
       # - ./data/mcp.json:/data/mcp.json:ro
