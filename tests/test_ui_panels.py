@@ -281,7 +281,7 @@ def test_modules_panel_contract_and_bindings(make_app, client, tmp_path):
     http = client(app)
 
     payload = http.get("/api/modules").json()
-    assert payload["schema_budget_tokens"] == 2400
+    assert payload["schema_budget_tokens"] == 4096
     assert set(payload["schema_budget"]) == {
         "tokens", "budget_tokens", "tool_count", "names", "exclusions",
     }

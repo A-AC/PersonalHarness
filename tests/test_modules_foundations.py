@@ -10,7 +10,7 @@ import yaml
 from starlette.testclient import TestClient
 
 from harness import util
-from harness.config import load_config
+from harness.config import DEFAULTS, load_config
 from harness.db import Database, SCHEMA_VERSION
 from harness.modules.types import Module, ModuleBinding, ModuleTool
 from harness.server import Server
@@ -87,7 +87,7 @@ def test_module_registry_is_the_authoritative_capability_loader(
     assert app.config.get("modules.enabled") is True
     assert app.config.get("modules.dir") == "modules"
     assert app.config.get("modules.health_interval_s") == 300.0
-    assert app.config.get("modules.tool_schema_budget_tokens") == 2400
+    assert app.config.get("modules.tool_schema_budget_tokens") == 4096
     assert "mcp_test_echo_echo" in app.tools.names()
     module = app.modules.get(module_id)
     assert module is not None and module.kind == "mcp"
@@ -391,7 +391,7 @@ def test_modules_api_lists_reloads_and_toggles(make_app, client, tmp_path):
     assert module["status"] == "active"
     assert {tool["name"] for tool in module["tools"]} == {"add", "echo"}
     assert module["bound_domains"] == []
-    assert payload["schema_budget_tokens"] == 2400
+    assert payload["schema_budget_tokens"] == 4096
 
     disabled = api.post(f"/api/modules/{module_id}/disable").json()
     assert disabled["module"]["status"] == "disabled"
@@ -426,3 +426,20 @@ def test_ui_assets_require_authentication(make_app):
     assert unauthenticated.get("/").status_code == 401
     assert unauthenticated.get("/assets/app.js").status_code == 401
     assert unauthenticated.get("/assets/style.css").status_code == 401
+
+
+def test_budget_defaults_do_not_under_reserve_the_window():
+    """Schemas and the retry output budget come out of one context window.
+
+    A schema reservation below the schema budget hides tools while claiming
+    the prompt has room, and a reply reservation below the largest requested
+    output budget lets a retry exceed the model window. Keep both aligned.
+    """
+    assert (
+        DEFAULTS["context"]["tool_schema_tokens"]
+        >= DEFAULTS["modules"]["tool_schema_budget_tokens"]
+    )
+    assert (
+        DEFAULTS["context"]["reserved_output_tokens"]
+        >= DEFAULTS["model"]["empty_retry_max_tokens"]
+    )

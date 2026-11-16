@@ -125,9 +125,9 @@ class ContextBuilder:
         window = int(self.config.get("model.context_window", 0) or 0)
         if window > 0:
             reserved = int(
-                self.config.get("context.reserved_output_tokens", 2048)
+                self.config.get("context.reserved_output_tokens", 4096)
             )
-            schema = int(self.config.get("context.tool_schema_tokens", 1600))
+            schema = int(self.config.get("context.tool_schema_tokens", 4096))
             configured = min(configured, max(1000, window - reserved - schema))
         return configured * 4
 

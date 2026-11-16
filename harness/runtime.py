@@ -114,14 +114,14 @@ class AgentRuntime:
         window = int(self.config.get("model.context_window", 0) or 0)
         if window > 0:
             reserved = int(
-                self.config.get("context.reserved_output_tokens", 2048)
+                self.config.get("context.reserved_output_tokens", 4096)
             )
             return max(1000, window - reserved)
         return int(self.config.get("context.total_budget_tokens", 20000))
 
     def _schema_budget(self) -> int:
         return max(0, int(
-            self.config.get("modules.tool_schema_budget_tokens", 2400)
+            self.config.get("modules.tool_schema_budget_tokens", 4096)
         ))
 
     def _limits_for(self, task: dict[str, Any]) -> tuple[int, int, float]:

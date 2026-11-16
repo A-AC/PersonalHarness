@@ -59,8 +59,14 @@ DEFAULTS: dict[str, Any] = {
     },
     "context": {
         "total_budget_tokens": 20000,
-        "reserved_output_tokens": 2048,  # headroom for the model's reply
-        "tool_schema_tokens": 1600,      # tool definitions are part of the prompt
+        # Headroom for the model's reply. Must cover the largest output budget
+        # the harness can ask for, or a retry can push prompt + max_tokens past
+        # the window: model.empty_retry_max_tokens (4096) is the ceiling.
+        "reserved_output_tokens": 4096,
+        # Tool definitions are part of every prompt, so the system-prompt cap
+        # is reduced by this. Keep it at or above the actual schema budget
+        # (modules.tool_schema_budget_tokens) or the prompt over-reserves room.
+        "tool_schema_tokens": 4096,
         "recent_messages": 24,        # recent visible messages included
         "memory_results": 6,          # retrieved memories per query
         "history_results": 4,         # FTS hits from old messages
@@ -110,7 +116,11 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "dir": "modules",              # relative to the data dir
         "health_interval_s": 300.0,
-        "tool_schema_budget_tokens": 2400,
+        # Whole tools are dropped, lowest priority first, to respect this. The
+        # builtins alone cost ~1976 tokens, so 2400 left almost nothing for
+        # module tools and silently hid them; 4096 fits the builtins plus a
+        # couple of MCP servers with headroom on a 32k window.
+        "tool_schema_budget_tokens": 4096,
         # Risk for an MCP tool whose manifest does not set risk_default and
         # that did not opt into autoapprove.
         "default_mcp_risk": "confirm",
