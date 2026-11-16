@@ -18,7 +18,8 @@ entry at it with `--config`:
   "max_results": 5,
   "timeout_s": 10,
   "categories": "general",
-  "safe_search": 1
+  "safe_search": 1,
+  "block_private_hosts": true
 }
 ```
 
@@ -29,12 +30,13 @@ entry at it with `--config`:
 | `timeout_s` | HTTP timeout per request (default 10) |
 | `categories` | Default SearXNG category (default `general`) |
 | `safe_search` | 0, 1, or 2 (default 1) |
+| `block_private_hosts` | Drop result URLs on private/loopback hosts (default true) |
 
 A TOML file with the same keys works too. Neutral `WEB_SEARXNG_URL`,
-`WEB_MAX_RESULTS`, `WEB_TIMEOUT_S`, `WEB_CATEGORIES`, and `WEB_SAFE_SEARCH`
-environment variables override the file when set (container/secret friendly);
-legacy `HARNESS_WEB_*` names are still accepted. The file supplies the
-defaults.
+`WEB_MAX_RESULTS`, `WEB_TIMEOUT_S`, `WEB_CATEGORIES`, `WEB_SAFE_SEARCH`, and
+`WEB_BLOCK_PRIVATE_HOSTS` environment variables override the file when set
+(container/secret friendly); legacy `HARNESS_WEB_*` names are still accepted.
+The file supplies the defaults.
 
 Check configuration without starting the JSON-RPC loop:
 
@@ -67,6 +69,7 @@ stores no SearXNG URL of its own. Add it to `data/mcp.json` (the standard
       "tools_allow": ["web_search"],
       "risk_default": "low",
       "autoapprove": true,
+      "trust_annotations": true,
       "read_only": true,
       "side_effects": false,
       "startup": "lazy",
@@ -95,5 +98,17 @@ In Docker, mount the config read-only and use the container data path
 
 - Results are capped (10 results, 200-char titles, 500-char URLs, 400-char
   snippets) and marked untrusted.
+- Text is normalised (NFKC, control/zero-width/bidi characters and HTML tags
+  removed, whitespace collapsed). Only `http`/`https` result URLs survive;
+  `javascript:`, `data:`, `file:`, userinfo URLs, and (by default) private or
+  local hosts are dropped.
+- Each result carries heuristic `flags` (instruction override, role/tool
+  spoofing, encoded payload, exfiltration request, urgency, hidden markup or
+  unicode, suspicious URL). A flagged snippet is replaced with a short
+  placeholder; the flag is a label, never an instruction.
+- Output is structured data with a per-call `nonce`, a `notice`, and
+  `flagged`/`dropped` counts. Queries are capped at 200 characters before the
+  SearXNG request. The harness wraps every untrusted tool result in its own
+  nonce-delimited envelope before it enters the transcript.
 - The server never fetches a URL supplied by the model; it only queries the
   configured SearXNG instance.

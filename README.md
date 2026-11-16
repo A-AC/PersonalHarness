@@ -68,12 +68,25 @@ terminal CLI that are two views of the same runtime.
   own schedules through confirm-risk `schedule_task` / `cancel_schedule`
   tools. A per-task schedule cap and a schedule-depth limit stop a scheduled
   task from recursively scheduling itself forever.
-- **Approvals with a quick confirmation path.** Confirm-risk tool calls
-  (external MCP actions by default, domain creation) become approvals bound
-  to the exact tool and arguments. Short replies like "yes" or "no" are
-  classified affirmatively/negatively/ambiguously — by keyword or a tiny
-  constrained model call — and resolve exactly one approval. Ambiguous
-  replies never approve.
+- **Untrusted output stays data.** MCP reads (web search, calendar) are
+  low-risk but their output is untrusted: it enters the transcript inside a
+  nonce-delimited envelope, taints the run, and forces later side-effecting
+  actions to confirm-risk. A tainted memory write needs an approval that
+  names the untrusted origin. The bundled web server normalises text, drops
+  non-http(s) URLs, flags injection-shaped snippets, labels results as data,
+  and caps the query length; inbox content follows the same rule.
+- **Approvals that behave like a conversation.** Confirm-risk tool calls
+  (external MCP actions by default, domain creation, memory writes in a
+  tainted run) become approvals bound to the exact tool and arguments. The
+  chat shows an inline card and the Approvals panel is a tray with
+  approve-all-safe. A pending approval can be approved, rejected, changed
+  with free-text feedback (the run resumes with `revision_requested` and the
+  model re-proposes), or edited field-by-field and executed with the edited
+  arguments. Short chat replies resolve exactly one approval: "yes"/"no" by
+  keyword or a tiny constrained model call, anything else as revision
+  feedback when it clearly refers to the pending action. Ambiguous replies
+  never approve. A rejection is remembered for the run, so an identical
+  re-proposal is denied without a second approval.
 - **Sequential, bounded sub-agents.** A parent task can delegate one
   self-contained sub-problem through `delegate_task`. The child is a normal
   durable task and run with a reduced context (goal, parent-supplied brief,
@@ -227,6 +240,17 @@ docker compose exec harness python -m harness endpoint-check --data-dir /data
 HARNESS_TOKEN=check-token HARNESS_PORT=18080 python scripts/container_check.py
 ```
 
+### Staging and upgrades
+
+Keep one writer per data directory. `docker-compose.stage.yml` documents a
+separate Compose project, volume, port, and token for trying a build beside
+production. On startup, a schema upgrade first writes
+`backups/pre-migrate-v<old>-to-v<new>-<ts>.zip` and aborts if the backup
+cannot be written. The authenticated `/api/system` endpoint and
+`python -m harness status` report `{version, git_sha, schema_version}`;
+`/health` stays unauthenticated and minimal. The full build, backup, stage,
+promote, and rollback runbook is [docs/DEPLOY.md](docs/DEPLOY.md).
+
 ### Native alternatives
 
 Systemd or a Windows service work the same way: run
@@ -270,7 +294,7 @@ value in `data/config.yaml`.
 | --- | --- |
 | `serve` | Run the application (web UI, API, scheduler, heartbeat) |
 | `msg TEXT` | Send a message and print the response (`turn`/`say` aliases) |
-| `status` | Open work, pending approvals, schedules |
+| `status` | Open work, pending approvals, schedules, version/git/schema |
 | `tasks [ID]` | List tasks, or show one task's runs, executions, context sources |
 | `approvals [approve/reject/cancel] [ID]` | List or decide pending approvals |
 | `schedules [--add JSON] [--action ID enable/disable/delete]` | Manage schedules |
@@ -401,6 +425,21 @@ Approvals expire after `approvals.expires_after_s` (default one week; set
 normal executor and records the real outcome; a rejected or cancelled
 approval can never be re-approved, and an approval whose run moved on is
 refused as stale.
+
+A pending approval can also be changed instead of accepted or refused.
+Free-text feedback (from the card, or from a chat reply that clearly refers
+to the pending action) closes it as `revised`, hands the model
+`{status: "revision_requested", feedback: ...}`, and lets it re-propose. A
+structured edit re-validates the arguments, marks the old approval
+`superseded`, records an `approval.edited` diff, and executes exactly the
+edited arguments; the model sees what ran. Revised and superseded approvals
+can never execute, and the chain is visible in the UI. An approval
+authorizes one exact action only.
+
+"Approve and always allow" is offered only for an editable, untainted,
+non-side-effecting tool. It writes a per-tool `risk_override` to
+`config.yaml`, is listed and revocable under Tools, and never weakens the
+taint escalation.
 
 ### Scheduling and heartbeat
 

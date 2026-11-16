@@ -3,5 +3,6 @@
   "max_results": 5,
   "timeout_s": 10,
   "categories": "general",
-  "safe_search": 1
+  "safe_search": 1,
+  "block_private_hosts": true
 }

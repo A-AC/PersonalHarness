@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import util
+from .config import save_config
 from .db import Database, rows_to_dicts
 from .memory import MemoryError, MemoryManager
 from .model import ToolCall
@@ -70,6 +71,8 @@ class ToolSpec:
     untrusted_output: bool = False
     # Eligibility scope of the owning module (global | domain | adaptive).
     scope: str = "global"
+    # Optional human-readable summary template for approval cards.
+    summary_template: str = ""
 
 
 @dataclass
@@ -86,6 +89,9 @@ class ToolContext:
     subagents: Any = None
     scheduler: Any = None
     role: str = "user"
+    # First untrusted origin this run consumed ('' when the run is clean).
+    # Memory handlers use it to mark provenance and revision reasons.
+    tainted_origin: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +162,8 @@ class ToolRegistry:
         self.config = config
         self.artifacts_dir = artifacts_dir
         self._tools: dict[str, ToolSpec] = {}
+        # Declared risk before any persistent per-tool override.
+        self._base_risks: dict[str, str] = {}
         self._register_builtins()
 
     # -- registration -----------------------------------------------------
@@ -172,6 +180,7 @@ class ToolRegistry:
         effective = overrides.get(spec.name, spec.risk)
         if effective not in (RISK_LOW, RISK_CONFIRM):
             raise ToolError(f"invalid risk override for {spec.name}")
+        self._base_risks[spec.name] = spec.risk
         self._tools[spec.name] = ToolSpec(
             name=spec.name, description=spec.description,
             parameters=spec.parameters, risk=effective, handler=spec.handler,
@@ -179,6 +188,66 @@ class ToolRegistry:
             read_only=bool(spec.read_only),
             untrusted_output=bool(spec.untrusted_output),
             scope=spec.scope,
+            summary_template=self._sanitize_summary_template(
+                spec.summary_template
+            ),
+        )
+
+    @staticmethod
+    def _sanitize_summary_template(value: Any) -> str:
+        """Keep one bounded line for an approval summary template."""
+        if not isinstance(value, str):
+            return ""
+        return util.clip(" ".join(value.split()), 200)
+
+    def risk_override(self, name: str) -> str | None:
+        """Return the persisted override for a known tool, if any."""
+        spec = self.resolve_optional(name)
+        if spec is None:
+            raise ToolError(f"unknown tool: {name}")
+        overrides = self.config.get("tools.risk_overrides", {}) or {}
+        if not isinstance(overrides, dict):
+            return None
+        value = overrides.get(name)
+        return value if value in (RISK_LOW, RISK_CONFIRM) else None
+
+    def set_risk_override(self, name: str, risk: str | None) -> None:
+        """Set or clear a persistent per-tool risk override."""
+        spec = self.resolve_optional(name)
+        if spec is None:
+            raise ToolError(f"unknown tool: {name}")
+        if risk not in (RISK_LOW, RISK_CONFIRM, None):
+            raise ToolError(
+                f"invalid risk override for {name}: {risk}; expected "
+                "'low', 'confirm', or null"
+            )
+        if risk == RISK_LOW and spec.side_effects:
+            raise ToolError(
+                f"cannot lower risk for side-effecting tool {name} to 'low'"
+            )
+        raw = self.config.get("tools.risk_overrides", {}) or {}
+        overrides = dict(raw) if isinstance(raw, dict) else {}
+        if risk is None:
+            overrides.pop(name, None)
+        else:
+            overrides[name] = risk
+        self.config.set("tools.risk_overrides", overrides)
+        save_config(self.config)
+        effective = risk or self._base_risks.get(name, spec.risk)
+        if effective not in (RISK_LOW, RISK_CONFIRM):
+            raise ToolError(f"invalid effective risk for {name}: {effective}")
+        self._tools[name] = ToolSpec(
+            name=spec.name, description=spec.description,
+            parameters=spec.parameters, risk=effective, handler=spec.handler,
+            module=spec.module, side_effects=bool(spec.side_effects),
+            read_only=bool(spec.read_only),
+            untrusted_output=bool(spec.untrusted_output),
+            scope=spec.scope,
+            summary_template=spec.summary_template,
+        )
+        self.events.record(
+            "tools.risk_override",
+            data={"tool": name, "risk": effective, "cleared": risk is None},
         )
 
     def unregister_module(self, module_id: str) -> list[str]:
@@ -620,6 +689,9 @@ class ToolRegistry:
                 "required": ["content"],
             },
             risk=RISK_LOW,
+            # Durable write: a tainted run must not store untrusted content
+            # without an explicit approval.
+            side_effects=True,
             handler=self._tool_remember,
         ))
         self.register(ToolSpec(
@@ -638,6 +710,8 @@ class ToolRegistry:
                 "required": ["memory_id", "content"],
             },
             risk=RISK_LOW,
+            # Durable write to an existing memory (a new revision).
+            side_effects=True,
             handler=self._tool_update_memory,
         ))
         self.register(ToolSpec(
@@ -652,6 +726,8 @@ class ToolRegistry:
                 "required": ["memory_id", "reason"],
             },
             risk=RISK_LOW,
+            # Durable write: retraction is a status change on the memory row.
+            side_effects=True,
             handler=self._tool_retract_memory,
         ))
         self.register(ToolSpec(
@@ -949,13 +1025,18 @@ class ToolRegistry:
 
     def _tool_remember(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         assert ctx.memory and ctx.domains
+        provenance = {"run_id": ctx.run_id, "task_id": ctx.task_id}
+        if ctx.tainted_origin:
+            # This run consumed untrusted content; the memory row must say so.
+            provenance["tainted"] = True
+            provenance["tainted_origin"] = ctx.tainted_origin
         out = ctx.memory.remember(
             args["content"],
             kind=args.get("kind"),
             scope=args.get("scope"),
             domain_id=ctx.domain_id,
             origin="agent" if ctx.task_id else "user",
-            provenance={"run_id": ctx.run_id, "task_id": ctx.task_id},
+            provenance=provenance,
             domains=ctx.domains,
             artifact_body=args.get("detail"),
             task_id=ctx.task_id,
@@ -973,19 +1054,52 @@ class ToolRegistry:
             ),
         }
 
+    def _tainted_reason(self, ctx: ToolContext, reason: str | None) -> str:
+        """Mark a revision reason with the run's untrusted origin.
+
+        The revision reason is what the UI shows, so the taint must be
+        visible there, not only in internal records.
+        """
+        base = (reason or "").strip()
+        tail = f"[provenance: untrusted content from {ctx.tainted_origin}]"
+        return f"{base} {tail}" if base else tail
+
+    def _record_tainted_write(
+        self, ctx: ToolContext, tool: str, memory_id: str
+    ) -> None:
+        """Audit trail for a memory write that happened in a tainted run."""
+        self.events.record(
+            "memory.write_tainted", task_id=ctx.task_id, run_id=ctx.run_id,
+            data={
+                "tool": tool,
+                "memory_id": memory_id,
+                "origin": util.clip(ctx.tainted_origin, 300),
+            },
+        )
+
     def _tool_update_memory(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         assert ctx.memory
+        reason = args.get("reason")
+        if ctx.tainted_origin:
+            reason = self._tainted_reason(ctx, reason)
         mem = ctx.memory.update(
             args["memory_id"], content=args["content"],
-            changed_by="agent", reason=args.get("reason"),
+            changed_by="agent", reason=reason,
         )
+        if ctx.tainted_origin:
+            self._record_tainted_write(ctx, "update_memory", mem["id"])
         return {"memory_id": mem["id"], "revision": mem["revision"]}
 
     def _tool_retract_memory(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         assert ctx.memory
+        reason = args["reason"]
+        if ctx.tainted_origin:
+            reason = self._tainted_reason(ctx, reason)
         mem = ctx.memory.retract(
-            args["memory_id"], changed_by="agent", reason=args["reason"]
+            args["memory_id"], changed_by="agent", reason=reason
         )
+        if ctx.tainted_origin:
+            self._record_tainted_write(ctx, "retract_memory", mem["id"])
         return {"memory_id": mem["id"], "status": mem["status"]}
 
     def _tool_search_knowledge(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

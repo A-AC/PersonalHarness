@@ -1,0 +1,40 @@
+# Staging instance: a separate project surface (service name, image tag,
+# token, and volume) so it can run beside production. Staging starts from a
+# restored production backup or from zero, so there are no MCP bind mounts
+# here (production's /opt/harness-mcp mounts are intentionally absent).
+# Both the harness and SearXNG default to host port 8080, so staging uses a
+# different host port (HARNESS_STAGE_PORT, default 8081).
+services:
+  harness-stage:
+    build: .
+    image: personal-harness:stage
+    ports:
+      - "${HARNESS_STAGE_PORT:-8081}:8080"
+    environment:
+      HARNESS_DATA_DIR: /data
+      HARNESS_HOST: 0.0.0.0
+      HARNESS_PORT: "8080"
+      HARNESS_TOKEN: "${HARNESS_STAGE_TOKEN:-change-this-stage-token}"
+      HARNESS_MODEL_BASE_URL: "${HARNESS_MODEL_BASE_URL:-http://192.168.50.40:8181}"
+      HARNESS_MODEL_NAME: "${HARNESS_MODEL_NAME:-qwen3.5-9b}"
+      # Empty means "use the container's system clock".
+      HARNESS_TIMEZONE: "${HARNESS_TIMEZONE:-}"
+    volumes:
+      # Own volume; must never be harness-data (one writer per data dir).
+      - harness-stage-data:/data
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  harness-stage-data:

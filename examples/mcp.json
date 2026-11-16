@@ -21,6 +21,7 @@
       "risk_default": "low",
       "autoapprove": true,
       "read_only": true,
+      "trust_annotations": true,
       "side_effects": false,
       "startup": "lazy",
       "timeout_s": 60
@@ -35,6 +36,7 @@
       ],
       "tool_prefix": "",
       "risk_default": "confirm",
+      "trust_annotations": true,
       "side_effects": true,
       "startup": "lazy",
       "timeout_s": 60

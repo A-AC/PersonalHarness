@@ -110,6 +110,7 @@ class Approvals:
         reason: str | None = None,
         tool_call_id: str | None = None,
         expires_at: str | None = None,
+        supersedes_id: str | None = None,
     ) -> dict[str, Any]:
         if action not in APPROVAL_ACTIONS:
             raise ApprovalError(f"unknown approval action: {action}")
@@ -122,12 +123,13 @@ class Approvals:
         with self.db.transaction() as conn:
             conn.execute(
                 "INSERT INTO approvals(id, task_id, run_id, tool, tool_call_id,"
-                " arguments, risk, reason, status, created_at, expires_at, meta)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " supersedes_id, arguments, risk, reason, status, created_at,"
+                " expires_at, meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     approval_id, task_id, run_id, tool, tool_call_id,
-                    util.dumps(arguments), risk, reason, "pending", ts,
-                    expires_at, util.dumps({"action": action}),
+                    supersedes_id, util.dumps(arguments), risk, reason,
+                    "pending", ts, expires_at,
+                    util.dumps({"action": action}),
                 ),
             )
         self.events.record(
@@ -135,6 +137,179 @@ class Approvals:
             data={"approval_id": approval_id, "tool": tool, "risk": risk},
         )
         return self.get(approval_id)  # type: ignore[return-value]
+
+    def revise(
+        self,
+        approval_id: str,
+        *,
+        feedback: str,
+        decided_by: str,
+    ) -> dict[str, Any]:
+        """Close a pending approval as revised and retain its feedback."""
+        now = util.iso()
+        bounded_feedback = util.clip(str(feedback or ""), 2000)
+        expired = False
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE id=?", (approval_id,)
+            ).fetchone()
+            if row is None:
+                raise ApprovalError(f"no such approval: {approval_id}")
+            approval = rows_to_dicts([row])[0]
+            if approval["status"] != "pending":
+                raise ApprovalError(
+                    f"approval {approval_id} is already {approval['status']}"
+                )
+            if self._is_expired(approval):
+                conn.execute(
+                    "UPDATE approvals SET status='expired', decided_at=?,"
+                    " decided_by='system' WHERE id=? AND status='pending'",
+                    (now, approval_id),
+                )
+                expired = True
+            else:
+                meta = util.loads(approval.get("meta") or "{}", {})
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["feedback"] = bounded_feedback
+                meta["revised_at"] = now
+                updated = conn.execute(
+                    "UPDATE approvals SET status='revised', decided_at=?,"
+                    " decided_by=?, meta=? WHERE id=? AND status='pending'",
+                    (now, decided_by, util.dumps(meta), approval_id),
+                )
+                if updated.rowcount != 1:
+                    raise ApprovalError(
+                        f"approval {approval_id} was decided concurrently"
+                    )
+        if expired:
+            self.events.record(
+                "approval.expired", task_id=approval["task_id"],
+                run_id=approval["run_id"],
+                data={"approval_id": approval_id,
+                      "note": "expired before revision"},
+            )
+            raise ApprovalError(f"approval {approval_id} expired")
+        self.events.record(
+            "approval.revised", task_id=approval["task_id"],
+            run_id=approval["run_id"],
+            data={
+                "approval_id": approval_id,
+                "decided_by": decided_by,
+                "feedback_chars": len(bounded_feedback),
+            },
+        )
+        return self.get(approval_id)  # type: ignore[return-value]
+
+    def supersede(
+        self,
+        approval_id: str,
+        *,
+        arguments: dict[str, Any],
+        reason: str,
+        risk: str,
+        decided_by: str,
+    ) -> dict[str, Any]:
+        """Replace a pending approval with an immutable edited version."""
+        now = util.iso()
+        new_id = util.new_id("apr")
+        expired = False
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE id=?", (approval_id,)
+            ).fetchone()
+            if row is None:
+                raise ApprovalError(f"no such approval: {approval_id}")
+            old = rows_to_dicts([row])[0]
+            if old["status"] != "pending":
+                raise ApprovalError(
+                    f"approval {approval_id} is already {old['status']}"
+                )
+            if self._is_expired(old):
+                conn.execute(
+                    "UPDATE approvals SET status='expired', decided_at=?,"
+                    " decided_by='system' WHERE id=? AND status='pending'",
+                    (now, approval_id),
+                )
+                expired = True
+            else:
+                old_arguments = util.loads(old.get("arguments") or "{}", {})
+                if not isinstance(old_arguments, dict):
+                    old_arguments = {}
+                old_meta = util.loads(old.get("meta") or "{}", {})
+                if not isinstance(old_meta, dict):
+                    old_meta = {}
+                new_meta = {**old_meta, "edited_from": approval_id}
+                updated = conn.execute(
+                    "UPDATE approvals SET status='superseded', decided_at=?,"
+                    " decided_by=? WHERE id=? AND status='pending'",
+                    (now, decided_by, approval_id),
+                )
+                if updated.rowcount != 1:
+                    raise ApprovalError(
+                        f"approval {approval_id} was decided concurrently"
+                    )
+                conn.execute(
+                    "INSERT INTO approvals(id, task_id, run_id, tool,"
+                    " tool_call_id, supersedes_id, arguments, risk, reason,"
+                    " status, created_at, expires_at, meta)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        new_id, old["task_id"], old["run_id"], old["tool"],
+                        old.get("tool_call_id"), approval_id,
+                        util.dumps(arguments), risk, reason, "pending", now,
+                        old.get("expires_at"), util.dumps(new_meta),
+                    ),
+                )
+                conn.execute(
+                    "UPDATE tool_executions SET approval_id=?, arguments=?"
+                    " WHERE approval_id=? AND status='awaiting_approval'",
+                    (new_id, util.dumps(arguments), approval_id),
+                )
+                diff = self._argument_diff(old_arguments, arguments)
+                self.events.record(
+                    "approval.edited", task_id=old["task_id"],
+                    run_id=old["run_id"],
+                    data={
+                        "from_approval": approval_id,
+                        "to_approval": new_id,
+                        "tool": old.get("tool"),
+                        "diff": diff,
+                    },
+                )
+        if expired:
+            self.events.record(
+                "approval.expired", task_id=old["task_id"],
+                run_id=old["run_id"],
+                data={"approval_id": approval_id,
+                      "note": "expired before edit"},
+            )
+            raise ApprovalError(f"approval {approval_id} expired")
+        return self.get(new_id)  # type: ignore[return-value]
+
+    @staticmethod
+    def _argument_diff(
+        old: dict[str, Any], new: dict[str, Any]
+    ) -> dict[str, dict[str, str]]:
+        """Bounded top-level differences for the approval audit event."""
+        def shown(value: Any, present: bool) -> str:
+            if not present:
+                return "(missing)"
+            return util.clip(str(value), 200)
+
+        changed: list[str] = []
+        for key in sorted(set(old) | set(new)):
+            if key not in old or key not in new:
+                changed.append(key)
+            elif util.dumps(old[key]) != util.dumps(new[key]):
+                changed.append(key)
+        diff: dict[str, dict[str, str]] = {}
+        for key in changed[:20]:
+            diff[key] = {
+                "from": shown(old.get(key), key in old),
+                "to": shown(new.get(key), key in new),
+            }
+        return diff
 
     def get(self, approval_id: str) -> dict[str, Any] | None:
         row = self.db.query_one(
@@ -438,6 +613,29 @@ class Approvals:
         if len(detail) > 120:
             detail = detail[:117] + "…"
         return f"run {approval.get('tool')} with {detail}"
+
+    def summarize(
+        self, approval: dict[str, Any], template: str = ""
+    ) -> str:
+        """Render a bounded human summary from an optional field template."""
+        if not isinstance(template, str) or not template.strip():
+            return self.describe(approval)
+        arguments = approval.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        def replacement(match: re.Match[str]) -> str:
+            field = match.group(1)
+            if field not in arguments:
+                return "(not set)"
+            return util.clip(str(arguments[field]), 120)
+
+        rendered = re.sub(
+            r"\{([A-Za-z0-9_]+)\}", replacement, template
+        )
+        rendered = " ".join(rendered.split())
+        rendered = util.clip(rendered, 240)
+        return rendered or self.describe(approval)
 
     def dedupe_pending(
         self,

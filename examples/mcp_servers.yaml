@@ -38,14 +38,21 @@
 #   read_only     true -> output cannot change the world; stays low-risk in a
 #                 tainted run. Default false: unknown provenance is
 #                 side-effecting.
+#   trust_annotations
+#                 true -> honour the server's MCP annotations.readOnlyHint
+#                 claims for individual tools. These are claims, so they are
+#                 honoured only when this server is trusted.
+#   tool_risk     mapping of tool name -> low|confirm. Overrides risk for
+#                 that tool only; other risk and trust flags are unchanged.
 #   side_effects  explicit override; defaults to not read_only
 #   startup       eager|lazy (default lazy: use cached discovery, launch on
 #                 first call or reload)
 #   timeout_s     per-request subprocess timeout (default 30)
 #
-# Every MCP tool result is untrusted data. After an untrusted result enters a
-# run, a side-effecting non-read-only tool needs approval even when it is
-# auto-approved or configured low-risk.
+# MCP annotations are claims, not facts. They are honoured only for servers
+# with trust_annotations: true. Annotated reads remain untrusted output: after
+# a read enters a run, a side-effecting non-read-only tool needs approval even
+# when it is auto-approved or configured low-risk.
 
 servers:
   - name: example_echo
@@ -75,6 +82,7 @@ servers:
   #   risk_default: low
   #   autoapprove: true
   #   read_only: true
+  #   trust_annotations: true
   #   side_effects: false
   #   startup: lazy
   #   timeout_s: 60
@@ -90,6 +98,7 @@ servers:
   #     - ${data_dir}/modules/mcp/calendar.json
   #   tool_prefix: ""
   #   risk_default: confirm
+  #   trust_annotations: true
   #   side_effects: true
   #   startup: lazy
   #   timeout_s: 60

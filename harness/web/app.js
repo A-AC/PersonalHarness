@@ -26,6 +26,7 @@ let skillEditId = null;
 let showSubagents = false;
 let configMeta = null;
 let toastTimer = null;
+const approvalCardStates = Object.create(null);
 
 const $ = (id) => document.getElementById(id);
 
@@ -125,6 +126,11 @@ function applyConfig(data) {
   configMeta = data;
 }
 
+function applyApprovals(data) {
+  state.approvals = data.approvals || [];
+  state.counts = Object.assign({}, state.counts, data.counts || {});
+}
+
 const PANELS = {
   tasks: {
     url: () => '/api/tasks' + (showSubagents ? '?include_subagents=1' : ''),
@@ -136,10 +142,7 @@ const PANELS = {
   },
   approvals: {
     url: () => '/api/approvals',
-    apply: (d) => {
-      state.approvals = d.approvals || [];
-      state.counts = Object.assign({}, state.counts, d.counts || {});
-    },
+    apply: applyApprovals,
   },
   schedules: {
     url: () => '/api/schedules',
@@ -226,9 +229,14 @@ function panelMode() { return tab !== 'chat'; }
 
 async function refresh(force) {
   const panel = PANELS[tab];
-  const jobs = [api('/api/summary'), api('/api/messages?limit=300')];
-  jobs.push(panel && panel.url ? api(panel.url()) : Promise.resolve(null));
-  const [summary, messages, data] = await Promise.all(jobs);
+  const panelJob = panel && panel.url ? api(panel.url())
+    : Promise.resolve(null);
+  // Chat must always know about pending approvals. When the approvals panel
+  // is active, reuse its response rather than requesting the same list twice.
+  const approvalJob = tab === 'approvals' ? panelJob : api('/api/approvals');
+  const [summary, messages, data, approvalData] = await Promise.all([
+    api('/api/summary'), api('/api/messages?limit=300'), panelJob, approvalJob,
+  ]);
   if (summary) {
     state.summary = summary;
     state.counts = Object.assign({}, state.counts, summary.counts || {});
@@ -240,7 +248,8 @@ async function refresh(force) {
     state.config.persona = summary.persona || state.config.persona || {};
   }
   if (messages) state.messages = messages.messages || [];
-  if (data && panel && panel.apply) panel.apply(data);
+  if (approvalData) applyApprovals(approvalData);
+  if (data && panel && panel.apply && tab !== 'approvals') panel.apply(data);
   renderHeader();
   renderChat();
   renderWorking();
@@ -303,9 +312,32 @@ function renderDomainPicker() {
   }
 }
 
+function shortHash(text) {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash + text.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(16);
+}
+
+function approvalSignature() {
+  const parts = (state.approvals || []).map((a) => {
+    let args = '';
+    try { args = JSON.stringify(a.arguments || {}); }
+    catch (err) { args = String(a.arguments || ''); }
+    // Keep the displayed prefix bounded, but hash the complete JSON so an
+    // edit anywhere in a large argument object still invalidates the key.
+    return [a.id || '', a.status || '', args.slice(0, 1000), args.length,
+      shortHash(args)].join(':');
+  });
+  return parts.join('|').slice(0, 12000);
+}
+
 function renderChat() {
   const msgs = state.messages || [];
-  const key = msgs.length + ':' + (msgs.length ? msgs[msgs.length - 1].id : '');
+  const messageKey = msgs.length + ':' +
+    (msgs.length ? msgs[msgs.length - 1].id : '');
+  const key = messageKey + ':approvals:' + approvalSignature();
   if (key === lastChatKey) return;
   const chat = $('chat');
   const atBottom = !lastChatKey ||
@@ -324,6 +356,9 @@ function renderChat() {
       (m.source || '') + '  ' + short(m.ts)));
     node.appendChild(src);
     chat.appendChild(node);
+  }
+  for (const a of state.approvals || []) {
+    chat.appendChild(renderApprovalCard(a, {panel: false}));
   }
   lastChatKey = key;
   if (atBottom) chat.scrollTop = chat.scrollHeight;
@@ -774,6 +809,370 @@ async function openTask(taskId) {
 
 /* -------------------------------------------------------------- approvals */
 
+function approvalCardState(a) {
+  const id = String(a.id || '');
+  if (!approvalCardStates[id]) {
+    approvalCardStates[id] = {
+      reason: '', editOpen: false, values: Object.create(null), rawJson: null,
+    };
+  }
+  return approvalCardStates[id];
+}
+
+function approvalDomain(a) {
+  if (a.domain_id) return domainName(a.domain_id);
+  const messages = (state.messages || []).filter(m => m.task_id === a.task_id);
+  if (messages.length) return domainName(messages[messages.length - 1].domain_id);
+  const owner = (state.tasks || []).find(t => t.id === a.task_id);
+  if (owner) return domainName(owner.domain_id);
+  const working = (state.summary || {}).working_task;
+  if (working && working.id === a.task_id) {
+    return domainName(working.domain_id);
+  }
+  return 'unknown';
+}
+
+function compactArgument(value) {
+  if (typeof value === 'string') return value;
+  if (value === undefined) return '';
+  try { return JSON.stringify(value); }
+  catch (err) { return String(value); }
+}
+
+function clippedJson(value, limit) {
+  let text = '';
+  try { text = JSON.stringify(value, null, 2); }
+  catch (err) { text = String(value); }
+  if (text.length > limit) text = text.slice(0, limit) + '…';
+  return text;
+}
+
+function approvalArgumentKeys(a) {
+  const args = a.arguments || {};
+  const props = (a.schema && a.schema.properties) || {};
+  const keys = [];
+  for (const key of Object.keys(props)) {
+    if (Object.prototype.hasOwnProperty.call(args, key)) keys.push(key);
+  }
+  for (const key of Object.keys(args)) {
+    if (!Object.prototype.hasOwnProperty.call(props, key)) keys.push(key);
+  }
+  return keys;
+}
+
+function approvalFieldValue(cardState, key, initial) {
+  if (Object.prototype.hasOwnProperty.call(cardState.values, key)) {
+    return cardState.values[key];
+  }
+  cardState.values[key] = initial;
+  return initial;
+}
+
+function buildApprovalEditForm(a, cardState) {
+  const form = el('div', 'approval-form');
+  form.hidden = !cardState.editOpen;
+  form.appendChild(el('div', 'approval-form-title', 'Edit arguments'));
+
+  const schema = a.schema && typeof a.schema === 'object' ? a.schema : {};
+  const props = schema.properties && typeof schema.properties === 'object'
+    ? schema.properties : {};
+  const propertyNames = Object.keys(props);
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const current = a.arguments && typeof a.arguments === 'object'
+    ? a.arguments : {};
+
+  if (!propertyNames.length) {
+    const row = el('div', 'approval-field');
+    const area = el('textarea');
+    area.rows = 8;
+    area.placeholder = '{ }';
+    if (cardState.rawJson == null) {
+      cardState.rawJson = JSON.stringify(current, null, 2);
+    }
+    area.value = cardState.rawJson;
+    area.oninput = () => { cardState.rawJson = area.value; };
+    row.appendChild(el('label', null, 'arguments'));
+    row.appendChild(area);
+    form.appendChild(row);
+  } else {
+    for (const key of propertyNames) {
+      const prop = props[key] || {};
+      const type = prop.type || 'string';
+      const enumValues = Array.isArray(prop.enum) ? prop.enum : [];
+      const currentValue = current[key];
+      const row = el('div', 'approval-field');
+      const label = el('label', null,
+        key + (required.includes(key) ? ' *' : ''));
+      let control = null;
+
+      if (enumValues.length) {
+        control = el('select');
+        if (!required.includes(key)) {
+          const blank = el('option', null, '(not set)');
+          blank.value = '';
+          control.appendChild(blank);
+        }
+        for (const value of enumValues) {
+          const option = el('option', null, String(value));
+          option.value = String(value);
+          control.appendChild(option);
+        }
+        const initial = currentValue == null ? '' : String(currentValue);
+        const saved = approvalFieldValue(cardState, key, initial);
+        control.value = saved;
+        control.onchange = () => {
+          cardState.values[key] = control.value;
+        };
+      } else if (type === 'boolean') {
+        control = el('input');
+        control.type = 'checkbox';
+        const initial = currentValue === true;
+        control.checked = approvalFieldValue(cardState, key, initial);
+        control.onchange = () => {
+          cardState.values[key] = control.checked;
+        };
+      } else if (type === 'integer' || type === 'number') {
+        control = el('input');
+        control.type = 'number';
+        control.step = type === 'integer' ? '1' : 'any';
+        const initial = currentValue == null ? '' : String(currentValue);
+        control.value = approvalFieldValue(cardState, key, initial);
+        control.oninput = () => {
+          cardState.values[key] = control.value;
+        };
+      } else if (type === 'array' || type === 'object') {
+        control = el('textarea');
+        control.rows = 5;
+        const initial = currentValue == null ? ''
+          : JSON.stringify(currentValue, null, 2);
+        control.value = approvalFieldValue(cardState, key, initial);
+        control.oninput = () => {
+          cardState.values[key] = control.value;
+        };
+      } else {
+        const initial = currentValue == null ? '' : String(currentValue);
+        if (initial.length > 80 || initial.includes('\n')) {
+          control = el('textarea');
+          control.rows = 4;
+        } else {
+          control = el('input');
+          control.type = 'text';
+        }
+        control.value = approvalFieldValue(cardState, key, initial);
+        control.oninput = () => {
+          cardState.values[key] = control.value;
+        };
+      }
+      row.appendChild(label);
+      row.appendChild(control);
+      form.appendChild(row);
+    }
+  }
+
+  const actions = el('div', 'approval-actions');
+  actions.appendChild(btn('Save & approve', 'ok', async () => {
+    let edited = {};
+    if (!propertyNames.length) {
+      try {
+        edited = JSON.parse(cardState.rawJson || areaValue(form));
+      } catch (err) {
+        toast('Arguments are not valid JSON: ' + err.message); return;
+      }
+      if (!edited || typeof edited !== 'object' || Array.isArray(edited)) {
+        toast('Arguments must be a JSON object.'); return;
+      }
+    } else {
+      for (const key of propertyNames) {
+        const prop = props[key] || {};
+        const type = prop.type || 'string';
+        const enumValues = Array.isArray(prop.enum) ? prop.enum : [];
+        const raw = cardState.values[key];
+        if (enumValues.length) {
+          if (raw === '' && !required.includes(key)) continue;
+          const match = enumValues.find(value => String(value) === String(raw));
+          edited[key] = match === undefined ? raw : match;
+        } else if (type === 'boolean') {
+          edited[key] = raw === true;
+        } else if (type === 'integer' || type === 'number') {
+          if (String(raw || '').trim() === '') {
+            if (!required.includes(key)) continue;
+            continue;
+          }
+          const number = Number(raw);
+          if (Number.isNaN(number)) {
+            toast(key + ' must be a number.'); return;
+          }
+          edited[key] = number;
+        } else if (type === 'array' || type === 'object') {
+          if (String(raw || '').trim() === '' && !required.includes(key)) {
+            continue;
+          }
+          try {
+            edited[key] = JSON.parse(raw);
+          } catch (err) {
+            toast(key + ' must be valid JSON: ' + err.message); return;
+          }
+        } else {
+          edited[key] = String(raw == null ? '' : raw);
+        }
+      }
+    }
+    await decideApproval(a.id, 'edit', {arguments: edited});
+  }));
+  actions.appendChild(btn('Cancel', null, () => {
+    cardState.editOpen = false;
+    form.hidden = true;
+  }));
+  form.appendChild(actions);
+  return form;
+}
+
+function areaValue(form) {
+  const area = form.querySelector('textarea');
+  return area ? area.value : '';
+}
+
+function renderApprovalCard(a, opts) {
+  opts = opts || {};
+  const cardState = approvalCardState(a);
+  const card = el('div', 'approval-card');
+  card.dataset.approvalId = String(a.id || '');
+
+  const header = el('div', 'approval-header');
+  header.appendChild(el('div', 'approval-title', a.summary || a.tool || 'Approval'));
+  header.appendChild(pill(a.risk));
+  card.appendChild(header);
+
+  const meta = ['task ' + (a.task_id || '?'),
+    'domain ' + approvalDomain(a),
+    'tool ' + (a.tool || '?'),
+    'approval ' + (a.id || '?'),
+    'requested ' + short(a.created_at)];
+  if (a.expires_at) meta.push('expires ' + short(a.expires_at));
+  if (a.supersedes_id) meta.push('revises ' + a.supersedes_id);
+  card.appendChild(el('div', 'approval-meta', meta.join('  |  ')));
+
+  if (a.reason) {
+    card.appendChild(el('div', 'approval-provenance', a.reason));
+  }
+  if (a.tainted) {
+    card.appendChild(el('div', 'approval-warn',
+      'This run consumed untrusted content; the approval names the source ' +
+      'above. A tainted run still escalates side-effecting actions.'));
+  }
+
+  const args = a.arguments && typeof a.arguments === 'object'
+    ? a.arguments : {};
+  const argGrid = el('div', 'approval-args');
+  const keys = approvalArgumentKeys(a);
+  if (!keys.length) argGrid.appendChild(el('div', 'small', 'No arguments.'));
+  for (const key of keys) {
+    argGrid.appendChild(el('div', 'approval-arg-key', key));
+    argGrid.appendChild(el('div', 'approval-arg-value', compactArgument(args[key])));
+  }
+  card.appendChild(argGrid);
+
+  const jsonDetails = el('details', 'approval-json');
+  jsonDetails.appendChild(el('summary', null, 'Full arguments JSON'));
+  jsonDetails.appendChild(el('pre', 'mono', clippedJson(args, 12000)));
+  card.appendChild(jsonDetails);
+
+  const editForm = buildApprovalEditForm(a, cardState);
+  card.appendChild(editForm);
+
+  const reason = el('input', 'approval-reason');
+  reason.type = 'text';
+  reason.placeholder = 'Optional: tell me what to change (feedback)';
+  reason.value = cardState.reason || '';
+  reason.setAttribute('aria-label', 'Change request for ' + (a.tool || 'approval'));
+
+  const actions = el('div', 'approval-actions');
+  const approve = btn('Approve', 'ok', () => decideApproval(a.id, 'approve', {}));
+  approve.title = 'Approve this action. Shortcut: a approves the first pending approval.';
+  actions.appendChild(approve);
+
+  const edit = btn('Edit', null, () => {
+    cardState.editOpen = true;
+    editForm.hidden = false;
+    const first = editForm.querySelector('input, textarea, select');
+    if (first) first.focus();
+  });
+  edit.title = 'Edit the arguments before approving. Shortcut: e edits the first approval.';
+  actions.appendChild(edit);
+
+  const reject = btn('Reject', 'no', () => decideApproval(a.id, 'reject', {}));
+  reject.title = 'Reject this action without changing it.';
+  actions.appendChild(reject);
+
+  const ask = btn('Ask for a change', null, async () => {
+    const feedback = reason.value.trim();
+    if (!feedback) {
+      toast('Tell me what to change first.'); return;
+    }
+    await decideApproval(a.id, 'revise', {feedback});
+  });
+  ask.disabled = !reason.value.trim();
+  ask.title = 'Send this feedback to the model. Shortcut: r focuses the first change box.';
+  actions.appendChild(ask);
+
+  if (a.editable && !a.side_effects && !a.tainted) {
+    const always = btn('Approve & always allow', null, () =>
+      decideApproval(a.id, 'approve', {remember: true}));
+    always.title = 'Only lowers this tool\'s risk for future untainted runs; ' +
+      'you can revoke it under Tools.';
+    actions.appendChild(always);
+  }
+  if (opts.panel) {
+    const cancel = btn('Cancel', null, () => decideApproval(a.id, 'cancel', {}));
+    cancel.title = 'Cancel this approval without running the action.';
+    actions.appendChild(cancel);
+  }
+
+  reason.oninput = () => {
+    cardState.reason = reason.value;
+    ask.disabled = !reason.value.trim();
+  };
+  reason.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      ask.onclick();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      reason.blur();
+      cardState.editOpen = false;
+      editForm.hidden = true;
+    }
+  };
+
+  card.appendChild(reason);
+  card.appendChild(actions);
+  card.appendChild(el('div', 'small approval-hint',
+    'You can also reply in the chat with what to change.'));
+  return card;
+}
+
+function isSafeApproval(a) {
+  return !!a.editable && !a.side_effects && !a.tainted;
+}
+
+async function approveAllSafe() {
+  const safe = (state.approvals || []).filter(isSafeApproval);
+  if (!safe.length) return;
+  const noun = safe.length === 1 ? 'approval' : 'approvals';
+  if (!confirm('Approve ' + safe.length + ' safe ' + noun + '?')) return;
+  let approved = 0;
+  for (const a of safe) {
+    const out = await decideApproval(a.id, 'approve', {});
+    if (!out) {
+      toast('Approve all safe stopped at ' + a.id + '. Approved ' + approved +
+        ' of ' + safe.length + '.');
+      return;
+    }
+    approved++;
+  }
+  toast('Approved ' + approved + ' of ' + safe.length + ' safe approvals.');
+}
+
 function renderApprovals(side) {
   const pending = state.approvals || [];
   const head = el('div', 'card');
@@ -782,36 +1181,36 @@ function renderApprovals(side) {
   head.appendChild(el('div', 'small',
     'Approving authorizes exactly the action shown. Nothing executes until ' +
     'the runtime performs it, and a stale approval cannot run.'));
+  head.appendChild(el('div', 'small',
+    'Listed newest requested first; expiry is shown on each card.'));
+
+  const tray = el('div', 'tray-row');
+  tray.appendChild(el('span', 'approval-count', pending.length + ' waiting'));
+  const approveAll = btn('Approve all safe', 'ok', approveAllSafe);
+  approveAll.disabled = !pending.some(isSafeApproval);
+  tray.appendChild(approveAll);
+  head.appendChild(tray);
+  head.appendChild(el('div', 'small approval-shortcuts',
+    'Shortcuts: a approve first, e edit first, r focus the change box.'));
   side.appendChild(head);
   if (!pending.length) return;
 
-  for (const a of pending) {
-    const card = el('div', 'card');
-    card.appendChild(el('h3', null, a.summary || a.tool));
-    const owner = (state.tasks || []).find(t => t.id === a.task_id);
-    card.appendChild(el('div', 'small',
-      'task ' + (a.task_id || '?') + '  |  domain ' +
-      domainName(owner ? owner.domain_id : null) + '  |  ' + a.id));
-    if (a.reason) card.appendChild(el('div', 'small', a.reason));
-    card.appendChild(el('pre', null, JSON.stringify(a.arguments || {}, null, 1)));
-    card.appendChild(el('div', 'small',
-      'requested ' + short(a.created_at) +
-      (a.expires_at ? '  |  expires ' + short(a.expires_at) : '')));
-    const btns = el('div', 'btns');
-    btns.appendChild(btn('Approve', 'ok', () => decide(a.id, 'approve')));
-    btns.appendChild(btn('Reject', 'no', () => decide(a.id, 'reject')));
-    btns.appendChild(btn('Cancel', null, () => decide(a.id, 'cancel')));
-    card.appendChild(btns);
-    side.appendChild(card);
-  }
+  for (const a of pending) side.appendChild(renderApprovalCard(a, {panel: true}));
+}
+
+async function decideApproval(id, decision, extra) {
+  const path = decision === 'edit' ? '/edit' : '/' + decision;
+  const out = await api('/api/approvals/' + encodeURIComponent(id) + path,
+    {method: 'POST', body: extra || {}});
+  if (out) toast('Approval ' + decision + ': ' + out.status +
+    (out.message ? '\n' + out.message : ''));
+  delete approvalCardStates[String(id)];
+  refresh(true);
+  return out;
 }
 
 async function decide(id, decision) {
-  const out = await api('/api/approvals/' + encodeURIComponent(id) + '/' +
-                        decision, {method: 'POST'});
-  if (out) toast('Approval ' + decision + ': ' + out.status +
-    (out.message ? '\n' + out.message : ''));
-  refresh(true);
+  return decideApproval(id, decision, {});
 }
 
 /* -------------------------------------------------------------- schedules */
@@ -1808,6 +2207,24 @@ function renderTools(side) {
       row.appendChild(el('span', 'small',
         flags.length ? flags.join(' | ') : 'trusted, no side effects'));
       card.appendChild(row);
+      if (t.risk_override) {
+        const override = el('div', 'small tool-override');
+        override.appendChild(document.createTextNode(
+          'override: ' + t.risk_override + ' (always allow) '));
+        override.appendChild(btn('Revoke override', null, async () => {
+          const out = await api('/api/tools/' + encodeURIComponent(t.name) +
+            '/risk', {method: 'POST', body: {risk: null}});
+          if (out) toast('Risk override revoked for ' + t.name + '.');
+          refresh(true);
+        }));
+        card.appendChild(override);
+      }
+      if (t.summary_template) {
+        const template = String(t.summary_template);
+        card.appendChild(el('div', 'small tool-summary-template',
+          'summary template: ' +
+          (template.length > 180 ? template.slice(0, 180) + '…' : template)));
+      }
     }
     side.appendChild(card);
   }
@@ -2250,8 +2667,78 @@ $('input').addEventListener('keydown', (e) => {
 });
 $('banner').onclick = () => switchTab('approvals');
 $('drawerclose').onclick = () => { $('drawer').hidden = true; };
+
+function approvalShortcutAllowed(e) {
+  if (tab !== 'chat' || !(state.approvals || []).length) return false;
+  if (e.ctrlKey || e.metaKey || e.altKey) return false;
+  const active = document.activeElement;
+  if (active) {
+    const tag = String(active.tagName || '').toUpperCase();
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return false;
+    if (active.isContentEditable) return false;
+    if (active.closest && active.closest('[contenteditable="true"]')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function firstChatApprovalCard() {
+  return $('chat').querySelector('.approval-card');
+}
+
+function openFirstApprovalEdit() {
+  const card = firstChatApprovalCard();
+  if (!card) return;
+  const cardState = approvalCardStates[card.dataset.approvalId];
+  if (cardState) cardState.editOpen = true;
+  const form = card.querySelector('.approval-form');
+  if (!form) return;
+  form.hidden = false;
+  const first = form.querySelector('input, textarea, select');
+  if (first) first.focus();
+}
+
+function focusFirstApprovalReason() {
+  const card = firstChatApprovalCard();
+  if (!card) return;
+  const reason = card.querySelector('input.approval-reason');
+  if (reason) reason.focus();
+}
+
+function closeApprovalEditForms() {
+  const active = document.activeElement;
+  if (active && active.closest && active.closest('.approval-form') &&
+      active.blur) {
+    active.blur();
+  }
+  document.querySelectorAll('.approval-form').forEach((form) => {
+    form.hidden = true;
+  });
+  for (const id of Object.keys(approvalCardStates)) {
+    approvalCardStates[id].editOpen = false;
+  }
+}
+
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') $('drawer').hidden = true;
+  if (e.key === 'Escape') {
+    $('drawer').hidden = true;
+    closeApprovalEditForms();
+    return;
+  }
+  if (!approvalShortcutAllowed(e)) return;
+  const key = String(e.key || '').toLowerCase();
+  if (key === 'a') {
+    e.preventDefault();
+    const first = (state.approvals || [])[0];
+    if (first) decideApproval(first.id, 'approve', {});
+  } else if (key === 'e') {
+    e.preventDefault();
+    openFirstApprovalEdit();
+  } else if (key === 'r') {
+    e.preventDefault();
+    focusFirstApprovalReason();
+  }
 });
 document.querySelectorAll('#nav button').forEach((b) => {
   b.onclick = () => switchTab(b.dataset.tab);

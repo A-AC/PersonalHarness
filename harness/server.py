@@ -19,12 +19,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from . import util
+from . import __version__, git_sha, util
 from .app import App
+from .approvals import ApprovalError
 from .config import EDITABLE_KEYS, ConfigError, save_config, validate_group_update
+from .db import SCHEMA_VERSION
 from .inbox import InboxError, InboxTooLarge
 from .memory import KINDS as MEMORY_KINDS
 from .modules.types import ModuleBinding
+from .tools import ToolError
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 # Assets are served through the same authenticated handler as the page. No
@@ -160,10 +163,35 @@ class Server:
             },
         }
 
+    def _approval_payload(self, approval: dict[str, Any]) -> dict[str, Any]:
+        """Add the fields needed to render and edit an approval."""
+        spec = self.app.tools.resolve_optional(
+            str(approval.get("tool") or "")
+        )
+        action = (approval.get("meta") or {}).get("action", "tool")
+        meta = approval.get("meta") or {}
+        feedback = meta.get("feedback") if isinstance(meta, dict) else ""
+        approval["summary"] = self.app.runtime.summary_for(approval)
+        approval["schema"] = (
+            dict(spec.parameters) if spec is not None else {}
+        )
+        approval["editable"] = bool(
+            action in ("tool", "create_domain") and spec is not None
+        )
+        approval["supersedes_id"] = approval.get("supersedes_id")
+        approval["feedback"] = str(feedback or "")
+        approval["side_effects"] = bool(spec.side_effects) if spec else True
+        approval["read_only"] = bool(spec.read_only) if spec else False
+        approval["tainted"] = bool(
+            self.app.runtime.run_tainted(approval["run_id"])
+        )
+        return approval
+
     def _approvals_payload(self) -> dict[str, Any]:
-        approvals = self.app.approvals.pending()
-        for approval in approvals:
-            approval["summary"] = self.app.approvals.describe(approval)
+        approvals = [
+            self._approval_payload(approval)
+            for approval in self.app.approvals.pending()
+        ]
         return {
             "approvals": approvals,
             "counts": {"pending_approvals": len(approvals)},
@@ -425,7 +453,8 @@ class Server:
             "toolset": latest_toolset,
             "executions": [dict(r) for r in executions],
             "approvals": [
-                a for a in self.app.approvals.pending(task_id)
+                self._approval_payload(a)
+                for a in self.app.approvals.pending(task_id)
             ],
             "messages": self.app.messages.for_task(task_id),
             "context_sources": util.loads(
@@ -479,22 +508,44 @@ class Server:
             return _err("unauthorized", 401)
         approval_id = request.path_params["approval_id"]
         decision = request.path_params["decision"]
-        if decision not in ("approve", "reject", "cancel"):
-            return _err("invalid decision")
+        if decision not in (
+            "approve", "reject", "cancel", "revise", "edit"
+        ):
+            return _err("invalid decision", 400)
         approval = self.app.approvals.get(approval_id)
         if approval is None:
             return _err("no such approval", 404)
+        body = await self._body(request)
+        feedback = body.get("feedback", "")
+        if not isinstance(feedback, str):
+            return _err("feedback must be a string", 400)
+        arguments = body.get("arguments")
+        if arguments is not None and not isinstance(arguments, dict):
+            return _err("arguments must be a JSON object", 400)
+        remember = body.get("remember", False)
+        if not isinstance(remember, bool):
+            return _err("remember must be a boolean", 400)
         try:
             result = await run_in_threadpool(
                 self.app.runtime.decide_approval,
                 approval_id, decision, "web",
+                feedback=feedback,
+                arguments=arguments,
+                remember=remember,
             )
-        except Exception as exc:
+        except ApprovalError as exc:
             return _err(str(exc), 409)
-        return _json({
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        payload = {
             "status": result.status, "message": result.message,
             "task_id": result.task_id, "approval_id": result.approval_id,
-        })
+        }
+        latest_id = result.approval_id or approval_id
+        latest = self.app.approvals.get(latest_id)
+        if latest is not None:
+            payload["summary"] = self.app.runtime.summary_for(latest)
+        return _json(payload)
 
     # -- schedules ----------------------------------------------------------------
 
@@ -1183,6 +1234,10 @@ class Server:
         app = self.app
         summary = self._summary_payload()
         return {
+            "version": __version__,
+            "git_sha": git_sha(),
+            "schema_version": SCHEMA_VERSION,
+            "data_dir": str(Path(app.data_dir).resolve()),
             "counts": summary["counts"],
             "working_task": summary["working_task"],
             "scheduler": summary["scheduler"],
@@ -1211,10 +1266,35 @@ class Server:
                  "module": spec.module,
                  "side_effects": spec.side_effects,
                  "read_only": spec.read_only,
-                 "untrusted_output": spec.untrusted_output}
+                 "untrusted_output": spec.untrusted_output,
+                 "risk_override": self.app.tools.risk_override(spec.name),
+                 "summary_template": spec.summary_template}
                 for spec in self.app.tools.specs()
             ],
             "mcp_status": self.app.modules.status,
+        })
+
+    async def tool_risk(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        tool_name = request.path_params["tool_name"]
+        body = await self._body(request)
+        if "risk" not in body:
+            return _err("risk must be 'low', 'confirm', or null", 400)
+        risk = body.get("risk")
+        if risk not in ("low", "confirm", None):
+            return _err("risk must be 'low', 'confirm', or null", 400)
+        try:
+            self.app.tools.set_risk_override(tool_name, risk)
+        except ToolError as exc:
+            return _err(str(exc), 400)
+        spec = self.app.tools.resolve_optional(tool_name)
+        if spec is None:
+            return _err(f"unknown tool: {tool_name}", 404)
+        return _json({
+            "tool": tool_name,
+            "risk": spec.risk,
+            "risk_override": self.app.tools.risk_override(tool_name),
         })
 
     async def endpoint_probe(self, request: Request) -> Response:
@@ -1347,6 +1427,8 @@ class Server:
             Route("/api/skills/{skill_id}", self.skills_delete,
                   methods=["DELETE"]),
             Route("/api/tools", self.tools_list, methods=["GET"]),
+            Route("/api/tools/{tool_name}/risk", self.tool_risk,
+                  methods=["POST"]),
             Route("/api/system", self.system_overview, methods=["GET"]),
             Route("/api/endpoint-probe", self.endpoint_probe, methods=["GET"]),
             Route("/api/config", self.config_get, methods=["GET"]),

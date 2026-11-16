@@ -149,6 +149,12 @@ def cmd_status(args: argparse.Namespace) -> None:
             f"{schedule['kind']:<8} {schedule['name'][:30]:<32}"
             f" next={_local_time(schedule['next_due_at'])} tz={schedule['tz']}"
         )
+    system = client.call("GET", "/api/system")
+    print("== system ==")
+    version = system.get("version") or "unknown"
+    git = system.get("git_sha") or "unknown"
+    schema = system.get("schema_version")
+    print(f"  version {version}  git {git}  schema v{schema or '?'}")
 
 
 def cmd_tasks(args: argparse.Namespace) -> None:

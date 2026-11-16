@@ -95,6 +95,7 @@ auto-detected) or to the file named by `tools.mcp_servers_file`:
       ],
       "tool_prefix": "",
       "risk_default": "confirm",
+      "trust_annotations": true,
       "side_effects": true,
       "startup": "lazy",
       "timeout_s": 60
@@ -108,16 +109,23 @@ locally and in Docker. The import runs on startup and creates the
 `mcp:calendar` module row once. After editing the entry, apply the change with
 `python -m harness modules --reload` (reload also re-reads the file).
 
-The generic MCP loader has one risk class per module, so choose a policy:
+The server marks `calendar_list_calendars`, `calendar_list_events`, and
+`calendar_get_event` with the MCP `readOnlyHint` annotation. With
+`trust_annotations: true` on the entry (the recommended registration above),
+those three tools are low-risk and read-only, while
+`calendar_create_event`, `calendar_update_event`, and `calendar_delete_event`
+stay confirm-risk and side-effecting. Annotations are claims, so they are
+honoured only for a trusted entry; a third-party server cannot downgrade its
+own write tools. Correct an individual tool with
+`tool_risk: {"calendar_get_event": "confirm"}` (risk only; trust flags are
+unchanged).
 
-- **Reads only:** set `read_only: true` in the calendar config and, in the
-  entry, `autoapprove: true`, `read_only: true`, `risk_default: low`. The
-  server hides the write tools and the harness treats the rest as read-only,
-  so reads do not need approval even after untrusted output taints the run.
-- **Reads and writes:** keep the entry above (`risk_default: confirm`,
-  `side_effects: true`) so every call needs approval, or set
-  `autoapprove: true`/`risk_default: low` to auto-approve calls; after an
-  untrusted result taints the run, side-effecting calls still need approval.
+- **Reads only:** set `read_only: true` in the calendar config. The server
+  hides the write tools, and with the entry above reads need no approval even
+  after untrusted output taints the run.
+- **Reads and writes:** keep the entry above. Reads run without an approval;
+  writes need one, and after an untrusted result taints the run every
+  side-effecting call still needs approval.
 
 Restrict the surface with `tools_allow` (unprefixed names) when only some
 operations are wanted, e.g. `calendar_list_calendars`,
@@ -138,9 +146,10 @@ on every request.
 
 ## Safety notes
 
-- Read results are low-risk/read-only; writes are confirm-risk and
-  side-effecting under the recommended registration, and all results are
-  untrusted data.
+- Annotated reads are low-risk/read-only and the write tools are
+  confirm-risk and side-effecting under the recommended registration. All
+  results are untrusted data: a read taints the run and later side-effecting
+  calls still need approval.
 - Updates/deletes first find the record by exact UID and send `If-Match`, so
   an unknown UID never targets another event and a concurrent edit returns
   HTTP 412 instead of being clobbered.

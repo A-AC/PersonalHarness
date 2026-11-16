@@ -14,6 +14,7 @@ the exact arguments; outcomes are recorded as they are, including unknown.
 from __future__ import annotations
 
 import functools
+import hashlib
 import threading
 import time
 from dataclasses import dataclass
@@ -34,9 +35,16 @@ from .model import (
     ToolCall,
 )
 from .store import Domains, Events, Messages, Tasks
+from .tools import ToolError, validate_arguments
 
 
 SKILL_WRITE_TOOLS = frozenset({"propose_skill", "edit_skill"})
+
+_REVISION_CUES = (
+    "instead", "change", "make it", "change it", "use ", "not that",
+    "rather", "shorter", "longer", "different", "rename", "add ", "remove ",
+    "rewrite", "try ", "but ", "don't", "do not", "actually",
+)
 
 
 @dataclass
@@ -178,6 +186,42 @@ class AgentRuntime:
     def _save_meta(self, run_id: str, meta: dict[str, Any]) -> None:
         self._save_run(run_id, meta=util.dumps(meta))
 
+    @staticmethod
+    def _args_hash(arguments: dict[str, Any]) -> str:
+        """Hash canonical JSON arguments for exact denial matching."""
+        canonical = util.dumps(arguments).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def _denied_actions(self, run_id: str) -> list[dict[str, Any]]:
+        denied = self._run_meta(run_id).get("denied_actions")
+        if not isinstance(denied, list):
+            return []
+        return [entry for entry in denied if isinstance(entry, dict)]
+
+    def _remember_denied_action(
+        self, run_id: str, tool: str, arguments: dict[str, Any]
+    ) -> None:
+        """Remember a rejected action in this run, newest entries last."""
+        meta = self._run_meta(run_id)
+        denied = meta.get("denied_actions")
+        if not isinstance(denied, list):
+            denied = []
+        denied.append({
+            "tool": str(tool),
+            "args_hash": self._args_hash(arguments),
+            "at": util.iso(),
+        })
+        meta["denied_actions"] = denied[-20:]
+        self._save_run(run_id, meta=util.dumps(meta))
+
+    def _clear_denied_actions(self, run_id: str) -> None:
+        """A new user turn permits asking again in the same run."""
+        meta = self._run_meta(run_id)
+        if "denied_actions" not in meta:
+            return
+        meta.pop("denied_actions", None)
+        self._save_run(run_id, meta=util.dumps(meta))
+
     def _toolset(self, run_id: str) -> dict[str, Any]:
         snapshot = self._run_meta(run_id).get("toolset")
         return snapshot if isinstance(snapshot, dict) else {}
@@ -281,6 +325,15 @@ class AgentRuntime:
         sources = self._run_meta(run_id).get("tainted_sources")
         return sources if isinstance(sources, list) else []
 
+    def _first_taint_origin(self, run_id: str) -> str:
+        """The first recorded untrusted origin for the run, '' when clean."""
+        taint = self._taint_sources(run_id)
+        return str(taint[0].get("origin") or "") if taint else ""
+
+    def run_tainted(self, run_id: str) -> bool:
+        """Whether the run has consumed untrusted content."""
+        return bool(self._taint_sources(run_id))
+
     def _taint_origin(self, result: Any, tool: str = "") -> str:
         """Name the external origin an approval prompt must identify.
 
@@ -369,6 +422,11 @@ class AgentRuntime:
                     return self._apply_quick_decision(
                         text, source, quick, pending
                     )
+                target = self._revision_feedback_target(text, pending)
+                if target is not None:
+                    return self._revise_from_user_message(
+                        text, source, target
+                    )
                 if (
                     quick
                     and quick["kind"] in ("ambiguous", "ambiguous_multiple")
@@ -398,6 +456,73 @@ class AgentRuntime:
             "does", "do", "did", "can", "could", "will", "would", "should",
             "is", "are", "was", "were", "explain", "tell",
         }
+
+    def _revision_feedback_target(
+        self, text: str, pending: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Return the one pending approval targeted by revision feedback."""
+        if len(pending) != 1:
+            return None
+        stripped = (text or "").strip()
+        if not stripped or self._looks_like_question(stripped):
+            return None
+        if len(stripped) > 600 or len(stripped.split()) > 60:
+            return None
+
+        approval = pending[0]
+        task = self.tasks.get(approval.get("task_id"))
+        if task is None:
+            return None
+        domain_id = task.get("domain_id")
+        candidate = self.tasks.find_resume_candidate(
+            stripped, domain_id=domain_id
+        )
+        candidate_task = candidate.get("task")
+        if (
+            candidate_task is not None
+            and candidate_task.get("id") != approval.get("task_id")
+            and float(candidate.get("score") or 0.0) >= 2.0
+        ):
+            # A strong match for another task is a new topic, not feedback.
+            return None
+
+        lowered = " ".join(stripped.lower().split())
+        if any(cue in lowered for cue in _REVISION_CUES):
+            return approval
+
+        reply_words = set(util.keywords(stripped))
+        if not reply_words:
+            return None
+        context = set(
+            util.keywords(str(approval.get("tool") or "").replace("_", " "))
+        )
+        arguments = approval.get("arguments") or {}
+        if isinstance(arguments, dict):
+            for value in arguments.values():
+                if isinstance(value, str):
+                    context.update(util.keywords(value))
+        context.update(util.keywords(str(approval.get("reason") or "")))
+        context.update(util.keywords(str(task.get("objective") or "")))
+        return approval if reply_words & context else None
+
+    def _revise_from_user_message(
+        self, text: str, source: str, approval: dict[str, Any]
+    ) -> RunResult:
+        """Record free-text feedback, close the approval, and re-propose."""
+        message_id = self.messages.record("user", text, source=source)
+        self.db.execute(
+            "UPDATE messages SET task_id=?, domain_id=? WHERE id=?",
+            (
+                approval["task_id"],
+                self._task_domain(approval["task_id"]),
+                message_id,
+            ),
+        )
+        self._clear_denied_actions(approval["run_id"])
+        revised = self.approvals.revise(
+            approval["id"], feedback=text, decided_by=f"feedback:{source}"
+        )
+        return self.resume_after_revision(revised, text, source)
 
     def _ask_which_approval(
         self, text: str, source: str, quick: dict[str, Any]
@@ -657,6 +782,7 @@ class AgentRuntime:
         if run["status"] == "waiting_approval":
             return self._ask_while_approval_pending(task, text, message_id)
         self.tasks.clear_retry(task["id"])
+        self._clear_denied_actions(run["id"])
         self._append_transcript(
             run["id"], {"role": "user", "content": text}
         )
@@ -675,6 +801,7 @@ class AgentRuntime:
         if run is None or run["status"] not in ("waiting_user", "interrupted"):
             return self.resume_task(task, text, message_id)
         self.tasks.clear_retry(task["id"])
+        self._clear_denied_actions(run["id"])
         self._append_transcript(run["id"], {"role": "user", "content": text})
         self._save_run(run["id"], status="running", ended_at=None)
         self.tasks.set_status(task["id"], "active", reason="user answered")
@@ -689,6 +816,7 @@ class AgentRuntime:
         the unapproved action."""
         run = self._latest_run(task["id"])
         assert run is not None
+        self._clear_denied_actions(run["id"])
         self._append_transcript(
             run["id"],
             {"role": "user", "content": (
@@ -703,7 +831,14 @@ class AgentRuntime:
 
     @_serialized
     def decide_approval(
-        self, approval_id: str, decision: str, source: str = "web"
+        self,
+        approval_id: str,
+        decision: str,
+        source: str = "web",
+        *,
+        feedback: str = "",
+        arguments: dict[str, Any] | None = None,
+        remember: bool = False,
     ) -> RunResult:
         """Decide an approval and run its consequence under one lock.
 
@@ -713,12 +848,157 @@ class AgentRuntime:
         approval = self.approvals.get(approval_id)
         if approval is None:
             raise ValueError(f"no such approval: {approval_id}")
-        decided = self.approvals.decide(
-            approval_id, decision, decided_by=source
-        )
         if decision == "approve":
+            # Validate the override before deciding, so a failed decision
+            # never changes policy; apply it once the decision is committed.
+            remember_tool = (
+                self._always_allow_tool(approval) if remember else ""
+            )
+            decided = self.approvals.decide(
+                approval_id, "approve", decided_by=source
+            )
+            if remember_tool:
+                self._remember_always_allow(decided, remember_tool)
             return self.resume_after_approval(decided, source)
-        return self.resume_after_rejection(decided, source)
+        if decision == "reject":
+            if str(feedback or "").strip():
+                revised = self.approvals.revise(
+                    approval_id, feedback=feedback, decided_by=source
+                )
+                return self.resume_after_revision(revised, feedback, source)
+            decided = self.approvals.decide(
+                approval_id, "reject", decided_by=source
+            )
+            return self.resume_after_rejection(decided, source)
+        if decision == "revise":
+            if not str(feedback or "").strip():
+                raise ValueError("a revision requires non-blank feedback")
+            revised = self.approvals.revise(
+                approval_id, feedback=feedback, decided_by=source
+            )
+            return self.resume_after_revision(revised, feedback, source)
+        if decision == "edit":
+            if not isinstance(arguments, dict):
+                raise ValueError("an edit requires a JSON object of arguments")
+            return self.edit_approval(approval_id, arguments, source)
+        if decision == "cancel":
+            decided = self.approvals.decide(
+                approval_id, "cancel", decided_by=source
+            )
+            return self.resume_after_rejection(decided, source)
+        raise ValueError(f"invalid approval decision: {decision}")
+
+    def _always_allow_tool(self, approval: dict[str, Any]) -> str:
+        """Validate a narrow always-allow request; return the tool name."""
+        action = (approval.get("meta") or {}).get("action", "tool")
+        tool = str(approval.get("tool") or "")
+        if action != "tool":
+            raise ValueError(
+                "always allow is available only for tool approvals"
+            )
+        spec = self.tools.resolve_optional(tool)
+        if spec is None:
+            raise ValueError(f"always allow requires an existing tool: {tool}")
+        if tool in SKILL_WRITE_TOOLS:
+            raise ValueError(
+                f"always allow is not available for skill write tool {tool}"
+            )
+        if spec.side_effects:
+            raise ValueError(
+                f"always allow is not available for side-effecting tool {tool}"
+            )
+        if self._taint_sources(approval["run_id"]):
+            raise ValueError(
+                "always allow is not available in a run with untrusted sources"
+            )
+        return tool
+
+    def _remember_always_allow(
+        self, approval: dict[str, Any], tool: str
+    ) -> None:
+        """Persist the validated always-allow override for one tool."""
+        try:
+            self.tools.set_risk_override(tool, "low")
+        except ToolError as exc:
+            raise ValueError(str(exc)) from exc
+        self.events.record(
+            "approval.remembered", task_id=approval["task_id"],
+            run_id=approval["run_id"],
+            data={
+                "approval_id": approval["id"],
+                "tool": tool,
+                "risk_override": "low",
+            },
+        )
+
+    @_serialized
+    def edit_approval(
+        self,
+        approval_id: str,
+        arguments: dict[str, Any],
+        source: str,
+    ) -> RunResult:
+        """Validate edited arguments, supersede the request, and execute it."""
+        approval = self.approvals.get(approval_id)
+        if approval is None:
+            raise ValueError(f"no such approval: {approval_id}")
+        if approval.get("status") != "pending":
+            raise ApprovalError(
+                f"approval {approval_id} is already {approval.get('status')}"
+            )
+        expires_at = approval.get("expires_at")
+        if expires_at and util.parse_iso(expires_at) < util.now_utc():
+            raise ApprovalError(f"approval {approval_id} expired")
+        action = (approval.get("meta") or {}).get("action", "tool")
+        if action not in ("tool", "create_domain"):
+            raise ValueError(f"approval action cannot be edited: {action}")
+        spec = self.tools.resolve_optional(str(approval.get("tool") or ""))
+        if spec is None:
+            raise ValueError(
+                f"approval tool does not exist: {approval.get('tool')}"
+            )
+        validated = validate_arguments(spec, arguments)
+
+        taint = self._taint_sources(approval["run_id"])
+        if taint and spec.side_effects and not spec.read_only:
+            if spec.risk != "confirm":
+                self.events.record(
+                    "trust.escalated", task_id=approval["task_id"],
+                    run_id=approval["run_id"],
+                    data={
+                        "tool": spec.name,
+                        "module": spec.module,
+                        "from_risk": spec.risk,
+                        "origin": str(taint[0].get("origin") or ""),
+                        "via": "user_edit",
+                    },
+                )
+
+        old_reason = str(approval.get("reason") or "").strip()
+        reason = (
+            f"{old_reason} (edited by user)" if old_reason
+            else "(edited by user)"
+        )
+        replacement = self.approvals.supersede(
+            approval_id,
+            arguments=validated,
+            reason=reason,
+            risk=str(approval.get("risk") or spec.risk),
+            decided_by=f"edit:{source}",
+        )
+        decided = self.approvals.decide(
+            replacement["id"], "approve", decided_by=f"edit:{source}"
+        )
+        return self.resume_after_approval(decided, source)
+
+    def summary_for(self, approval: dict[str, Any]) -> str:
+        """Human summary for an approval, using its tool template if present."""
+        spec = self.tools.resolve_optional(str(approval.get("tool") or ""))
+        if spec is not None and spec.summary_template:
+            return self.approvals.summarize(
+                approval, spec.summary_template
+            )
+        return self.approvals.describe(approval)
 
     def resume_approved_approvals(self) -> list[RunResult]:
         """Execute approvals that were granted just before a crash."""
@@ -787,22 +1067,46 @@ class AgentRuntime:
             raw_arguments=util.dumps(approval["arguments"]),
         )
         ctx = self.app.tool_context(run["id"], task["id"], task.get("domain_id"))
+        # The run's taint still applies to the approved execution: a
+        # tainted memory write must stay provenance-marked at the moment
+        # the memory is actually written.
+        ctx.tainted_origin = self._first_taint_origin(run["id"])
         allowed = self._allowed_tool_names(run["id"])
+        spec = self.tools.resolve_optional(call.name)
         outcome = self.tools.execute(
             call, ctx, run_id=run["id"], task_id=task["id"],
             execution_id=execution_id, approval_id=approval["id"],
             allowed_names=allowed, role=task.get("role") or "user",
         )
         if outcome.get("status") == "succeeded":
-            spec = self.tools.resolve_optional(call.name)
             if spec is not None and spec.untrusted_output:
                 self._mark_tainted(
                     run["id"], call.name, spec.module,
                     self._taint_origin(outcome.get("result"), call.name),
                 )
         self.approvals.mark_executed(approval["id"])
+        if (approval.get("meta") or {}).get("edited_from"):
+            edited = dict(outcome)
+            if "result" in edited:
+                result = edited["result"]
+                if isinstance(result, dict):
+                    edited["result"] = {
+                        **result,
+                        "user_edited_arguments": approval["arguments"],
+                    }
+                else:
+                    edited["result"] = {
+                        "result": result,
+                        "user_edited_arguments": approval["arguments"],
+                    }
+            else:
+                edited["user_edited_arguments"] = approval["arguments"]
+            outcome = edited
         self._append_tool_result(
-            run["id"], call.id, outcome, approval["id"]
+            run["id"], call.id, outcome, approval["id"],
+            untrusted=bool(spec is not None and spec.untrusted_output),
+            tool=call.name,
+            origin=self._first_taint_origin(run["id"]),
         )
         self._save_run(
             run["id"], status="running", ended_at=None,
@@ -823,6 +1127,11 @@ class AgentRuntime:
                 "stale", approval["run_id"], approval["task_id"],
                 message="That approval no longer matches the pending action.",
             )
+        current = self.approvals.get(approval["id"]) or approval
+        if current.get("status") == "rejected":
+            self._remember_denied_action(
+                run["id"], current["tool"], current.get("arguments") or {}
+            )
         call_id = approval.get("tool_call_id") or "rejected_call"
         self._append_tool_result(
             run["id"], call_id,
@@ -840,6 +1149,45 @@ class AgentRuntime:
             )
         self._save_run(run["id"], status="running", ended_at=None)
         self.tasks.set_status(task["id"], "active", reason="rejected")
+        run = self._run_row(run["id"])
+        return self._loop(run, {"kind": "approval"})
+
+    @_serialized
+    def resume_after_revision(
+        self, approval: dict[str, Any], feedback: str, source: str
+    ) -> RunResult:
+        """Close a revised request and let the model propose a replacement."""
+        run = self._run_row(approval["run_id"])
+        task = self.tasks.get(approval["task_id"])
+        if run is None or task is None or run["status"] != "waiting_approval":
+            return RunResult(
+                "stale", approval["run_id"], approval["task_id"],
+                message="That approval no longer matches the pending action.",
+            )
+        current = self.approvals.get(approval["id"]) or approval
+        self._clear_denied_actions(run["id"])
+        call_id = current.get("tool_call_id") or "revised_call"
+        self._append_tool_result(
+            run["id"], call_id,
+            {
+                "status": "revision_requested",
+                "feedback": util.clip(str(feedback or ""), 2000),
+                "note": (
+                    "the user asked for a change; propose the revised action "
+                    "if it is still needed"
+                ),
+            },
+            current["id"],
+        )
+        execution_id = self._awaiting_execution_id(current["id"])
+        if execution_id:
+            self.db.execute(
+                "UPDATE tool_executions SET status='denied', ended_at=?,"
+                " error='revised by user' WHERE id=?",
+                (util.iso(), execution_id),
+            )
+        self._save_run(run["id"], status="running", ended_at=None)
+        self.tasks.set_status(task["id"], "active", reason="revised")
         run = self._run_row(run["id"])
         return self._loop(run, {"kind": "approval"})
 
@@ -1092,9 +1440,15 @@ class AgentRuntime:
                             message=outcome.get("message", ""),
                             approval_id=outcome.get("approval_id"),
                         )
+                    spec = self.tools.resolve_optional(call.name)
                     self._append_tool_result(
                         run_id, call.id, outcome,
                         outcome.get("approval_id"),
+                        untrusted=bool(
+                            spec is not None and spec.untrusted_output
+                        ),
+                        tool=call.name,
+                        origin=self._first_taint_origin(run_id),
                     )
                     self._save_run(run_id, tool_calls=tool_calls + 1)
                     if (
@@ -1174,6 +1528,97 @@ class AgentRuntime:
     # Tool-call handling
     # ------------------------------------------------------------------
 
+    def _skill_denial_arguments(
+        self, run_id: str, tool: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return the arguments a skill call would put in its approval."""
+        skills = self.app.modules.skills
+        pending = self.approvals.pending_for_run(run_id)
+        name = str(arguments.get("name") or "").strip()
+        pending_name = str(
+            ((pending or {}).get("arguments") or {}).get("name") or ""
+        ).strip().lower()
+        refining = (
+            pending is not None
+            and tool in SKILL_WRITE_TOOLS
+            and pending.get("tool") in SKILL_WRITE_TOOLS
+            and bool(name)
+            and name.lower() == pending_name
+        )
+        try:
+            if refining:
+                return skills.merge_fields(
+                    dict(pending.get("arguments") or {}),
+                    description=arguments.get("description"),
+                    preconditions=arguments.get("preconditions"),
+                    domains=arguments.get("domains"),
+                    body=arguments.get("body"),
+                )
+            if tool == "edit_skill":
+                _, planned = skills.edit_plan(
+                    name=name,
+                    description=arguments.get("description"),
+                    preconditions=arguments.get("preconditions"),
+                    domains=arguments.get("domains"),
+                    body=arguments.get("body"),
+                )
+                return planned
+            return skills.validate_fields(
+                name=name,
+                description=str(arguments.get("description") or ""),
+                preconditions=arguments.get("preconditions"),
+                domains=arguments.get("domains"),
+                body=str(arguments.get("body") or ""),
+            )
+        except ValueError:
+            # The normal tool path will report the precise validation error.
+            return arguments
+
+    def _rejected_approval_id(
+        self, run_id: str, tool: str, args_hash: str
+    ) -> str:
+        """Find the rejected approval for an exact action, if still known."""
+        rows = self.db.query(
+            "SELECT id, arguments FROM approvals WHERE run_id=? AND tool=?"
+            " AND status='rejected' ORDER BY created_at DESC, rowid DESC",
+            (run_id, tool),
+        )
+        for row in rows:
+            arguments = util.loads(row["arguments"] or "{}", {})
+            if self._args_hash(arguments) == args_hash:
+                return str(row["id"])
+        return ""
+
+    def _repeat_denied_result(
+        self,
+        run_id: str,
+        task_id: str,
+        tool: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Deny an exact action the user already rejected in this run."""
+        args_hash = self._args_hash(arguments)
+        denied = self._denied_actions(run_id)
+        if not any(
+            entry.get("tool") == tool
+            and entry.get("args_hash") == args_hash
+            for entry in denied
+        ):
+            return None
+        approval_id = self._rejected_approval_id(run_id, tool, args_hash)
+        self.events.record(
+            "approval.repeat_denied", level="warn", task_id=task_id,
+            run_id=run_id,
+            data={"tool": tool, "approval": approval_id},
+        )
+        return {
+            "status": "denied",
+            "error": (
+                "The user already rejected this exact action in this run. "
+                "Do not propose it again unless the user asks for it anew."
+            ),
+        }
+
     def _handle_tool_call(
         self, run: dict[str, Any], task: dict[str, Any], call: ToolCall
     ) -> dict[str, Any]:
@@ -1182,6 +1627,25 @@ class AgentRuntime:
         # A sub-agent asking for a confirm-risk or parent-only tool gets an
         # explicit blocked result for its parent instead of an approval.
         known = self.tools.resolve_optional(call.name)
+        validated_arguments: dict[str, Any] | None = None
+        if known is not None:
+            try:
+                validated_arguments = validate_arguments(
+                    known, call.arguments
+                )
+            except ToolError:
+                # Preserve the existing, tool-specific validation error path.
+                validated_arguments = None
+        if validated_arguments is not None:
+            if call.name in SKILL_WRITE_TOOLS:
+                validated_arguments = self._skill_denial_arguments(
+                    run_id, call.name, validated_arguments
+                )
+            denied = self._repeat_denied_result(
+                run_id, task_id, call.name, validated_arguments
+            )
+            if denied is not None:
+                return denied
         restriction = (
             self.tools.role_restriction(known, role) if known else None
         )
@@ -1396,11 +1860,18 @@ class AgentRuntime:
                 f"before {call.name} can change state"
                 if tainted_side_effect else f"confirm-risk tool: {call.name}"
             )
+            revised = self.db.query_one(
+                "SELECT id FROM approvals WHERE run_id=? AND tool=?"
+                " AND status='revised' ORDER BY created_at DESC, rowid DESC"
+                " LIMIT 1",
+                (run_id, call.name),
+            )
+            supersedes_id = str(revised["id"]) if revised else None
             approval = self.approvals.create(
                 task_id=task_id, run_id=run_id, action=action,
                 tool=call.name, arguments=arguments,
                 risk=effective_risk, tool_call_id=call.id,
-                reason=reason,
+                reason=reason, supersedes_id=supersedes_id,
             )
             execution_id = util.new_id("ex")
             self.db.execute(
@@ -1468,6 +1939,10 @@ class AgentRuntime:
             }
 
         ctx = self.app.tool_context(run_id, task_id, task.get("domain_id"))
+        # Carry the taint origin into execution so memory handlers can
+        # mark provenance when a (non-escalated) write happens in a
+        # tainted run.
+        ctx.tainted_origin = taint_origin
         outcome = self.tools.execute(
             call, ctx, run_id=run_id, task_id=task_id,
             allowed_names=allowed, role=role,
@@ -1568,7 +2043,10 @@ class AgentRuntime:
 
     def _append_tool_result(
         self, run_id: str, call_id: str, outcome: dict[str, Any],
-        approval_id: str | None = None,
+        approval_id: str | None = None, *,
+        untrusted: bool = False,
+        tool: str = "",
+        origin: str = "",
     ) -> None:
         """Record one tool result, replacing an awaiting-approval placeholder.
 
@@ -1580,6 +2058,11 @@ class AgentRuntime:
         text = util.clip(util.dumps(body), int(
             self.config.get("limits.max_tool_result_chars", 6000)
         ))
+        status = str(outcome.get("status") or "")
+        if untrusted and status not in (
+            "awaiting_approval", "deferred", "unknown"
+        ):
+            text = util.untrusted_envelope(text, tool=tool, origin=origin)
         run = self._run_row(run_id)
         transcript = self._transcript(run)
         for index in range(len(transcript) - 1, -1, -1):

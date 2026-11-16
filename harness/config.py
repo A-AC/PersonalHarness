@@ -261,7 +261,24 @@ def _merge(defaults: dict, overlay: dict, path: str = "") -> dict:
         if isinstance(base, dict):
             if not isinstance(value, dict):
                 raise ConfigError(f"configuration key {loc} must be a mapping")
-            out[key] = _merge(base, value, loc)
+            if loc == "tools.risk_overrides":
+                # This mapping is intentionally keyed by arbitrary tool names.
+                overrides: dict[str, str] = {}
+                for name, risk in value.items():
+                    if not isinstance(name, str) or not name:
+                        raise ConfigError(
+                            "configuration key tools.risk_overrides "
+                            "requires non-empty string tool names"
+                        )
+                    if risk not in ("low", "confirm"):
+                        raise ConfigError(
+                            f"configuration key tools.risk_overrides.{name} "
+                            "must be 'low' or 'confirm'"
+                        )
+                    overrides[name] = risk
+                out[key] = overrides
+            else:
+                out[key] = _merge(base, value, loc)
         elif isinstance(base, bool):
             if not isinstance(value, bool):
                 raise ConfigError(f"configuration key {loc} must be true/false")

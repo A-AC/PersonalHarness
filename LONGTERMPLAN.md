@@ -1,6 +1,6 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phases 0-6 complete; Phase 7 waits on LaYa; Phases 8-13 proposed)
+Status: in progress (Phases 0-6 and 8 complete in code; Phase 7 waits on LaYa; Phases 9-13 proposed; Phase 8 staging and live-model runs pending)
 Last updated: 2026-11-15
 Scope: capability modules (skills + MCP servers), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture, approvals,
@@ -867,7 +867,31 @@ Verified in the code of the 2026-11-15 ZIP:
 
 ### Phase 8 - Approval rework and the quick-fix batch
 
-**Status:** proposed.
+**Status:** implemented (2026-11-16) in the working tree; staging and
+live-model verification still pending. 8.0, 8.1-8.4, 8A, and 8B-1/8B-2 are
+complete with deterministic coverage in `tests/test_deploy.py`,
+`tests/test_taint_memory.py`, `tests/test_mcp_tool_risk.py`,
+`tests/test_web_hardening.py`, `tests/test_approvals_reject.py`,
+`tests/test_approvals_rework.py`, and `tests/test_approval_cards_ui.py`.
+
+**Implementation notes.**
+
+- 8.2 chose policy (a): a tainted memory write becomes confirm-risk and the
+  approval names the untrusted origin; the row's provenance records
+  `tainted: true`.
+- 8.1 honours `annotations.readOnlyHint` only for a server with
+  `trust_annotations: true`; `tool_risk` overrides risk only; reads stay
+  `untrusted_output` so they still taint the run.
+- 8.3 confirmed H1 (an identical re-proposal after a rejection created a
+  second approval and a duplicate note). The fix is per-run denial memory
+  keyed by `(tool, sha256(canonical arguments))`, checked before any approval
+  is created and cleared by an explicit new user turn.
+- 8.4 sanitises and flags results in the web server and wraps every
+  untrusted tool result in a nonce envelope in the runtime.
+- 8B uses a revision chain (`revised` / `superseded`, `supersedes_id`)
+  rather than in-place mutation, adds structured edits, per-tool
+  `summary_template`, approve-and-remember risk overrides, and shared
+  approval cards in chat and the panel.
 
 Split into two commits. 8A is small and independent; 8B changes the approval
 interaction model.

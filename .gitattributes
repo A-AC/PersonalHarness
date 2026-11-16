@@ -1,1 +1,5 @@
 * text=auto eol=lf
+# Shell scripts and the Dockerfile run in the Linux container: CRLF line
+# endings authored on Windows would break them, so force LF explicitly.
+*.sh text eol=lf
+Dockerfile text eol=lf

@@ -61,6 +61,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # here: the retired group is serialized verbatim into the server's config file.
 RETIRED_MODULES = {"web": ""}
 MCP_JSON_PARSE_LIMIT = 1_000_000
+TOOL_RISK_LIMIT = 200
+SUMMARY_TEMPLATE_LIMIT = 200
 # Conventional files checked when no explicit import file is configured.
 DEFAULT_SERVERS_FILES = ("mcp.json", "mcp_servers.yaml", "mcp_servers.yml")
 _DATA_DIR_PLACEHOLDER = re.compile(r"\$\{data_dir\}|\$\{DATA_DIR\}")
@@ -74,6 +76,37 @@ def _sanitize_prefix(value: str) -> str:
     """Keep underscores (a prefix usually ends with one)."""
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(value or ""))
 
+
+def _sanitize_tool_risk(value: Any) -> dict[str, str]:
+    """Keep bounded per-tool risk overrides with valid names and values."""
+    if not isinstance(value, dict):
+        return {}
+    sanitized: dict[str, str] = {}
+    for name, risk in value.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(risk, str) or risk not in (RISK_LOW, RISK_CONFIRM):
+            continue
+        sanitized[name] = risk
+        if len(sanitized) >= TOOL_RISK_LIMIT:
+            break
+    return sanitized
+
+
+def _sanitize_summary_templates(value: Any) -> dict[str, str]:
+    """Keep bounded string templates keyed by server tool name."""
+    if not isinstance(value, dict):
+        return {}
+    sanitized: dict[str, str] = {}
+    for name, template in value.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(template, str):
+            continue
+        sanitized[name] = util.clip(template, SUMMARY_TEMPLATE_LIMIT)
+        if len(sanitized) >= SUMMARY_TEMPLATE_LIMIT:
+            break
+    return sanitized
 
 
 class McpModuleLoader:
@@ -527,6 +560,7 @@ class McpModuleLoader:
     @staticmethod
     def _manifest_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         autoapprove = bool(entry.get("autoapprove", False))
+        trust_annotations = entry.get("trust_annotations") is True
 
         def _strings(value: Any) -> list[str]:
             if isinstance(value, (list, tuple)):
@@ -552,6 +586,11 @@ class McpModuleLoader:
             "tools_allow": _strings(entry.get("tools_allow")),
             "tools_deny": _strings(entry.get("tools_deny")),
             "read_only": bool(entry.get("read_only", False)),
+            "trust_annotations": trust_annotations,
+            "tool_risk": _sanitize_tool_risk(entry.get("tool_risk")),
+            "summary_templates": _sanitize_summary_templates(
+                entry.get("summary_templates")
+            ),
             "startup": str(entry.get("startup") or "lazy"),
             "timeout_s": max(0.1, timeout),
         }
@@ -638,6 +677,11 @@ class McpModuleLoader:
             manifest["side_effects"] if "side_effects" in manifest
             else not read_only
         )
+        trust_annotations = manifest.get("trust_annotations") is True
+        tool_risk = _sanitize_tool_risk(manifest.get("tool_risk"))
+        summary_templates = _sanitize_summary_templates(
+            manifest.get("summary_templates")
+        )
         now = util.iso()
         tools: list[ModuleTool] = []
         seen: set[str] = set()
@@ -652,6 +696,21 @@ class McpModuleLoader:
             if name in deny:
                 continue
             seen.add(name)
+            effective_risk = risk
+            effective_read_only = read_only
+            effective_side_effects = side_effects
+            annotations = raw.get("annotations")
+            if (
+                trust_annotations
+                and isinstance(annotations, dict)
+                and annotations.get("readOnlyHint") is True
+            ):
+                effective_risk = RISK_LOW
+                effective_read_only = True
+                effective_side_effects = False
+            override = tool_risk.get(name)
+            if override in (RISK_LOW, RISK_CONFIRM):
+                effective_risk = override
             schema = dict(
                 raw.get("inputSchema")
                 or {"type": "object", "properties": {}}
@@ -661,13 +720,20 @@ class McpModuleLoader:
             schema["_harness_description"] = str(
                 raw.get("description") or ""
             )
+            summary_template = util.clip(
+                str(raw.get("summary_template") or ""),
+                SUMMARY_TEMPLATE_LIMIT,
+            )
+            if name in summary_templates:
+                summary_template = summary_templates[name]
+            schema["_harness_summary_template"] = summary_template
             tools.append(ModuleTool(
                 module_id=module.id,
                 tool_name=name,
                 schema=schema,
-                risk=risk,
-                side_effects=side_effects,
-                read_only=read_only,
+                risk=effective_risk,
+                side_effects=effective_side_effects,
+                read_only=effective_read_only,
                 last_seen=now,
             ))
         return tools
@@ -715,6 +781,9 @@ class McpModuleLoader:
                     read_only=tool.read_only,
                     untrusted_output=True,
                     scope=module.scope,
+                    summary_template=str(
+                        tool.schema.get("_harness_summary_template") or ""
+                    ),
                 ))
             except (ToolDenied, ToolError) as exc:
                 self.events.record(

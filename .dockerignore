@@ -5,7 +5,9 @@ __pycache__
 *.pyc
 *.pyo
 data
-tests
+# NOTE: tests/ is intentionally NOT ignored: the `test` build stage copies
+# it in to run the deterministic suite inside the image. It is not copied
+# into the runtime stage.
 .venv
 venv
 .env

@@ -9,19 +9,22 @@ text whose identity is tracked by the row that references them.
 
 Schema versioning: ``schema_meta.schema_version``; ``migrate()`` creates v1
 and can grow additive migrations later. Never rebuild in place without a
-backup path documented in the README.
+backup path documented in the README. Before migrating an existing database,
+``migrate()`` writes ``backups/pre-migrate-v<old>-to-v<new>-<ts>.zip`` into
+the data directory and aborts the migration if the backup cannot be written.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import threading
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Phase 3 memory lifetime: additive columns on ``memories`` plus a small
 # access table. ``archived_at`` marks an archived row without touching the
@@ -373,11 +376,13 @@ CREATE TABLE IF NOT EXISTS approvals (
   run_id TEXT NOT NULL,
   tool TEXT NOT NULL,
   tool_call_id TEXT,
+  supersedes_id TEXT,
   arguments TEXT NOT NULL,
   risk TEXT NOT NULL,
   reason TEXT,
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN
-    ('pending','approved','rejected','cancelled','executed','expired')),
+    ('pending','approved','rejected','cancelled','executed','expired',
+     'revised','superseded')),
   created_at TEXT NOT NULL,
   decided_at TEXT,
   decided_by TEXT,
@@ -448,7 +453,12 @@ class Database:
                     f"build (v{SCHEMA_VERSION}); upgrade the application"
                 )
             else:
-                self._migrate_to(int(row["value"]))
+                old_version = int(row["value"])
+                if old_version < SCHEMA_VERSION:
+                    # Never migrate unbacked-up data: snapshot first, and
+                    # abort (without bumping the version) if it fails.
+                    self._pre_migrate_backup(old_version)
+                self._migrate_to(old_version)
             # Safe for both fresh and upgraded databases: the column exists by
             # the time this runs.
             self._conn.executescript(MEMORY_LIFETIME_INDEX_SCHEMA)
@@ -544,11 +554,85 @@ FROM modules;
 DROP TABLE modules;
 ALTER TABLE modules_v7 RENAME TO modules;
 """)
+        if version < 8:
+            # Approval revisions are immutable audit records. Rebuild the table
+            # because SQLite cannot extend the status CHECK constraint, while
+            # preserving every existing approval row and column.
+            self._conn.executescript("""
+            DROP TABLE IF EXISTS approvals_v8;
+            CREATE TABLE approvals_v8 (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              run_id TEXT NOT NULL,
+              tool TEXT NOT NULL,
+              tool_call_id TEXT,
+              supersedes_id TEXT,
+              arguments TEXT NOT NULL,
+              risk TEXT NOT NULL,
+              reason TEXT,
+              status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN
+                ('pending','approved','rejected','cancelled','executed',
+                 'expired','revised','superseded')),
+              created_at TEXT NOT NULL,
+              decided_at TEXT,
+              decided_by TEXT,
+              expires_at TEXT,
+              notified_at TEXT,
+              meta TEXT
+            );
+            INSERT INTO approvals_v8(
+              id, task_id, run_id, tool, tool_call_id, supersedes_id,
+              arguments, risk, reason, status, created_at, decided_at,
+              decided_by, expires_at, notified_at, meta
+            )
+            SELECT id, task_id, run_id, tool, tool_call_id, NULL, arguments,
+              risk, reason, status, created_at, decided_at, decided_by,
+              expires_at, notified_at, meta
+            FROM approvals;
+            DROP TABLE approvals;
+            ALTER TABLE approvals_v8 RENAME TO approvals;
+            CREATE INDEX idx_approvals_status ON approvals(status);
+            """)
         if version < SCHEMA_VERSION:
             self._conn.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
             )
+
+    def _pre_migrate_backup(self, old_version: int) -> Path:
+        """Consistent snapshot taken before an upgrade migration.
+
+        Lands in ``<data dir>/backups/`` as a zip with the database (via the
+        online backup API) plus ``config.yaml`` when it exists. A failed
+        backup removes any partial zip and raises; the caller must not
+        migrate then.
+        """
+        stamp = util.iso().replace(":", "").replace("-", "")
+        target = (
+            self.path.parent / "backups"
+            / f"pre-migrate-v{old_version}-to-v{SCHEMA_VERSION}-{stamp}.zip"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_db = target.with_suffix(".tmp.db")
+        try:
+            self.backup_to(tmp_db)
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(tmp_db, "harness.db")
+                config_path = self.path.parent / "config.yaml"
+                if config_path.is_file():
+                    zf.write(config_path, "config.yaml")
+        except BaseException as exc:
+            # Never leave a partial zip behind. Ordinary failures become a
+            # clear RuntimeError; interrupts propagate untouched.
+            target.unlink(missing_ok=True)
+            if isinstance(exc, Exception):
+                raise RuntimeError(
+                    f"pre-migration backup failed at {target}: {exc}"
+                ) from exc
+            raise
+        finally:
+            tmp_db.unlink(missing_ok=True)
+        return target
 
     def close(self) -> None:
         with self._lock:
