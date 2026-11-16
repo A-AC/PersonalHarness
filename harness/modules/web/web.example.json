@@ -1,5 +1,5 @@
 {
-  "searxng_url": "http://127.0.0.1:8080",
+  "searxng_url": "http://192.168.50.40:8080",
   "max_results": 5,
   "timeout_s": 10,
   "categories": "general",
