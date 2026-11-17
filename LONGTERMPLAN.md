@@ -867,12 +867,35 @@ Verified in the code of the 2026-11-15 ZIP:
 
 ### Phase 8 - Approval rework and the quick-fix batch
 
-**Status:** implemented (2026-11-16) in the working tree; staging and
-live-model verification still pending. 8.0, 8.1-8.4, 8A, and 8B-1/8B-2 are
-complete with deterministic coverage in `tests/test_deploy.py`,
-`tests/test_taint_memory.py`, `tests/test_mcp_tool_risk.py`,
-`tests/test_web_hardening.py`, `tests/test_approvals_reject.py`,
-`tests/test_approvals_rework.py`, and `tests/test_approval_cards_ui.py`.
+**Status:** complete (committed 2026-11-16 as `8e28533`; deployment verified
+2026-11-17). 8.0, 8.1-8.4, 8A, and 8B-1/8B-2 are complete with deterministic
+coverage in `tests/test_deploy.py`, `tests/test_taint_memory.py`,
+`tests/test_mcp_tool_risk.py`, `tests/test_web_hardening.py`,
+`tests/test_approvals_reject.py`, `tests/test_approvals_rework.py`, and
+`tests/test_approval_cards_ui.py`.
+
+**Deployment verification (Ares, 2026-11-17).** The deterministic suite ran
+inside the `test` image on Linux (379 passed, 5 `live` deselected), and
+`i_live_hostile_web` passed against `qwen3.5-9b` (15/15 assertions, 3/3
+rubric, quality 100%, 0 critical failures). The deployed instance migrated
+v7 -> v8 at 01:25:38Z under its own pre-migration backup
+(`pre-migrate-v7-to-v8-20261117T012538Z.zip`); that archive replays to v8 with
+all 20 approval rows preserved (`executed` 14, `rejected` 6) and
+`supersedes_id` present, and the replay took a second pre-migrate backup, so
+the guard is not a one-off. A backup was written and copied off the host; the
+previous image was tagged `personal-harness:rollback-20261117` before the
+rebuild with `GIT_SHA=8c84f7b`, and `/api/system` now reports
+`2.0.0 / 8c84f7b / schema 8`. Cards, the edit form, revision feedback,
+always-allow, and the tray were exercised by hand and behaved as specified.
+
+**Deviation.** The staging instance (`docker-compose.stage.yml`) was never
+stood up: the migration was rehearsed by replaying the pre-migrate archive
+from the live volume inside a throwaway container instead. That proves the
+migration, the row preservation, and restorability, but not a separate
+service identity, and an actual rollback run (previous image plus restored
+archive) was not rehearsed. The runbook's host-Python commands
+(`python -m harness backup`, `harness eval`) are unusable on Ares, where
+everything runs in containers; the container image supplied both.
 
 **Implementation notes.**
 
@@ -893,8 +916,9 @@ complete with deterministic coverage in `tests/test_deploy.py`,
   `summary_template`, approve-and-remember risk overrides, and shared
   approval cards in chat and the panel.
 
-Split into two commits. 8A is small and independent; 8B changes the approval
-interaction model.
+The original plan split this into two commits (8A small and independent, 8B
+changing the approval interaction model). It landed as one commit,
+`8e28533`, followed by 9A, 12B, and the phases-audit fixes on the same day.
 
 #### 8.0 - Deployment safety and staging (own session, do first)
 
@@ -928,6 +952,10 @@ inside the container target.
 
 **Exit criteria:** the runbook exists and has been followed once end to end on
 staging; a version bump leaves a restorable backup.
+
+**Verified 2026-11-17:** a real version bump left a restorable backup (replayed
+and checked on Ares, see the phase status note); the staging instance itself
+was not used.
 
 **Commit:** `Phase 8.0: pre-migration backups, version reporting, staging, and deploy runbook`
 
@@ -1914,6 +1942,7 @@ log before starting the next one.
 | 2026-11-16 | An unreachable provider may accept only a name named by a configured allowlist | Reachability cannot be verified, so the static allowlist is the only bounded authorization |
 | 2026-11-16 | Use the dedicated `POST /api/model` for switching rather than making the `model` config group editable | Selection needs validation, attribution, and an explicit no-fallback contract |
 | 2026-11-16 | Phase 12B uses a command allowlist plus explicit confirmation, with schema-driven bundled templates | A token holder can otherwise launch arbitrary commands; confirmation and the allowlist bound that exposure while templates keep common servers easy to install |
+| 2026-11-17 | Rehearse deployment migrations by replaying the pre-migrate archive from the live volume, not by standing up staging | Same database, same migration code, and the real rows; staging would only add a second service identity, which the owner judged not worth another stack |
 
 ---
 
