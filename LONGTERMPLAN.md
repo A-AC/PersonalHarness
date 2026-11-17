@@ -293,14 +293,18 @@ the navigation and information-architecture pass.
 | 3 | 8A (8.1 per-tool MCP risk, 8.3 reject repro, 8.4 web hardening) | Small, independent, user-visible |
 | 4 | 8B-1 then 8B-2 (approval rework) | Biggest UX win; unblocks "edit requests" |
 | 5 | 9A Change Model | Small; needed by evals and the router |
-| 6 | 12B MCP setup UI, then the first capability-track servers | Domains only prove themselves with real tools; adding a tool must stop requiring file edits |
-| 7 | 10A-10D (baseline, routing evidence, entry, soft memory) | The core idea; now has tools to work with |
+| 6 | 12B MCP setup UI (capability-track servers optional) | Adding a tool must stop requiring file edits. Domains can reuse the bundled/global tools, so no new stock server is a prerequisite for Phase 10 |
+| 7 | 10A-10D (baseline, routing evidence, entry, soft memory) | The core idea; existing tools and eval fixtures supply the work |
 | 8 | 10E-1, 10E-2 (visibility and correction loop) | Starts producing labelled real-use data |
-| 9 | 12A install, reset, doctor | Makes testing from zero routine |
+| 9 | 12A install, reset, doctor (done 2026-11-16) | Makes testing from zero routine |
 | 10 | 11A-11C UI overhaul | Easier once approvals, settings schema, and domain cards exist |
 | 11 | Real-use cycle on Ares, then 10F-10G and 9B (shadow -> enable) | Need real data; not session-completable |
-| 12 | 13A-13D multi-user | Largest; prep migration earlier |
+| 12 | 13A-13D multi-user | Largest; the `user_id` prep migration lands in v9 |
 | 13 | Phase 7 guard | When LaYa is online |
+
+**Current position (2026-11-16):** steps 1-6 and 9 are complete (Phase 8 and
+its audit fixes, 9A, 12B, and 12A are committed and deployed to staging). The
+next session is step 7, 10A, with the capability-track server optional.
 
 Ordering rationale (original):
 
@@ -1167,17 +1171,36 @@ after deployment, and their results are recorded before enabling the router:
 is a hypothesis plus an experiment; quoted targets are initial and expected to be
 revised after each test/refine cycle.
 
-**Owner decisions (2026-11-15):** real domains will arrive over time (Health first;
-later home automation, language learning, and others), so the test corpus uses
-placeholders. General holds no separate memory. Domains own instructions,
-capabilities, tools, skills, and context. A visible "entering <domain>" status
-line is wanted.
+**Owner decisions (2026-11-15):** real domains will arrive over time (Health,
+home automation, language learning, and others are examples, not commitments),
+so the test corpus uses placeholders. General holds no separate memory. Domains
+own instructions, capabilities, tools, skills, and context. A visible "entering
+<domain>" status line is wanted.
+
+**Owner decisions (2026-11-16):**
+
+- **Zero stock domains and no additional stock MCP servers.** The shipped
+  harness contains no domain rows; web search and calendar remain opt-in
+  bundled templates. Domains are created by the user when a need appears.
+- **No capability-track server is a prerequisite for this phase.** The 10A
+  corpus and fixtures create placeholder domains, and 10C's exclusive-tool
+  path is tested by binding a bundled server to a fixture domain. A domain
+  without exclusive tools still carries instructions, memory, skills, briefing,
+  and routing.
+- **The adoption path is manual creation, not seeding.** The Domains panel plus
+  the approval-gated `create_domain` tool is the entry point; automatic
+  suggestions (10G) stay late. If no domain is ever created, Phase 10 is
+  deliberate dead code, not a broken feature.
+- **Judge the phase without domain-bound tools.** Success is routing accuracy,
+  false-positive rate, cross-domain recall, and the correction loop. The
+  "domains unlock exclusive capability" half is only proven if a domain-bound
+  server is later installed.
 
 #### Goal
 
 A domain is not a project folder. It is a **work environment**: when the agent
-is "in" Health it has that domain's memories, skills, instructions, and
-exclusive tools, and it behaves as one continuous entity that also remembers
+is "in" a domain it has that domain's memories, skills, instructions, and any
+tools bound to it, and it behaves as one continuous entity that also remembers
 who the user is everywhere else.
 
 Two things must both be true:
@@ -1227,7 +1250,13 @@ Two things must both be true:
   never changes risk: every side-effecting tool in the new domain still
   escalates. This must be tested (10C).
 
-#### Schema (v8, additive, one migration)
+#### Schema (v9, additive, one migration)
+
+v8 is the current approvals version, so this phase is the next bump. The same
+v9 migration also carries the Phase 13 prep columns (`user_id TEXT NOT NULL
+DEFAULT 'owner'` on messages, tasks, memories, domains, schedules, approvals,
+and inbox_events) with no behaviour change; land both in one commit rather
+than interleaving two migrations (owner decision 2026-11-16).
 
 ```sql
 ALTER TABLE domains ADD COLUMN keywords     TEXT NOT NULL DEFAULT '[]';  -- JSON list
@@ -1254,9 +1283,9 @@ CREATE TABLE domain_suggestions (
 );
 ```
 
-Coordination note: Phase 13 (multi-user) also wants an additive prep migration
-(`user_id` columns). Land them in the same version bump or sequence them; do not
-interleave two migrations in one commit.
+Coordination note: the Phase 13 `user_id` prep columns ride along in this
+same v9 migration (see above). 13A then becomes identity, tokens, and roles
+only; do not interleave two migrations in one commit.
 
 #### Config additions
 
@@ -1296,11 +1325,13 @@ memory:
 **Scope**
 - New eval suites `eval/scenarios/k_routing.yaml` and `k_memory_recall.yaml`.
   - Routing corpus: about 40 labelled messages across 4-5 domains (Health,
-    Home automation, Language learning, Clothing, General; placeholders until
-    the real domains exist), including the nutrition cases, composite messages
-    such as "what should I wear given the weather",
-    paraphrases without the domain name, ambiguous messages, and genuine
-    General chatter.
+    Home automation, Language learning, Clothing, General). The eval fixture
+    creates these domain rows for the run; the shipped harness has none.
+    Include the nutrition cases, composite messages such as "what should I wear
+    given the weather", paraphrases without the domain name, ambiguous
+    messages, and genuine General chatter.
+  - A General-only control run (zero domains) is the delta baseline; no stock
+    domain or domain-bound MCP is required.
   - Memory corpus: facts stored in one domain, asked about from another domain
     and from General, with paraphrases.
 - Assertion kind for routing (`routing.domain`) reading the `domain.routed`
@@ -1329,7 +1360,8 @@ behaviour change.
 zero to most of the corpus without adding model calls.
 
 **Scope**
-- Schema v8 domain columns (`keywords`, `examples`, `instructions`).
+- Schema v9 domain columns (`keywords`, `examples`, `instructions`); the same
+  migration carries the Phase 13 `user_id` prep columns.
 - `util.stem()`: a small deterministic suffix stripper (plurals, -ing, -ed,
   -al/-ional to the root so "nutritional" matches "nutrition"). Applied to both
   message and domain vocabulary. Unit-tested with a fixed table.
@@ -1353,7 +1385,8 @@ zero to most of the corpus without adding model calls.
   keywords; with only name+description they route better than baseline.
 - Learned vocabulary: a domain with relevant memories wins with no keywords.
 - No cross-domain false positives on the General chatter set.
-- Stemming table; v7 -> v8 migration opens an existing database.
+- Stemming table; v8 -> v9 migration opens an existing database, including the
+  Phase 13 prep columns.
 - Routing never creates a domain (existing guarantee).
 
 **Targets (initial):** routing accuracy >= 85% on the corpus, false-positive
@@ -1390,6 +1423,9 @@ the model behaves as if it were "in" the environment.
   reasons, add one bounded line naming them and their domain: "Tools in other
   domains: calendar (Planning). use_domain to enter." Names only, no schemas.
   This is the cheap answer to F5; a full `find_tools` meta-tool stays deferred.
+  With no stock domains and no domain-bound server, this line is dormant in
+  daily use; cover it in tests by binding a bundled server (calendar or web) to
+  a fixture domain. Do not seed a stock domain just to exercise it.
 - **Taint safety:** `use_domain` stays allowed in a tainted run, and a test
   proves tools exposed by a mid-run switch still escalate side effects.
 - Sub-agents inherit the parent's *current* task domain; a test pins this.
@@ -1563,11 +1599,12 @@ dismissed; no suggestion when a domain already covers the terms; bounded per tic
 #### Test/refine cycle after implementation
 
 (Post-deploy work on Ares, not part of any implementation session. It needs at
-least two domain-bound capability-track servers in daily use first.)
+least two domains in daily use first; domain-bound capability-track servers are
+optional.)
 
 After 10G, repeat on real use:
 
-1. Use the harness normally for a week with 3-4 domains and real MCPs.
+1. Use the harness normally for a week with 3-4 domains and the installed MCPs.
 2. Correct every wrong route in the UI (feeds `routing_feedback`).
 3. Weekly: export feedback to scenarios, rerun `k_routing` and
    `k_memory_recall`, and read the confusion table.
@@ -1692,15 +1729,17 @@ environment inputs, and template forms.
 
 ### Phase 13 - Multi-user and shared spaces
 
-**Status:** proposed; do last. Four sessions: 13A prep migration (`user_id` columns, no behaviour
-change); 13B identity, per-user tokens, roles; 13C scopes and SQL-layer isolation with
-the leak scenario; 13D shared spaces and approval ownership.
+**Status:** proposed; do last. Four sessions: 13A identity, per-user tokens,
+roles (the `user_id` prep columns already land in the Phase 10 v9 migration);
+13B scopes and SQL-layer isolation with the leak scenario; 13C shared spaces
+and approval ownership; 13D concurrency measurement and rollout.
 
 Do this last; it touches every table. Prepare cheaply earlier.
 
-- **Prep (can ride along with Phase 10):** additive migration adding
+- **Prep (lands in the Phase 10 v9 migration):** additive columns adding
   `user_id TEXT NOT NULL DEFAULT 'owner'` to messages, tasks, memories,
-  domains, schedules, approvals, inbox_events. No behaviour change.
+  domains, schedules, approvals, inbox_events. No behaviour change; 13A then
+  adds identity, tokens, and roles only.
 - **Identity:** `users` and hashed per-user API tokens; roles
   (owner, member). Channel identities (e.g. a messaging pusher) map to users.
 - **Scopes:** extend memory/domain scope from `global|domain` to
@@ -1725,12 +1764,15 @@ Do this last; it touches every table. Prepare cheaply earlier.
 
 ### Capability track (parallel to Phases 8-13)
 
-**Why:** domains only prove themselves with real tools, and today the agent has
-calendar and web search. Each item is one self-contained stdio MCP server
-following the web/calendar pattern: its own config file, bounded output, read
-tools annotated (8.1), read-only first, output untrusted. One session per server,
-each with an example manifest and tests against a local stub. After 8.1 and 12B
-no harness core change should be needed.
+**Why:** a domain only proves itself with real work. Today the strongest tools
+are web search and calendar, both opt-in bundled templates, and no
+domain-bound server is required for Phase 10. Each capability item is one
+self-contained stdio MCP server following the web/calendar pattern: its own
+config file, bounded output, read tools annotated (8.1), read-only first,
+output untrusted. One session per server, each with an example manifest and
+tests against a local stub. After 8.1 and 12B no harness core change should be
+needed. The stock harness ships **none** of these; they are owner-installed,
+optional, and never a prerequisite for Phase 10.
 
 **Candidates (owner picks and orders; examples, not commitments):**
 
@@ -1744,7 +1786,11 @@ no harness core change should be needed.
 5. Notes/tasks, and mail read-only through an inbox pusher.
 
 **Gate:** the Phase 10 real-use cycle, 10F, 10G, and the 9B router measurements
-start only after at least two domain-bound servers have a week of daily use.
+start only after **at least two domains have a week of daily use**. Domain-bound
+MCP servers are optional: without one, the domains still provide instructions,
+memory, skills, briefing, and routing, which is the data these phases need. A
+domain with a bound server counts as one of the two; it is not a requirement for
+either.
 
 ---
 
