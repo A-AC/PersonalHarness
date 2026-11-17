@@ -90,6 +90,8 @@
                  overflow-wrap:anywhere; }
   .field input[type=text], .field input[type=number] { flex:1; min-width:0; }
   .field textarea { flex:1; min-width:0; font-family:ui-monospace,Consolas,monospace; }
+  .field select[multiple] { flex:1; min-width:0; }
+  .field input.mcp-env-name { flex:0 0 150px; max-width:150px; }
   .pill { display:inline-block; padding:1px 8px; border-radius:10px;
           font-size:11px; border:1px solid var(--line); color:var(--dim); }
   .pill.active, .pill.completed, .pill.succeeded, .pill.approved,

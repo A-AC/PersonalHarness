@@ -1412,6 +1412,46 @@ class McpServer:
         finally:
             self._shutdown(process, stderr)
 
+    def probe(self) -> dict[str, Any]:
+        """List tools and return a bounded stderr tail for a UI preview.
+
+        This uses the same initialize/initialized/tools-list sequence as
+        :meth:`list_tools`, but keeps stderr available to the caller. The
+        subprocess is always shut down before returning or raising.
+        """
+        process, stderr = self._launch()
+        try:
+            self._request(process, {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "harness", "version": "2.0.0"},
+                },
+            }, stderr)
+            process.stdin.write((util.dumps({
+                "jsonrpc": "2.0", "method": "notifications/initialized"
+            }) + "\n").encode("utf-8"))
+            process.stdin.flush()
+            result = self._request(process, {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+            }, stderr)
+            tools = result.get("tools") or []
+            return {
+                "tools": tools,
+                "stderr": self._stderr_text(stderr),
+            }
+        except Exception as exc:
+            # The preview endpoint can report a bounded diagnostic without
+            # changing list_tools/call error behaviour.
+            try:
+                setattr(exc, "stderr_tail", self._stderr_text(stderr))
+            except Exception:
+                pass
+            raise
+        finally:
+            self._shutdown(process, stderr)
+
     def call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         process, stderr = self._launch()
         try:

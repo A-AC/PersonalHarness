@@ -7,7 +7,8 @@ let state = {
   messages: [], tasks: [], open_tasks: [], approvals: [], schedules: [],
   memories_all: [], memory_counts: {}, memory_kinds: [],
   artifact_problems: [],
-  skills: [], modules: [], schema_budget: null, tools: [], events: [],
+  skills: [], modules: [], templates: [], command_allowlist: [],
+  schema_budget: null, tools: [], events: [],
   inbox_events: [], automations: [], automation_fires: [],
   consolidations: [], backups: [], system: null,
   now: null, system_timezone: 'local', scheduler: {},
@@ -202,6 +203,8 @@ const PANELS = {
     url: () => '/api/modules',
     apply: (d) => {
       state.modules = d.modules || [];
+      state.templates = d.templates || [];
+      state.command_allowlist = d.command_allowlist || [];
       state.schema_budget = d.schema_budget || null;
       state.schema_budget_tokens = d.schema_budget_tokens;
     },
@@ -2186,6 +2189,485 @@ function moduleHealthPill(health) {
   return pill(value);
 }
 
+function moduleDomainSelect(selectedIds) {
+  const select = el('select');
+  select.multiple = true;
+  const selected = new Set(selectedIds || []);
+  const domains = activeDomains();
+  select.size = Math.min(6, Math.max(2, domains.length));
+  for (const domain of domains) {
+    const option = el('option', null, domain.name || domain.id);
+    option.value = domain.id;
+    option.selected = selected.has(domain.id);
+    select.appendChild(option);
+  }
+  return select;
+}
+
+function selectedModuleDomains(select) {
+  return Array.from(select.selectedOptions || []).map(option => option.value);
+}
+
+function parseMcpArgs(text) {
+  return String(text || '').split(/\r?\n/).map(line => line.trim())
+    .filter(Boolean);
+}
+
+function parseMcpEnvironment(text) {
+  const values = {};
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) return null;
+    const name = line.slice(0, separator).trim();
+    if (!name) return null;
+    values[name] = line.slice(separator + 1);
+  }
+  return values;
+}
+
+function renderMcpPreview(target, result) {
+  target.innerHTML = '';
+  if (!result) {
+    target.appendChild(el('div', 'small', 'No test result.'));
+    return;
+  }
+  const ok = result.ok === true;
+  target.appendChild(el('div', 'small',
+    ok ? 'Connection OK (' + (result.count || 0) + ' tool(s)).'
+      : 'Connection failed.'));
+  if (result.error) {
+    target.appendChild(el('div', 'small', result.error));
+  }
+  for (const tool of result.tools || []) {
+    const row = el('div', 'row');
+    row.appendChild(el('code', null, tool.name || '(unnamed)'));
+    if (tool.description) {
+      row.appendChild(el('span', 'small', tool.description));
+    }
+    const annotations = tool.annotations || {};
+    const flags = Object.keys(annotations).sort().map(key => {
+      const value = annotations[key];
+      const shown = value && typeof value === 'object'
+        ? JSON.stringify(value) : String(value);
+      return key + '=' + shown;
+    });
+    if (flags.length) {
+      row.appendChild(el('span', 'small', flags.join(', ')));
+    }
+    target.appendChild(row);
+  }
+  if (result.stderr_tail) {
+    target.appendChild(el('h4', null, 'stderr'));
+    target.appendChild(el('pre', null,
+      String(result.stderr_tail).slice(0, 4000)));
+  }
+}
+
+function renderAddMcpServerCard() {
+  const card = el('div', 'card');
+  card.appendChild(el('h3', null, 'Add MCP server'));
+  const allowlist = state.command_allowlist || [];
+  card.appendChild(el('div', 'small',
+    'Allowed commands: ' +
+    (allowlist.length ? allowlist.join(', ') : 'none') +
+    '. A command outside this list needs the explicit override below.'));
+
+  const name = el('input');
+  name.type = 'text';
+  name.placeholder = 'my-server';
+  const command = el('input');
+  command.type = 'text';
+  command.placeholder = 'python';
+  const args = el('textarea');
+  args.rows = 3;
+  args.placeholder = 'One argument per line';
+  const env = el('textarea');
+  env.rows = 3;
+  env.placeholder = 'NAME=value (one per line)';
+  const toolPrefix = el('input');
+  toolPrefix.type = 'text';
+  toolPrefix.placeholder = 'optional prefix';
+  const readOnly = el('input');
+  readOnly.type = 'checkbox';
+  const autoApprove = el('input');
+  autoApprove.type = 'checkbox';
+  const allowAny = el('input');
+  allowAny.type = 'checkbox';
+  const domains = moduleDomainSelect([]);
+
+  card.appendChild(field('Name', name));
+  card.appendChild(field('Command', command));
+  card.appendChild(field('Arguments (one per line)', args));
+  card.appendChild(field('Environment (NAME=value per line)', env));
+  card.appendChild(el('div', 'small',
+    'Environment values are stored privately and are never shown again.'));
+  card.appendChild(field('Tool prefix', toolPrefix));
+  card.appendChild(el('div', 'small',
+    'Leave the tool prefix blank to use the server’s own tool names.'));
+  card.appendChild(field('Read only', readOnly));
+  card.appendChild(field('Auto-approve tools', autoApprove));
+  card.appendChild(field('Domains (Ctrl/Command-click to select)', domains));
+  card.appendChild(field('Allow any command (override allowlist)', allowAny));
+
+  const preview = el('div', 'inlineeditor');
+  preview.appendChild(el('div', 'small', 'No connection test run yet.'));
+  card.appendChild(el('h4', null, 'Connection preview'));
+  card.appendChild(preview);
+
+  const actions = el('div', 'btns');
+  actions.appendChild(btn('Test connection', null, async () => {
+    const commandValue = command.value.trim();
+    if (!commandValue) {
+      toast('Command is required to test a connection.');
+      return;
+    }
+    const envValues = parseMcpEnvironment(env.value);
+    if (envValues === null) {
+      toast('Environment entries must use NAME=value.');
+      return;
+    }
+    const body = {
+      command: commandValue,
+      args: parseMcpArgs(args.value),
+    };
+    if (Object.keys(envValues).length) body.env = envValues;
+    if (allowAny.checked) body.allow_any_command = true;
+    preview.textContent = 'Testing connection...';
+    const out = await api('/api/modules/test', {method: 'POST', body});
+    if (out) renderMcpPreview(preview, out);
+  }));
+
+  const confirmed = el('input');
+  confirmed.type = 'checkbox';
+  const confirmLabel = el('label', 'small');
+  confirmLabel.appendChild(confirmed);
+  confirmLabel.appendChild(document.createTextNode(
+    ' I understand this starts a local command'));
+  card.appendChild(confirmLabel);
+
+  actions.appendChild(btn('Add server', 'ok', async () => {
+    const nameValue = name.value.trim();
+    const commandValue = command.value.trim();
+    if (!confirmed.checked) {
+      toast('Confirm that this starts a local command before adding it.');
+      return;
+    }
+    if (!nameValue || !commandValue) {
+      toast('Name and command are required.');
+      return;
+    }
+    const envValues = parseMcpEnvironment(env.value);
+    if (envValues === null) {
+      toast('Environment entries must use NAME=value.');
+      return;
+    }
+    const body = {
+      name: nameValue,
+      command: commandValue,
+      args: parseMcpArgs(args.value),
+      env: envValues,
+      domains: selectedModuleDomains(domains),
+      tool_prefix: toolPrefix.value.trim(),
+      read_only: readOnly.checked,
+      autoapprove: autoApprove.checked,
+      confirm: true,
+    };
+    if (allowAny.checked) body.allow_any_command = true;
+    const out = await api('/api/modules/mcp', {method: 'POST', body});
+    if (out) {
+      toast('MCP server added.');
+      refresh(true);
+    }
+  }));
+  card.appendChild(actions);
+  return card;
+}
+
+function templateFieldControl(spec) {
+  const type = String(spec.type || 'string').toLowerCase();
+  if (type === 'boolean') {
+    const control = el('input');
+    control.type = 'checkbox';
+    control.checked = spec.default === true;
+    return control;
+  }
+  if (type === 'integer' || type === 'number') {
+    const control = el('input');
+    control.type = 'number';
+    control.step = type === 'integer' ? '1' : 'any';
+    if (spec.min !== undefined && spec.min !== null) {
+      control.min = String(spec.min);
+    }
+    if (spec.max !== undefined && spec.max !== null) {
+      control.max = String(spec.max);
+    }
+    if (spec.default !== undefined && spec.default !== null) {
+      control.value = String(spec.default);
+    }
+    return control;
+  }
+  if (type === 'secret') {
+    const control = el('input');
+    control.type = 'password';
+    if (spec.default !== undefined && spec.default !== null) {
+      control.value = String(spec.default);
+    }
+    return control;
+  }
+  if (Array.isArray(spec.options)) {
+    const control = el('select');
+    if (spec.default === undefined || spec.default === null) {
+      const blank = el('option', null, 'select...');
+      blank.value = '';
+      control.appendChild(blank);
+    }
+    for (const option of spec.options || []) {
+      const item = el('option', null, String(option));
+      item.value = String(option);
+      control.appendChild(item);
+    }
+    if (spec.default !== undefined && spec.default !== null) {
+      control.value = String(spec.default);
+    }
+    return control;
+  }
+  const control = el('input');
+  control.type = 'text';
+  if (spec.default !== undefined && spec.default !== null) {
+    control.value = String(spec.default);
+  }
+  return control;
+}
+
+function renderBundledTemplatesCard() {
+  const templates = state.templates || [];
+  if (!templates.length) return null;
+  const card = el('div', 'card');
+  card.appendChild(el('h3', null, 'Bundled templates'));
+  card.appendChild(el('div', 'small',
+    'Install a bundled MCP server, then edit its private configuration.'));
+
+  for (const template of templates) {
+    card.appendChild(el('h4', null, template.title || template.id));
+    if (template.description) {
+      card.appendChild(el('div', 'small', template.description));
+    }
+    if (template.installed) {
+      card.appendChild(el('div', 'small', 'Installed.'));
+    }
+    const controls = Object.create(null);
+    for (const spec of template.fields || []) {
+      if (!spec || !spec.name) continue;
+      const control = templateFieldControl(spec);
+      control.required = spec.required === true;
+      controls[spec.name] = {spec, control};
+      const label = (spec.label || spec.name) +
+        (spec.required ? ' *' : '');
+      card.appendChild(field(label, control));
+      if (spec.help) {
+        card.appendChild(el('div', 'small', spec.help));
+      }
+    }
+
+    const confirmed = el('input');
+    confirmed.type = 'checkbox';
+    const confirmLabel = el('label', 'small');
+    confirmLabel.appendChild(confirmed);
+    confirmLabel.appendChild(document.createTextNode(
+      ' I understand this installs and starts a local MCP server'));
+    card.appendChild(confirmLabel);
+
+    const actions = el('div', 'btns');
+    actions.appendChild(btn('Install', 'ok', async () => {
+      if (!confirmed.checked) {
+        toast('Confirm the local MCP server installation first.');
+        return;
+      }
+      const values = {};
+      for (const name of Object.keys(controls)) {
+        const spec = controls[name].spec;
+        const control = controls[name].control;
+        if (String(spec.type || 'string').toLowerCase() === 'boolean') {
+          values[name] = control.checked;
+          continue;
+        }
+        const raw = String(control.value || '');
+        if (!raw.trim()) {
+          if (spec.required) {
+            toast('Template field "' + name + '" is required.');
+            return;
+          }
+          continue;
+        }
+        const type = String(spec.type || 'string').toLowerCase();
+        if (type === 'integer' || type === 'number') {
+          const number = Number(raw);
+          if (!Number.isFinite(number) ||
+              (type === 'integer' && !Number.isInteger(number))) {
+            toast('Template field "' + name + '" must be a ' +
+              (type === 'integer' ? 'whole number.' : 'number.'));
+            return;
+          }
+          values[name] = number;
+        } else {
+          values[name] = raw;
+        }
+      }
+      const out = await api('/api/modules/templates/' +
+        encodeURIComponent(template.id) + '/install', {
+          method: 'POST',
+          body: {values, confirm: true},
+        });
+      if (out) {
+        toast((template.title || template.id) + ' installed.');
+        refresh(true);
+      }
+    }));
+    card.appendChild(actions);
+  }
+  return card;
+}
+
+function buildMcpServerEditor(m) {
+  const editor = el('div', 'inlineeditor');
+  editor.hidden = true;
+  editor.appendChild(el('h4', null, 'Edit server'));
+
+  const command = el('input');
+  command.type = 'text';
+  command.value = String((m.manifest || {}).command || '');
+  const args = el('textarea');
+  args.rows = 3;
+  args.value = ((m.manifest || {}).args || []).map(String).join('\n');
+  const toolPrefix = el('input');
+  toolPrefix.type = 'text';
+  toolPrefix.value = String((m.manifest || {}).tool_prefix || '');
+  const domains = moduleDomainSelect(m.bound_domains || []);
+  const allowAny = el('input');
+  allowAny.type = 'checkbox';
+  allowAny.checked = !!(m.provenance || {}).command_override;
+
+  editor.appendChild(field('Command', command));
+  editor.appendChild(field('Arguments (one per line)', args));
+  editor.appendChild(field('Tool prefix', toolPrefix));
+  editor.appendChild(field('Domains (Ctrl/Command-click to select)', domains));
+  editor.appendChild(field('Allow any command (override allowlist)', allowAny));
+
+  editor.appendChild(el('h4', null, 'Environment'));
+  const envNames = m.env_names || [];
+  const envSet = new Set(m.env_set || []);
+  const clearBoxes = Object.create(null);
+  if (!envNames.length) {
+    editor.appendChild(el('div', 'small', 'No environment names configured.'));
+  }
+  for (const name of envNames) {
+    const line = el('div', 'row');
+    line.appendChild(el('span', 'small',
+      envSet.has(name) ? 'set' : 'not set'));
+    const clear = el('input');
+    clear.type = 'checkbox';
+    clearBoxes[name] = clear;
+    const clearLabel = el('label', 'small');
+    clearLabel.appendChild(clear);
+    clearLabel.appendChild(document.createTextNode(' clear ' + name));
+    line.appendChild(clearLabel);
+    editor.appendChild(line);
+  }
+  const envName = el('input', 'mono mcp-env-name');
+  envName.type = 'text';
+  envName.size = 16;
+  envName.placeholder = 'NAME';
+  const envValue = el('input');
+  envValue.type = 'password';
+  envValue.placeholder = 'new private value';
+  editor.appendChild(field('Environment name', envName));
+  editor.appendChild(field('Set a new value for', envValue));
+  editor.appendChild(el('div', 'small',
+    'Values are stored privately and are never read back into this form.'));
+
+  const preview = el('div', 'inlineeditor');
+  preview.appendChild(el('div', 'small', 'No connection test run yet.'));
+  editor.appendChild(el('h4', null, 'Connection preview'));
+  editor.appendChild(preview);
+
+  const actions = el('div', 'btns');
+  actions.appendChild(btn('Test connection', null, async () => {
+    const commandValue = command.value.trim();
+    if (!commandValue) {
+      toast('Command is required to test a connection.');
+      return;
+    }
+    const body = {
+      module_id: m.id,
+      command: commandValue,
+      args: parseMcpArgs(args.value),
+    };
+    if (allowAny.checked) body.allow_any_command = true;
+    preview.textContent = 'Testing connection...';
+    const out = await api('/api/modules/test', {method: 'POST', body});
+    if (out) renderMcpPreview(preview, out);
+  }));
+  actions.appendChild(btn('Save changes', 'ok', async () => {
+    const body = {
+      command: command.value.trim(),
+      args: parseMcpArgs(args.value),
+      domains: selectedModuleDomains(domains),
+    };
+    // Only send a tool prefix when the server already declared one or the
+    // user typed a replacement; otherwise saving would silently rename tools.
+    const prefixValue = toolPrefix.value.trim();
+    if (prefixValue || 'tool_prefix' in (m.manifest || {})) {
+      body.tool_prefix = prefixValue;
+    }
+    const env = {};
+    for (const name of Object.keys(clearBoxes)) {
+      if (clearBoxes[name].checked) env[name] = null;
+    }
+    const newName = envName.value.trim();
+    if (newName && envValue.value !== '') env[newName] = envValue.value;
+    if (Object.keys(env).length) body.env = env;
+    if (allowAny.checked) body.allow_any_command = true;
+    const out = await api('/api/modules/' + encodeURIComponent(m.id), {
+      method: 'PATCH',
+      body,
+    });
+    if (out) {
+      toast('MCP server updated.');
+      refresh(true);
+    }
+  }));
+
+  const deleteConfirmed = el('input');
+  deleteConfirmed.type = 'checkbox';
+  const deleteLabel = el('label', 'small');
+  deleteLabel.appendChild(deleteConfirmed);
+  deleteLabel.appendChild(document.createTextNode(
+    ' I understand this deletes the MCP server'));
+  editor.appendChild(deleteLabel);
+  actions.appendChild(btn('Delete server', 'no', async () => {
+    if (!deleteConfirmed.checked) {
+      toast('Confirm deletion before removing this MCP server.');
+      return;
+    }
+    const out = await api('/api/modules/' + encodeURIComponent(m.id), {
+      method: 'DELETE',
+    });
+    if (out) {
+      toast('MCP server deleted.');
+      refresh(true);
+    }
+  }));
+  editor.appendChild(actions);
+  if (m.import_source) {
+    editor.appendChild(el('div', 'small',
+      'This server is owned by ' + m.import_source +
+      ' and cannot be deleted here; edit or remove that file entry and reload.'));
+  }
+  return editor;
+}
+
 function renderModules(side) {
   const modules = state.modules || [];
   const budget = state.schema_budget || {};
@@ -2230,6 +2712,10 @@ function renderModules(side) {
   }
   side.appendChild(budgetCard);
 
+  side.appendChild(renderAddMcpServerCard());
+  const templatesCard = renderBundledTemplatesCard();
+  if (templatesCard) side.appendChild(templatesCard);
+
   if (!modules.length) {
     empty(side, 'No modules registered.');
     return;
@@ -2260,6 +2746,7 @@ function renderModules(side) {
     }
     if ((m.tools || []).length) {
       card.appendChild(el('h4', null, 'Tools (' + m.tools.length + ')'));
+      const toolRisks = m.tool_risk || {};
       for (const tool of m.tools) {
         const line = el('div', 'row');
         line.appendChild(pill(tool.risk));
@@ -2267,9 +2754,31 @@ function renderModules(side) {
         line.appendChild(el('span', 'small',
           (tool.side_effects ? 'side effects' : 'no side effects') + '  |  ' +
           (tool.read_only ? 'read-only' : 'not read-only')));
+        if (m.editable) {
+          const risk = el('select');
+          for (const value of ['default', 'low', 'confirm']) {
+            const option = el('option', null, value);
+            option.value = value === 'default' ? '' : value;
+            risk.appendChild(option);
+          }
+          risk.value = toolRisks[tool.name] || '';
+          risk.onchange = async () => {
+            const out = await api('/api/modules/' +
+              encodeURIComponent(m.id) + '/tool-risk', {
+                method: 'POST',
+                body: {tool: tool.name, risk: risk.value || null},
+              });
+            if (out) {
+              toast('Risk updated for ' + tool.name + '.');
+              refresh(true);
+            }
+          };
+          line.appendChild(risk);
+        }
         card.appendChild(line);
       }
     }
+    const editor = m.editable ? buildMcpServerEditor(m) : null;
     const actions = el('div', 'btns');
     actions.appendChild(btn(m.status === 'active' ? 'Disable' : 'Enable',
       m.status === 'active' ? 'no' : 'ok', async () => {
@@ -2287,7 +2796,15 @@ function renderModules(side) {
     if (m.kind === 'skill') {
       actions.appendChild(btn('Open skills', null, () => switchTab('skills')));
     }
+    if (editor) {
+      const editButton = btn('Edit server', null, () => {
+        editor.hidden = !editor.hidden;
+        editButton.textContent = editor.hidden ? 'Edit server' : 'Close editor';
+      });
+      actions.appendChild(editButton);
+    }
     card.appendChild(actions);
+    if (editor) card.appendChild(editor);
 
     if (m.scope === 'domain' && domains.length) {
       card.appendChild(el('h4', null, 'Domain bindings'));

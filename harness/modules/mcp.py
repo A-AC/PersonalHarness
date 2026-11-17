@@ -30,6 +30,8 @@ module row or SQLite.
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
 from dataclasses import replace
@@ -63,6 +65,13 @@ RETIRED_MODULES = {"web": ""}
 MCP_JSON_PARSE_LIMIT = 1_000_000
 TOOL_RISK_LIMIT = 200
 SUMMARY_TEMPLATE_LIMIT = 200
+# Bounds for setup requests and connection previews.
+MCP_NAME_MAX_CHARS = 64
+MCP_ARGS_MAX_ITEMS = 64
+MCP_ARG_MAX_CHARS = 400
+MCP_ENV_MAX_NAMES = 32
+MCP_TOOLS_MAX_ITEMS = 200
+MCP_DESCRIPTION_MAX_CHARS = 200
 # Conventional files checked when no explicit import file is configured.
 DEFAULT_SERVERS_FILES = ("mcp.json", "mcp_servers.yaml", "mcp_servers.yml")
 _DATA_DIR_PLACEHOLDER = re.compile(r"\$\{data_dir\}|\$\{DATA_DIR\}")
@@ -107,6 +116,14 @@ def _sanitize_summary_templates(value: Any) -> dict[str, str]:
         if len(sanitized) >= SUMMARY_TEMPLATE_LIMIT:
             break
     return sanitized
+
+
+class McpSetupError(ValueError):
+    """A rejected MCP setup request with an HTTP-style status code."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = int(status)
 
 
 class McpModuleLoader:
@@ -210,6 +227,764 @@ class McpModuleLoader:
             "module.enabled" if enabled else "module.disabled",
             data={"module_id": module_id},
         )
+        return self.registry.get(module_id) or updated
+
+    # ------------------------------------------------------------------
+    # User setup / preview
+    # ------------------------------------------------------------------
+
+    def create_server(
+        self,
+        entry: dict[str, Any],
+        *,
+        confirm: bool = False,
+        allow_any_command: bool = False,
+    ) -> Module:
+        """Create and discover one user-owned stdio MCP server."""
+        if not confirm:
+            raise McpSetupError(
+                "creating an MCP server requires explicit confirmation", 400
+            )
+        if not isinstance(entry, dict):
+            raise McpSetupError("MCP server entry must be a JSON object", 400)
+        _, safe_name = self._setup_name(entry.get("name"))
+        module_id = f"mcp:{safe_name}"
+        if self.registry.get(module_id) is not None:
+            raise McpSetupError(
+                f"an MCP server named {safe_name!r} already exists", 409
+            )
+        command = self._command_for_entry(
+            entry, allow_any_command=allow_any_command
+        )
+        env = self._entry_env(entry)
+        manifest = self._manifest_from_entry(entry)
+        manifest["env_names"] = sorted(str(name) for name in env)
+        self._check_manifest_bounds(manifest)
+        domains = [str(domain) for domain in manifest.get("domains") or []]
+        requested_scope = str(entry.get("scope") or "").strip()
+        scope = requested_scope if requested_scope in (
+            "global", "domain", "adaptive"
+        ) else ("domain" if domains else "global")
+        provenance: dict[str, Any] = {
+            "source": "ui",
+            "command": command,
+        }
+        if allow_any_command:
+            provenance["command_override"] = True
+        now = util.iso()
+        module = Module(
+            id=module_id,
+            kind="mcp",
+            name=safe_name,
+            version=1,
+            status="active",
+            scope=scope,
+            manifest=manifest,
+            origin="user",
+            provenance=provenance,
+            created_by="ui",
+            created_at=now,
+            updated_at=now,
+        )
+        self.registry.save(module)
+        self._store_env_values(safe_name, env)
+        for domain_id in domains:
+            self.registry.set_binding(ModuleBinding(
+                module_id=module_id, domain_id=domain_id, enabled=True,
+            ))
+        # A failed discovery leaves the row active with last_error set; it
+        # must not roll back the explicit user registration.
+        self._activate(module, force=True)
+        self.events.record("module.created", data={
+            "module_id": module_id,
+            "name": safe_name,
+            "command": command,
+            "source": "ui",
+            "allow_any_command": bool(allow_any_command),
+        })
+        return self.registry.get(module_id) or module
+
+    def update_server(
+        self,
+        module_id: str,
+        entry: dict[str, Any],
+        *,
+        allow_any_command: bool = False,
+    ) -> Module:
+        """Edit one user-owned MCP manifest without exposing env values."""
+        module = self.registry.get(module_id)
+        if module is None:
+            raise McpSetupError(f"no such module: {module_id}", 404)
+        if module.kind != "mcp":
+            raise McpSetupError(
+                f"module {module_id} is not an MCP server", 400
+            )
+        if not isinstance(entry, dict):
+            raise McpSetupError("MCP server entry must be a JSON object", 400)
+        if "name" in entry:
+            requested_name, requested_safe = self._setup_name(
+                entry.get("name")
+            )
+            if (
+                requested_name != module.name
+                and requested_safe != module.name
+            ):
+                raise McpSetupError(
+                    "an MCP server name and id cannot be changed", 400
+                )
+
+        env = self._entry_env(entry) if "env" in entry else {}
+        existing_manifest = dict(module.manifest or {})
+        merged_entry = {**existing_manifest, **entry}
+        manifest = self._manifest_from_entry(merged_entry)
+        # Keep manifest keys the setup editor does not understand.
+        for key, value in existing_manifest.items():
+            if key not in manifest:
+                manifest[key] = value
+
+        existing_names = {
+            str(name)
+            for name in existing_manifest.get("env_names") or []
+            if str(name).strip()
+        }
+        env_names = set(existing_names)
+        for name, value in env.items():
+            if value is None or str(value) == "":
+                env_names.discard(name)
+            else:
+                env_names.add(name)
+        manifest["env_names"] = sorted(env_names)
+        self._check_manifest_bounds(manifest)
+
+        command = str(entry.get("command") or existing_manifest.get("command")
+                      or "").strip()
+        if not command or not self.command_allowed(
+            command, allow_any=allow_any_command
+        ):
+            allowlist = self.config.get(
+                "modules.command_allowlist", []
+            ) or []
+            raise McpSetupError(
+                f"command {command or '(empty)'!r} is not in the MCP command "
+                f"allowlist {allowlist}; set allow_any_command=true to "
+                "explicitly override it",
+                400,
+            )
+
+        domains_changed = "domains" in entry
+        domains = [
+            str(domain) for domain in manifest.get("domains") or []
+        ]
+        requested_scope = str(entry.get("scope") or "").strip()
+        if requested_scope in ("global", "domain", "adaptive"):
+            scope = requested_scope
+        elif domains_changed and module.scope == "global":
+            scope = "domain" if domains else "global"
+        else:
+            scope = module.scope
+
+        updated = replace(
+            module,
+            manifest=manifest,
+            scope=scope,
+            updated_at=util.iso(),
+        )
+        self.registry.save(updated)
+        if "env" in entry:
+            self._update_env_values(module.name, env)
+        if domains_changed:
+            self.registry.db.execute(
+                "DELETE FROM module_bindings WHERE module_id=?", (module_id,)
+            )
+            for domain_id in domains:
+                self.registry.set_binding(ModuleBinding(
+                    module_id=module_id, domain_id=domain_id, enabled=True,
+                ))
+        if self.tools is not None:
+            self.tools.unregister_module(module_id)
+        self._activate(updated, force=True)
+        self.events.record("module.updated", data={
+            "module_id": module_id,
+        })
+        return self.registry.get(module_id) or updated
+
+    def delete_server(self, module_id: str) -> str:
+        """Delete one MCP row and its private environment sidecar."""
+        module = self.registry.get(module_id)
+        if module is None:
+            raise McpSetupError(f"no such module: {module_id}", 404)
+        if module.kind != "mcp":
+            raise McpSetupError(
+                f"module {module_id} is not an MCP server", 400
+            )
+        if module.origin == "import":
+            source = str((module.provenance or {}).get("source") or "")
+            path = Path(source).expanduser() if source else None
+            if path is not None and not path.is_absolute():
+                path = self.registry.data_dir / path
+            if path is not None and path.is_file():
+                try:
+                    import yaml
+
+                    data = yaml.safe_load(
+                        path.read_text(encoding="utf-8")
+                    ) or {}
+                except Exception:
+                    data = {}
+                imported_names = {
+                    str(entry.get("name") or "").strip()
+                    for entry in self._entries(data)
+                }
+                if module.name.strip() in imported_names:
+                    raise McpSetupError(
+                        f"this module is imported from {path}; edit or remove "
+                        "the entry there and reload",
+                        409,
+                    )
+        if self.tools is not None:
+            self.tools.unregister_module(module_id)
+        self._delete_module_rows(module_id)
+        env_path = self._env_path(module)
+        if env_path is not None:
+            try:
+                env_path.unlink()
+            except OSError:
+                pass
+        self.events.record("module.deleted", data={
+            "module_id": module_id,
+        })
+        return module_id
+
+    def command_allowed(
+        self, command: str, *, allow_any: bool = False
+    ) -> bool:
+        """Return whether a stdio command basename is permitted."""
+        raw = str(command or "").strip()
+        if not raw:
+            return False
+        if allow_any:
+            return True
+        basename = Path(raw).name.lower()
+        if basename.endswith(".exe"):
+            basename = basename[:-4]
+        configured = self.config.get("modules.command_allowlist", []) or []
+        allowed = {
+            str(item).strip().lower()
+            for item in configured
+            if str(item).strip()
+        }
+        return basename in allowed
+
+    def _setup_name(self, value: Any) -> tuple[str, str]:
+        """Return the display and filesystem-safe names for a new server."""
+        name = str(value or "").strip()
+        if not name:
+            raise McpSetupError("an MCP server name is required", 400)
+        if len(name) > MCP_NAME_MAX_CHARS:
+            raise McpSetupError(
+                f"MCP server name is limited to {MCP_NAME_MAX_CHARS} "
+                "characters",
+                400,
+            )
+        safe = _sanitize(name)
+        if not safe:
+            raise McpSetupError(
+                "MCP server name must contain a letter or digit", 400
+            )
+        return name, safe
+
+    def _check_manifest_bounds(self, manifest: dict[str, Any]) -> None:
+        args = manifest.get("args") or []
+        if len(args) > MCP_ARGS_MAX_ITEMS:
+            raise McpSetupError(
+                f"MCP server arguments are limited to {MCP_ARGS_MAX_ITEMS} "
+                "items",
+                400,
+            )
+        if any(len(str(arg)) > MCP_ARG_MAX_CHARS for arg in args):
+            raise McpSetupError(
+                f"each MCP server argument is limited to "
+                f"{MCP_ARG_MAX_CHARS} characters",
+                400,
+            )
+        env_names = manifest.get("env_names") or []
+        if len(env_names) > MCP_ENV_MAX_NAMES:
+            raise McpSetupError(
+                f"MCP server environments are limited to "
+                f"{MCP_ENV_MAX_NAMES} names",
+                400,
+            )
+
+    def _entry_env(self, entry: dict[str, Any]) -> dict[str, Any]:
+        env = entry.get("env", {})
+        if env is None:
+            return {}
+        if not isinstance(env, dict):
+            raise McpSetupError("env must be a JSON object", 400)
+        for name in env:
+            if not isinstance(name, str) or not name.strip():
+                raise McpSetupError(
+                    "environment variable names must be non-empty strings",
+                    400,
+                )
+        if len(env) > MCP_ENV_MAX_NAMES:
+            raise McpSetupError(
+                f"MCP server environments are limited to "
+                f"{MCP_ENV_MAX_NAMES} names",
+                400,
+            )
+        return env
+
+    def test_server(
+        self,
+        entry: dict[str, Any],
+        *,
+        module_id: str | None = None,
+        allow_any_command: bool = False,
+    ) -> dict[str, Any]:
+        """Probe a server without writing a row, binding, or event."""
+        stderr_tail = ""
+        try:
+            if not isinstance(entry, dict):
+                raise McpSetupError(
+                    "MCP server entry must be a JSON object", 400
+                )
+            command = self._command_for_entry(
+                entry, allow_any_command=allow_any_command
+            )
+            env = self._entry_env(entry)
+            manifest = self._manifest_from_entry(entry)
+            declared_names = {
+                str(name)
+                for name in manifest.get("env_names") or []
+                if str(name).strip()
+            }
+            declared_names.update(str(name) for name in env)
+            existing = (
+                self.registry.get(module_id)
+                if module_id else None
+            )
+            sidecar_values: dict[str, str] = {}
+            if existing is not None and existing.kind == "mcp":
+                declared_names.update(
+                    str(name)
+                    for name in existing.manifest.get("env_names") or []
+                    if str(name).strip()
+                )
+                sidecar_values = self._read_env_values(existing.name)
+            process_env = {
+                name: os.environ[name]
+                for name in declared_names
+                if name in os.environ
+            }
+            for name, value in sidecar_values.items():
+                if name not in env:
+                    process_env[name] = value
+            for name, value in env.items():
+                if value is not None and str(value) != "":
+                    process_env[str(name)] = str(value)
+            manifest["env_names"] = sorted(declared_names)
+            self._check_manifest_bounds(manifest)
+            temp = Module(
+                id=module_id or "mcp:test",
+                kind="mcp",
+                name="test",
+                status="active",
+                scope="global",
+                manifest=manifest,
+                origin="user",
+                provenance={"source": "preview"},
+                created_by="ui",
+            )
+            server = McpServer(
+                temp.id,
+                self._expand(command),
+                [
+                    self._expand(str(arg))
+                    for arg in manifest.get("args") or []
+                ],
+                process_env,
+                timeout_s=float(manifest.get("timeout_s") or 30.0),
+            )
+            preview = server.probe()
+            stderr_tail = str(preview.get("stderr") or "")
+            raw_tools = preview.get("tools") or []
+            if not isinstance(raw_tools, list):
+                raw_tools = []
+            tools: list[dict[str, Any]] = []
+            for raw in raw_tools[:MCP_TOOLS_MAX_ITEMS]:
+                if not isinstance(raw, dict):
+                    continue
+                annotations = raw.get("annotations")
+                tools.append({
+                    "name": str(raw.get("name") or ""),
+                    "description": util.clip(
+                        str(raw.get("description") or ""),
+                        MCP_DESCRIPTION_MAX_CHARS,
+                    ),
+                    "annotations": (
+                        dict(annotations) if isinstance(annotations, dict)
+                        else {}
+                    ),
+                })
+            return {
+                "ok": True,
+                "tools": tools,
+                "stderr_tail": stderr_tail,
+                "count": len(tools),
+            }
+        except Exception as exc:
+            stderr_tail = str(getattr(exc, "stderr_tail", "") or stderr_tail)
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "stderr_tail": stderr_tail,
+                "tools": [],
+            }
+
+    def set_tool_risk(
+        self, module_id: str, tool_name: str, risk: str | None
+    ) -> Module:
+        """Set or clear one discovered MCP tool's manifest risk override."""
+        module = self.registry.get(module_id)
+        if module is None:
+            raise McpSetupError(f"no such module: {module_id}", 404)
+        if module.kind != "mcp":
+            raise McpSetupError(
+                f"module {module_id} is not an MCP server", 400
+            )
+        tool_name = str(tool_name or "").strip()
+        known_tools = {
+            tool.tool_name for tool in self.registry.tools(module_id)
+        }
+        if not tool_name or tool_name not in known_tools:
+            raise McpSetupError(
+                f"unknown tool {tool_name!r} for module {module_id}", 400
+            )
+        if risk in (None, "", "default"):
+            effective_risk = None
+        elif risk in (RISK_LOW, RISK_CONFIRM):
+            effective_risk = str(risk)
+        else:
+            raise McpSetupError(
+                "tool risk must be 'low', 'confirm', or null", 400
+            )
+        manifest = dict(module.manifest or {})
+        overrides = dict(manifest.get("tool_risk") or {})
+        if effective_risk is None:
+            overrides.pop(tool_name, None)
+        else:
+            overrides[tool_name] = effective_risk
+        manifest["tool_risk"] = _sanitize_tool_risk(overrides)
+        updated = replace(
+            module, manifest=manifest, updated_at=util.iso(),
+        )
+        self.registry.save(updated)
+        if self.tools is not None:
+            self.tools.unregister_module(module_id)
+        self._activate(updated, force=True)
+        self.events.record("module.tool_risk", data={
+            "module_id": module_id,
+            "tool": tool_name,
+            "risk": effective_risk,
+        })
+        return self.registry.get(module_id) or updated
+
+    def _command_for_entry(
+        self, entry: dict[str, Any], *, allow_any_command: bool
+    ) -> str:
+        command = str(entry.get("command") or "").strip()
+        if not command or not self.command_allowed(
+            command, allow_any=allow_any_command
+        ):
+            allowlist = self.config.get(
+                "modules.command_allowlist", []
+            ) or []
+            raise McpSetupError(
+                f"command {command or '(empty)'!r} is not in the MCP command "
+                f"allowlist {allowlist}; set allow_any_command=true to "
+                "explicitly override it",
+                400,
+            )
+        return command
+
+    # ------------------------------------------------------------------
+    # Bundled setup templates
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _safe_template_id(value: Any) -> str:
+        name = str(value or "").strip()
+        if not name or name in (".", ".."):
+            return ""
+        if Path(name).name != name or "/" in name or "\\" in name:
+            return ""
+        return name
+
+    def _template_schema_path(self, name: str) -> Path | None:
+        wanted = self._safe_template_id(name)
+        if not wanted:
+            return None
+        for path in sorted(
+            Path(__file__).resolve().parent.glob("*/config.schema.json")
+        ):
+            if path.parent.name == wanted:
+                return path
+        return None
+
+    def _read_template_schema(self, path: Path) -> dict[str, Any] | None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        template_id = self._safe_template_id(data.get("id"))
+        if not template_id or template_id != path.parent.name:
+            return None
+        if not isinstance(data.get("fields"), list):
+            return None
+        if not isinstance(data.get("module"), dict):
+            return None
+        return data
+
+    def template_schema(self, name: str) -> dict[str, Any]:
+        """Return one bundled template schema, rejecting unsafe names."""
+        wanted = self._safe_template_id(name)
+        path = self._template_schema_path(wanted) if wanted else None
+        if path is None:
+            raise McpSetupError(f"no such MCP template: {name}", 404)
+        schema = self._read_template_schema(path)
+        if schema is None:
+            raise McpSetupError(f"no such MCP template: {name}", 404)
+        return schema
+
+    def template_config_path(self, name: str) -> str:
+        schema = self.template_schema(name)
+        template_id = self._safe_template_id(schema.get("id"))
+        return str(
+            (self.registry.root / "mcp" / f"{template_id}.json").resolve()
+        )
+
+    def templates(self) -> list[dict[str, Any]]:
+        """Discover every bundled ``config.schema.json`` template."""
+        found: list[dict[str, Any]] = []
+        for path in sorted(
+            Path(__file__).resolve().parent.glob("*/config.schema.json")
+        ):
+            schema = self._read_template_schema(path)
+            if schema is None:
+                continue
+            template_id = self._safe_template_id(schema.get("id"))
+            if not template_id:
+                continue
+            module_id = f"mcp:{template_id}"
+            config_path = str(
+                (self.registry.root / "mcp" / f"{template_id}.json").resolve()
+            )
+            found.append({
+                "id": template_id,
+                "title": str(schema.get("title") or template_id),
+                "description": str(schema.get("description") or ""),
+                "fields": list(schema.get("fields") or []),
+                "module": dict(schema.get("module") or {}),
+                "installed": self.registry.get(module_id) is not None,
+                "module_id": module_id,
+                "config_path": config_path,
+            })
+        return found
+
+    @staticmethod
+    def _coerce_template_value(field: dict[str, Any], value: Any) -> Any:
+        """Coerce one schema field to its declared JSON-like type."""
+        field_name = str(field.get("name") or "field")
+        field_type = str(field.get("type") or "string").lower()
+        if field_type == "boolean":
+            if isinstance(value, bool):
+                return value
+            text = str(value).strip().lower()
+            if text in ("true", "1", "yes", "on"):
+                return True
+            if text in ("false", "0", "no", "off"):
+                return False
+            raise McpSetupError(
+                f"template field {field_name} must be a boolean", 400
+            )
+        if field_type == "integer":
+            if isinstance(value, bool):
+                raise McpSetupError(
+                    f"template field {field_name} must be an integer", 400
+                )
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                raise McpSetupError(
+                    f"template field {field_name} must be an integer", 400
+                ) from None
+            if isinstance(value, float) and value != number:
+                raise McpSetupError(
+                    f"template field {field_name} must be an integer", 400
+                )
+            return number
+        if field_type == "number":
+            if isinstance(value, bool):
+                raise McpSetupError(
+                    f"template field {field_name} must be a number", 400
+                )
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                raise McpSetupError(
+                    f"template field {field_name} must be a number", 400
+                ) from None
+            if not math.isfinite(number):
+                raise McpSetupError(
+                    f"template field {field_name} must be a finite number", 400
+                )
+            return number
+        if field_type in ("string", "secret", "url"):
+            if value is None or isinstance(value, (dict, list)):
+                raise McpSetupError(
+                    f"template field {field_name} must be a string", 400
+                )
+            return str(value)
+        raise McpSetupError(
+            f"template field {field_name} has unsupported type {field_type!r}",
+            400,
+        )
+
+    def _validate_template_values(
+        self, template: dict[str, Any], values: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Validate template input and apply optional schema defaults."""
+        if not isinstance(values, dict):
+            raise McpSetupError("template values must be a JSON object", 400)
+        fields = [
+            field for field in template.get("fields") or []
+            if isinstance(field, dict) and field.get("name")
+        ]
+        known = {str(field["name"]) for field in fields}
+        unknown = sorted(set(values) - known)
+        if unknown:
+            raise McpSetupError(
+                f"unknown template field(s): {', '.join(unknown)}", 400
+            )
+        validated: dict[str, Any] = {}
+        for field in fields:
+            name = str(field["name"])
+            required = bool(field.get("required"))
+            if name in values:
+                raw = values[name]
+            elif "default" in field:
+                raw = field.get("default")
+            else:
+                raw = None
+            missing = raw is None or (
+                isinstance(raw, str) and not raw.strip()
+            )
+            if required and missing:
+                raise McpSetupError(
+                    f"template field {name} is required", 400
+                )
+            if raw is None:
+                continue
+            value = self._coerce_template_value(field, raw)
+            minimum = field.get("min")
+            maximum = field.get("max")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if minimum is not None and value < minimum:
+                    raise McpSetupError(
+                        f"template field {name} must be at least {minimum}", 400
+                    )
+                if maximum is not None and value > maximum:
+                    raise McpSetupError(
+                        f"template field {name} must be at most {maximum}", 400
+                    )
+            options = field.get("options")
+            if isinstance(options, list) and value not in options:
+                raise McpSetupError(
+                    f"template field {name} must be one of {options}", 400
+                )
+            validated[name] = value
+        return validated
+
+    def install_template(
+        self,
+        name: str,
+        values: dict[str, Any],
+        *,
+        module_name: str | None = None,
+        domains: list[str] | None = None,
+        confirm: bool = False,
+        allow_any_command: bool = False,
+    ) -> Module:
+        """Install one bundled MCP template and its private config file."""
+        if not confirm:
+            raise McpSetupError(
+                "installing an MCP template requires explicit confirmation",
+                400,
+            )
+        template = self.template_schema(name)
+        template_id = self._safe_template_id(template.get("id"))
+        validated = self._validate_template_values(template, values)
+        requested_name = str(module_name or template_id).strip()
+        _, safe_name = self._setup_name(requested_name)
+        module_id = f"mcp:{safe_name}"
+        if self.registry.get(module_id) is not None:
+            raise McpSetupError(
+                f"an MCP server named {safe_name!r} already exists", 409
+            )
+        if domains is not None:
+            if not isinstance(domains, list):
+                raise McpSetupError("domains must be a list", 400)
+            selected_domains = [str(domain) for domain in domains]
+        else:
+            selected_domains = [
+                str(domain)
+                for domain in (template.get("module") or {}).get("domains")
+                or []
+            ]
+        config_path = self.registry.root / "mcp" / f"{safe_name}.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            util.dumps(validated) + "\n", encoding="utf-8"
+        )
+        try:
+            os.chmod(config_path, 0o600)
+        except OSError:
+            pass
+        entry = dict(template.get("module") or {})
+        entry["name"] = safe_name
+        entry["command"] = entry.get("command") or "python"
+        entry["args"] = [
+            f"harness/modules/{template_id}/server.py",
+            "--config",
+            "${data_dir}/modules/mcp/" + f"{safe_name}.json",
+        ]
+        entry["domains"] = selected_domains
+        entry["env"] = {}
+        module = self.create_server(
+            entry,
+            confirm=True,
+            allow_any_command=allow_any_command,
+        )
+        relative_config = str(
+            config_path.relative_to(self.registry.data_dir)
+        ).replace("\\", "/")
+        updated = replace(
+            module,
+            provenance={
+                **dict(module.provenance or {}),
+                "template": template_id,
+                "config_file": relative_config,
+            },
+            updated_at=util.iso(),
+        )
+        self.registry.save(updated)
+        self.events.record("module.template_installed", data={
+            "module_id": module_id,
+            "template": template_id,
+        })
         return self.registry.get(module_id) or updated
 
     def _activate(self, module: Module, *, force: bool = False) -> bool:
@@ -417,6 +1192,57 @@ class McpModuleLoader:
                     if isinstance(entry, dict)
                 )
         return entries
+
+    def _read_env_values(self, name: str) -> dict[str, str]:
+        """Read one private env sidecar without exposing it in a payload."""
+        path = self.registry.root / "mcp" / f"{_sanitize(name)}.env.json"
+        if not path.is_file():
+            return {}
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return {}
+        values = util.loads(text, {})
+        if not isinstance(values, dict):
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in values.items()
+            if value is not None and str(value) != ""
+        }
+
+    def _update_env_values(self, name: str, env: dict[str, Any]) -> None:
+        """Apply set/remove semantics while preserving omitted values."""
+        path = self.registry.root / "mcp" / f"{_sanitize(name)}.env.json"
+        values = self._read_env_values(name)
+        for key, value in env.items():
+            if value is None or str(value) == "":
+                values.pop(str(key), None)
+            else:
+                values[str(key)] = str(value)
+        if not values:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(util.dumps(values) + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        self.events.record(
+            "mcp.env_values_stored", data={
+                "module_id": f"mcp:{name}",
+                "path": str(path),
+                "env_names": sorted(values),
+            },
+        )
+
+    def env_set(self, module: Module) -> list[str]:
+        """Names with explicit values in the private sidecar."""
+        return sorted(self._read_env_values(module.name))
 
     def _store_env_values(self, name: str, env: dict[str, Any]) -> None:
         """Keep explicit env values in a private sidecar, never in SQLite."""

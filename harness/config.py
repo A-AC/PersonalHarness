@@ -133,6 +133,9 @@ DEFAULTS: dict[str, Any] = {
         # Register a lazy module from cached discovery; discover once when
         # there is no cache yet so a fresh install is immediately usable.
         "lazy_start": True,
+        # The Modules UI may create stdio MCP servers, so limit the command
+        # basename unless the user supplies an explicit per-request override.
+        "command_allowlist": ["python", "python3", "node", "npx", "uvx"],
     },
     "skills": {
         # Imported and drafted skills are instruction text only. Drafts never

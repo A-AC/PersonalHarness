@@ -1,0 +1,66 @@
+{
+  "id": "web",
+  "title": "Web search",
+  "description": "Search a SearXNG-compatible JSON endpoint through the bundled web MCP server.",
+  "module": {
+    "tool_prefix": "",
+    "tools_allow": ["web_search"],
+    "risk_default": "low",
+    "autoapprove": true,
+    "trust_annotations": true,
+    "read_only": true,
+    "side_effects": false,
+    "startup": "lazy",
+    "timeout_s": 60,
+    "domains": []
+  },
+  "fields": [
+    {
+      "name": "searxng_url",
+      "label": "SearXNG URL",
+      "type": "url",
+      "required": true,
+      "default": "http://127.0.0.1:8080",
+      "help": "The SearXNG JSON API base URL."
+    },
+    {
+      "name": "max_results",
+      "label": "Maximum results",
+      "type": "integer",
+      "required": false,
+      "default": 5,
+      "min": 1,
+      "max": 10
+    },
+    {
+      "name": "timeout_s",
+      "label": "Request timeout (seconds)",
+      "type": "number",
+      "required": false,
+      "default": 10
+    },
+    {
+      "name": "categories",
+      "label": "Categories",
+      "type": "string",
+      "required": false,
+      "default": "general"
+    },
+    {
+      "name": "safe_search",
+      "label": "Safe search",
+      "type": "integer",
+      "required": false,
+      "default": 1,
+      "min": 0,
+      "max": 2
+    },
+    {
+      "name": "block_private_hosts",
+      "label": "Block private hosts",
+      "type": "boolean",
+      "required": false,
+      "default": true
+    }
+  ]
+}

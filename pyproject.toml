@@ -28,6 +28,8 @@ include = ["harness*"]
 
 [tool.setuptools.package-data]
 "harness.web" = ["*.html", "*.js", "*.css"]
+"harness.modules.web" = ["*.json"]
+"harness.modules.calendar" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

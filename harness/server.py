@@ -26,6 +26,7 @@ from .config import EDITABLE_KEYS, ConfigError, save_config, validate_group_upda
 from .db import SCHEMA_VERSION
 from .inbox import InboxError, InboxTooLarge
 from .memory import KINDS as MEMORY_KINDS
+from .modules.mcp import McpSetupError
 from .modules.types import ModuleBinding
 from .providers import ModelSelectionError, configured_provider_id
 from .tools import ToolError
@@ -1002,46 +1003,189 @@ class Server:
             return _err("unauthorized", 401)
         return _json(await run_in_threadpool(self._modules_payload))
 
-    def _modules_payload(self) -> dict[str, Any]:
-        modules = []
-        for module in self.app.modules.all():
-            tools = self.app.modules.tools(module.id)
-            bindings = [
-                binding for binding in self.app.modules.bindings(module.id)
-            ]
-            modules.append({
-                "id": module.id,
-                "kind": module.kind,
-                "name": module.name,
-                "version": module.version,
-                "status": module.status,
-                "scope": module.scope,
-                "origin": module.origin,
-                "manifest": module.manifest,
-                "provenance": module.provenance,
-                "content_path": module.content_path,
-                "last_loaded_at": module.last_loaded_at,
-                "last_error": module.last_error,
-                "usage_count": module.usage_count,
-                "bound_domains": [
-                    binding.domain_id for binding in bindings
-                    if binding.enabled
+    async def module_create(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        body = await self._body(request)
+        try:
+            module = await run_in_threadpool(
+                self.app.modules.loader.create_server,
+                body,
+                confirm=body.get("confirm") is True,
+                allow_any_command=body.get("allow_any_command") is True,
+            )
+        except McpSetupError as exc:
+            return _err(str(exc), exc.status)
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        return _json({"module": self._module_payload(module)})
+
+    async def module_test(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        body = await self._body(request)
+        preview = await run_in_threadpool(
+            self.app.modules.loader.test_server,
+            body,
+            module_id=(
+                str(body.get("module_id")) if body.get("module_id") else None
+            ),
+            allow_any_command=body.get("allow_any_command") is True,
+        )
+        return _json(preview)
+
+    async def module_update(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        module_id = request.path_params["module_id"]
+        body = await self._body(request)
+        try:
+            module = await run_in_threadpool(
+                self.app.modules.loader.update_server,
+                module_id,
+                body,
+                allow_any_command=body.get("allow_any_command") is True,
+            )
+        except McpSetupError as exc:
+            return _err(str(exc), exc.status)
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        return _json({"module": self._module_payload(module)})
+
+    async def module_delete(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        module_id = request.path_params["module_id"]
+        try:
+            deleted = await run_in_threadpool(
+                self.app.modules.loader.delete_server, module_id
+            )
+        except McpSetupError as exc:
+            return _err(str(exc), exc.status)
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        return _json({"deleted": deleted})
+
+    async def module_templates(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        templates = await run_in_threadpool(
+            self.app.modules.loader.templates
+        )
+        return _json({"templates": templates})
+
+    async def module_template_install(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        name = request.path_params["name"]
+        body = await self._body(request)
+        try:
+            module = await run_in_threadpool(
+                self.app.modules.loader.install_template,
+                name,
+                body.get("values") or {},
+                module_name=(
+                    str(body.get("name")) if body.get("name") else None
+                ),
+                domains=body.get("domains"),
+                confirm=body.get("confirm") is True,
+                allow_any_command=body.get("allow_any_command") is True,
+            )
+        except McpSetupError as exc:
+            return _err(str(exc), exc.status)
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        relative = str(
+            (module.provenance or {}).get("config_file") or ""
+        )
+        config_path = (
+            str((self.app.data_dir / relative).resolve())
+            if relative else ""
+        )
+        return _json({
+            "module": self._module_payload(module),
+            "config_path": config_path,
+        })
+
+    async def module_tool_risk(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        module_id = request.path_params["module_id"]
+        body = await self._body(request)
+        try:
+            module = await run_in_threadpool(
+                self.app.modules.loader.set_tool_risk,
+                module_id,
+                body.get("tool"),
+                body.get("risk"),
+            )
+        except McpSetupError as exc:
+            return _err(str(exc), exc.status)
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        return _json({"module": self._module_payload(module)})
+
+    def _module_payload(self, module) -> dict[str, Any]:
+        """Serialize one module without exposing private environment values."""
+        tools = self.app.modules.tools(module.id)
+        bindings = [
+            binding for binding in self.app.modules.bindings(module.id)
+        ]
+        payload = {
+            "id": module.id,
+            "kind": module.kind,
+            "name": module.name,
+            "version": module.version,
+            "status": module.status,
+            "scope": module.scope,
+            "origin": module.origin,
+            "manifest": module.manifest,
+            "provenance": module.provenance,
+            "content_path": module.content_path,
+            "last_loaded_at": module.last_loaded_at,
+            "last_error": module.last_error,
+            "usage_count": module.usage_count,
+            "bound_domains": [
+                binding.domain_id for binding in bindings
+                if binding.enabled
+            ],
+            "bindings": [
+                {"domain_id": binding.domain_id,
+                 "enabled": binding.enabled,
+                 "risk_override": binding.risk_override}
+                for binding in bindings
+            ],
+            "tools": [
+                {"name": tool.tool_name, "risk": tool.risk,
+                 "side_effects": tool.side_effects,
+                 "read_only": tool.read_only,
+                 "last_seen": tool.last_seen}
+                for tool in tools
+            ],
+            "health": self.app.modules.status.get(module.id, ""),
+        }
+        if module.kind == "mcp":
+            loader = self.app.modules.loader
+            payload.update({
+                "env_names": [
+                    str(name)
+                    for name in module.manifest.get("env_names") or []
                 ],
-                "bindings": [
-                    {"domain_id": binding.domain_id,
-                     "enabled": binding.enabled,
-                     "risk_override": binding.risk_override}
-                    for binding in bindings
-                ],
-                "tools": [
-                    {"name": tool.tool_name, "risk": tool.risk,
-                     "side_effects": tool.side_effects,
-                     "read_only": tool.read_only,
-                     "last_seen": tool.last_seen}
-                    for tool in tools
-                ],
-                "health": self.app.modules.status.get(module.id, ""),
+                "env_set": loader.env_set(module),
+                "tool_risk": dict(module.manifest.get("tool_risk") or {}),
+                "import_source": (
+                    str((module.provenance or {}).get("source") or "")
+                    if module.origin == "import" else ""
+                ),
+                "editable": True,
             })
+        return payload
+
+    def _modules_payload(self) -> dict[str, Any]:
+        modules = [
+            self._module_payload(module)
+            for module in self.app.modules.all()
+        ]
         budget = int(
             self.app.config.get("modules.tool_schema_budget_tokens", 0)
         )
@@ -1052,6 +1196,10 @@ class Server:
         )
         return {
             "modules": modules,
+            "templates": self.app.modules.loader.templates(),
+            "command_allowlist": list(
+                self.app.config.get("modules.command_allowlist", []) or []
+            ),
             "schema_budget_tokens": budget,
             "schema_budget": {
                 "tokens": selection["tokens"],
@@ -1449,7 +1597,19 @@ class Server:
             Route("/api/consolidations", self.consolidations_list,
                   methods=["GET"]),
             Route("/api/modules", self.modules_list, methods=["GET"]),
+            Route("/api/modules/templates", self.module_templates,
+                  methods=["GET"]),
+            Route("/api/modules/templates/{name}/install",
+                  self.module_template_install, methods=["POST"]),
+            Route("/api/modules/test", self.module_test, methods=["POST"]),
+            Route("/api/modules/mcp", self.module_create, methods=["POST"]),
+            Route("/api/modules/{module_id}", self.module_update,
+                  methods=["PATCH"]),
+            Route("/api/modules/{module_id}", self.module_delete,
+                  methods=["DELETE"]),
             Route("/api/modules/reload", self.modules_reload, methods=["POST"]),
+            Route("/api/modules/{module_id}/tool-risk", self.module_tool_risk,
+                  methods=["POST"]),
             Route("/api/modules/{module_id}/bindings", self.module_bindings,
                   methods=["POST"]),
             Route("/api/modules/{module_id}/{action}", self.module_action,

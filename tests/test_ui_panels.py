@@ -308,6 +308,25 @@ def test_modules_panel_contract_and_bindings(make_app, client, tmp_path):
     assert unbound.json()["module"]["bound_domains"] == []
 
 
+def test_modules_panel_wires_mcp_setup_assets(make_app, client):
+    app = make_app.build(default="ok")
+    http = client(app)
+
+    script = http.get("/assets/app.js").text
+    assert "'/api/modules/mcp'" in script
+    assert "'/api/modules/test'" in script
+    assert "'/api/modules/templates/'" in script
+    assert "'/tool-risk'" in script
+    assert "state.templates = d.templates || []" in script
+
+    payload = http.get("/api/modules").json()
+    assert isinstance(payload["templates"], list)
+    assert {"web", "calendar"} <= {
+        template["id"] for template in payload["templates"]
+    }
+    assert isinstance(payload["command_allowlist"], list)
+
+
 def test_tools_panel_contract(make_app, client, tmp_path):
     app = make_app.build(default="ok")
     module_id = _install_echo(app, tmp_path)

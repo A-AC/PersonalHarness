@@ -1584,7 +1584,7 @@ raw groups, many features reachable only by knowing they exist.
 
 ### Phase 12 - Install, reset, doctor, and MCP setup UI
 
-**Status:** proposed.
+**Status:** 12B implemented (2026-11-16); 12A remains proposed.
 
 **12A - Docker-first install, reset, and doctor**
 - The deployed form stays a container on Ares; the goal is that setup from zero
@@ -1609,6 +1609,13 @@ raw groups, many features reachable only by knowing they exist.
   container target at promotion.
 
 **12B - MCP management UI**
+
+**Status:** implemented (2026-11-16). The authenticated backend supports
+server setup, connection previews, per-tool risk, private env sidecars, and
+bundled web/calendar schema templates, and the Modules panel wires them into
+add/edit/remove forms, a connection preview, a per-tool risk control, private
+environment inputs, and template forms.
+
 - Add/edit/remove server forms in Modules: command, args, env names, domains.
 - "Test connection": launch, `initialize` + `tools/list`, show tools,
   annotations, and the stderr tail, before saving.
@@ -1906,6 +1913,7 @@ log before starting the next one.
 | 2026-11-16 | Pin a run's model/provider snapshot for the whole loop invocation; a resume after a switch records `model.changed` with `source: resume` | A run in flight stays reproducible while a later resumption follows the newly selected model |
 | 2026-11-16 | An unreachable provider may accept only a name named by a configured allowlist | Reachability cannot be verified, so the static allowlist is the only bounded authorization |
 | 2026-11-16 | Use the dedicated `POST /api/model` for switching rather than making the `model` config group editable | Selection needs validation, attribution, and an explicit no-fallback contract |
+| 2026-11-16 | Phase 12B uses a command allowlist plus explicit confirmation, with schema-driven bundled templates | A token holder can otherwise launch arbitrary commands; confirmation and the allowlist bound that exposure while templates keep common servers easy to install |
 
 ---
 

@@ -649,6 +649,21 @@ The same actions are available as `GET /api/modules`,
 `POST /api/modules/reload`, and
 `POST /api/modules/{id}/reload|enable|disable`.
 
+The Modules panel can also add, edit, and remove stdio MCP servers, preview a
+connection with **Test connection** before saving, and set a per-tool risk
+override. Creating or installing a server requires explicit confirmation, and
+new commands are restricted to `modules.command_allowlist` (`python`,
+`python3`, `node`, `npx`, and `uvx` by default); a request may explicitly set
+`allow_any_command` to override that restriction. The API exposes the same
+operations at `POST /api/modules/mcp`, `PATCH|DELETE /api/modules/{id}`,
+`POST /api/modules/test`, and `POST /api/modules/{id}/tool-risk`.
+
+Bundled web and calendar templates are discovered from each server's
+`config.schema.json`. Installing one writes the validated settings to
+`data/modules/mcp/<id>.json`; explicit environment secrets are written only to
+the private `data/modules/mcp/<id>.env.json` sidecar. Module API responses
+return environment names and whether a value is set, never the value itself.
+
 **Web search.** `harness/modules/web/server.py` is a self-contained stdio
 MCP server that queries SearXNG's JSON API and returns bounded
 `{title, url, snippet}` results. Copy `web.example.json` to
@@ -785,7 +800,7 @@ Main groups:
 - `tools.*`: MCP servers import file, skills dir, default MCP risk, risk
   overrides
 - `modules.*`: enabled, module directory, health interval, tool-schema
-  budget, default MCP risk, lazy startup
+  budget, default MCP risk, lazy startup, and the MCP command allowlist
 - `skills.*`: enabled, auto-draft, successful-task threshold, daily draft
   cap, maximum body characters
 - `subagents.*`: enabled, max depth, children per run, child iteration/

@@ -1,0 +1,86 @@
+{
+  "id": "calendar",
+  "title": "Calendar",
+  "description": "Read and manage CalDAV events through the bundled calendar MCP server.",
+  "module": {
+    "tool_prefix": "",
+    "risk_default": "confirm",
+    "trust_annotations": true,
+    "side_effects": true,
+    "startup": "lazy",
+    "timeout_s": 60,
+    "domains": []
+  },
+  "fields": [
+    {
+      "name": "url",
+      "label": "CalDAV URL",
+      "type": "url",
+      "required": true,
+      "help": "The CalDAV collection URL."
+    },
+    {
+      "name": "username",
+      "label": "Username",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "password",
+      "label": "Password",
+      "type": "secret",
+      "required": true
+    },
+    {
+      "name": "calendar",
+      "label": "Calendar",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "organizer",
+      "label": "Organizer",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "timezone",
+      "label": "Timezone",
+      "type": "string",
+      "required": false,
+      "default": "system"
+    },
+    {
+      "name": "max_results",
+      "label": "Maximum results",
+      "type": "integer",
+      "required": false,
+      "default": 100,
+      "min": 1,
+      "max": 500
+    },
+    {
+      "name": "max_range_days",
+      "label": "Maximum range (days)",
+      "type": "integer",
+      "required": false,
+      "default": 366,
+      "min": 1,
+      "max": 3660
+    },
+    {
+      "name": "timeout_s",
+      "label": "Request timeout (seconds)",
+      "type": "number",
+      "required": false,
+      "default": 10
+    },
+    {
+      "name": "read_only",
+      "label": "Read only",
+      "type": "boolean",
+      "required": false,
+      "default": false
+    }
+  ]
+}
