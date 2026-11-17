@@ -13,9 +13,11 @@ permissions.
 from __future__ import annotations
 
 import json
+import queue
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -972,6 +974,10 @@ class ToolRegistry:
                 "required": ["name", "description", "body"],
             },
             risk=RISK_CONFIRM,
+            # Durable cross-run state: approving writes a draft skill row.
+            # This also keeps skill writes out of "approve all safe" and hides
+            # the always-allow control, which cannot apply to skill writes.
+            side_effects=True,
             handler=self._tool_propose_skill,
         ))
         self.register(ToolSpec(
@@ -1018,6 +1024,8 @@ class ToolRegistry:
                 "required": ["name"],
             },
             risk=RISK_CONFIRM,
+            # Durable cross-run state: approving writes a new draft version.
+            side_effects=True,
             handler=self._tool_edit_skill,
         ))
 
@@ -1325,22 +1333,41 @@ class McpServer:
         process: subprocess.Popen,
         payload: dict[str, Any],
         stderr: Any = None,
+        lines: "queue.Queue[Any] | None" = None,
     ) -> dict[str, Any]:
         stdin_text = util.dumps(payload) + "\n"
         process.stdin.write(stdin_text.encode("utf-8"))
         process.stdin.flush()
         # Read lines until a response with our id arrives (skip notifications).
+        # A reader thread feeds the queue because a blocking pipe readline()
+        # would otherwise ignore the timeout: a server that starts and never
+        # answers must fail the call instead of hanging the caller forever.
+        if lines is None:
+            lines = queue.Queue()
+            threading.Thread(
+                target=self._pump_stdout,
+                args=(process.stdout, lines),
+                daemon=True,
+                name=f"mcp-read-{self.name}",
+            ).start()
         deadline = time.monotonic() + self.timeout_s
-        lines: list[str] = []
-        while time.monotonic() < deadline:
-            line = process.stdout.readline()
-            if not line:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise McpError(self._failure("timed out", stderr))
+            try:
+                item = lines.get(timeout=remaining)
+            except queue.Empty:
+                raise McpError(self._failure("timed out", stderr)) from None
+            if isinstance(item, BaseException):
+                raise McpError(self._failure(f"read failed: {item}", stderr))
+            if not item:
                 raise McpError(self._failure(
                     "closed its output", stderr
                 ))
-            lines.append(line.decode("utf-8", errors="replace"))
+            text = item.decode("utf-8", errors="replace")
             try:
-                message = json.loads(lines[-1])
+                message = json.loads(text)
             except ValueError:
                 continue
             if message.get("id") == payload.get("id"):
@@ -1350,7 +1377,18 @@ class McpServer:
                         f"{message['error'].get('message')}"
                     )
                 return message.get("result") or {}
-        raise McpError(self._failure("timed out", stderr))
+
+    @staticmethod
+    def _pump_stdout(stream: Any, lines: "queue.Queue[Any]") -> None:
+        """Feed stdout lines to a queue until EOF; never raises."""
+        try:
+            while True:
+                line = stream.readline()
+                lines.put(line)
+                if not line:
+                    return
+        except Exception as exc:  # a broken pipe during shutdown
+            lines.put(exc)
 
     def _failure(self, reason: str, stderr: Any = None) -> str:
         detail = self._stderr_text(stderr)
@@ -1374,7 +1412,7 @@ class McpServer:
             return ""
         return text[-limit:]
 
-    def _launch(self) -> tuple[subprocess.Popen, Any]:
+    def _launch(self) -> tuple[subprocess.Popen, Any, "queue.Queue[Any]"]:
         # A temp file (not a pipe) avoids a deadlock when a server logs a lot
         # to stderr, while still letting a failure report the real reason.
         stderr = tempfile.TemporaryFile()
@@ -1388,10 +1426,17 @@ class McpServer:
         except OSError as exc:
             stderr.close()
             raise McpError(f"cannot start MCP server '{self.name}': {exc}") from exc
-        return process, stderr
+        lines: "queue.Queue[Any]" = queue.Queue()
+        threading.Thread(
+            target=self._pump_stdout,
+            args=(process.stdout, lines),
+            daemon=True,
+            name=f"mcp-read-{self.name}",
+        ).start()
+        return process, stderr, lines
 
     def list_tools(self) -> list[dict[str, Any]]:
-        process, stderr = self._launch()
+        process, stderr, lines = self._launch()
         try:
             self._request(process, {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1400,14 +1445,14 @@ class McpServer:
                     "capabilities": {},
                     "clientInfo": {"name": "harness", "version": "2.0.0"},
                 },
-            }, stderr)
+            }, stderr, lines)
             process.stdin.write((util.dumps({
                 "jsonrpc": "2.0", "method": "notifications/initialized"
             }) + "\n").encode("utf-8"))
             process.stdin.flush()
             result = self._request(process, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/list",
-            }, stderr)
+            }, stderr, lines)
             return result.get("tools") or []
         finally:
             self._shutdown(process, stderr)
@@ -1419,7 +1464,7 @@ class McpServer:
         :meth:`list_tools`, but keeps stderr available to the caller. The
         subprocess is always shut down before returning or raising.
         """
-        process, stderr = self._launch()
+        process, stderr, lines = self._launch()
         try:
             self._request(process, {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1428,14 +1473,14 @@ class McpServer:
                     "capabilities": {},
                     "clientInfo": {"name": "harness", "version": "2.0.0"},
                 },
-            }, stderr)
+            }, stderr, lines)
             process.stdin.write((util.dumps({
                 "jsonrpc": "2.0", "method": "notifications/initialized"
             }) + "\n").encode("utf-8"))
             process.stdin.flush()
             result = self._request(process, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/list",
-            }, stderr)
+            }, stderr, lines)
             tools = result.get("tools") or []
             return {
                 "tools": tools,
@@ -1453,7 +1498,7 @@ class McpServer:
             self._shutdown(process, stderr)
 
     def call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        process, stderr = self._launch()
+        process, stderr, lines = self._launch()
         try:
             self._request(process, {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1462,7 +1507,7 @@ class McpServer:
                     "capabilities": {},
                     "clientInfo": {"name": "harness", "version": "2.0.0"},
                 },
-            }, stderr)
+            }, stderr, lines)
             process.stdin.write((util.dumps({
                 "jsonrpc": "2.0", "method": "notifications/initialized"
             }) + "\n").encode("utf-8"))
@@ -1470,7 +1515,7 @@ class McpServer:
             result = self._request(process, {
                 "jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": tool, "arguments": arguments},
-            }, stderr)
+            }, stderr, lines)
             if result.get("isError"):
                 texts = [
                     item.get("text", "") for item in result.get("content") or []

@@ -182,6 +182,14 @@ class Approvals:
                     raise ApprovalError(
                         f"approval {approval_id} was decided concurrently"
                     )
+                # The awaiting attempt is closed atomically with the decision;
+                # the runtime then records the feedback tool result.
+                conn.execute(
+                    "UPDATE tool_executions SET status='denied',"
+                    " ended_at=?, error='approval revised'"
+                    " WHERE approval_id=? AND status='awaiting_approval'",
+                    (now, approval_id),
+                )
         if expired:
             self.events.record(
                 "approval.expired", task_id=approval["task_id"],
@@ -368,6 +376,17 @@ class Approvals:
                 if cur.rowcount != 1:
                     raise ApprovalError(
                         f"approval {approval_id} was decided concurrently"
+                    )
+                if status in ("rejected", "cancelled"):
+                    # Close the awaiting execution in the same transaction so
+                    # a rejection never leaves a claimable/pending attempt
+                    # behind if the caller cannot resume the run. The wording
+                    # matches startup recovery's observation.
+                    conn.execute(
+                        "UPDATE tool_executions SET status='denied',"
+                        " ended_at=?, error=?"
+                        " WHERE approval_id=? AND status='awaiting_approval'",
+                        (now, f"approval {status}", approval_id),
                     )
                 expired = False
         if expired:

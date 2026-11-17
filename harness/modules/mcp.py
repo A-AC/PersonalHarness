@@ -222,7 +222,10 @@ class McpModuleLoader:
         if self.tools is not None:
             self.tools.unregister_module(module_id)
         if enabled:
-            self._activate(updated)
+            # Rediscover on enable so a manifest edited while disabled
+            # (tools_allow, command, risk) takes effect instead of the stale
+            # cached tool set.
+            self._activate(updated, force=True)
         self.events.record(
             "module.enabled" if enabled else "module.disabled",
             data={"module_id": module_id},
@@ -319,6 +322,12 @@ class McpModuleLoader:
             raise McpSetupError(
                 f"module {module_id} is not an MCP server", 400
             )
+        if self._import_still_owns(module):
+            raise McpSetupError(
+                "this module is imported from its servers file; edit or "
+                "remove the entry there and reload",
+                409,
+            )
         if not isinstance(entry, dict):
             raise McpSetupError("MCP server entry must be a JSON object", 400)
         if "name" in entry:
@@ -383,10 +392,14 @@ class McpModuleLoader:
         else:
             scope = module.scope
 
+        # A fixed entry may recover from an old discovery error, mirroring an
+        # explicit import sync. A user-disabled module stays disabled.
+        status = "active" if module.status == "error" else module.status
         updated = replace(
             module,
             manifest=manifest,
             scope=scope,
+            status=status,
             updated_at=util.iso(),
         )
         self.registry.save(updated)
@@ -402,9 +415,11 @@ class McpModuleLoader:
                 ))
         if self.tools is not None:
             self.tools.unregister_module(module_id)
-        self._activate(updated, force=True)
+        if updated.status == "active":
+            self._activate(updated, force=True)
         self.events.record("module.updated", data={
             "module_id": module_id,
+            "allow_any_command": bool(allow_any_command),
         })
         return self.registry.get(module_id) or updated
 
@@ -418,32 +433,17 @@ class McpModuleLoader:
                 f"module {module_id} is not an MCP server", 400
             )
         if module.origin == "import":
-            source = str((module.provenance or {}).get("source") or "")
-            path = Path(source).expanduser() if source else None
-            if path is not None and not path.is_absolute():
-                path = self.registry.data_dir / path
-            if path is not None and path.is_file():
-                try:
-                    import yaml
-
-                    data = yaml.safe_load(
-                        path.read_text(encoding="utf-8")
-                    ) or {}
-                except Exception:
-                    data = {}
-                imported_names = {
-                    str(entry.get("name") or "").strip()
-                    for entry in self._entries(data)
-                }
-                if module.name.strip() in imported_names:
-                    raise McpSetupError(
-                        f"this module is imported from {path}; edit or remove "
-                        "the entry there and reload",
-                        409,
-                    )
+            if self._import_still_owns(module):
+                source = str((module.provenance or {}).get("source") or "")
+                raise McpSetupError(
+                    f"this module is imported from {source}; edit or remove "
+                    "the entry there and reload",
+                    409,
+                )
         if self.tools is not None:
             self.tools.unregister_module(module_id)
         self._delete_module_rows(module_id)
+        self.status.pop(module_id, None)
         env_path = self._env_path(module)
         if env_path is not None:
             try:
@@ -454,6 +454,30 @@ class McpModuleLoader:
             "module_id": module_id,
         })
         return module_id
+
+    def _import_still_owns(self, module: Module) -> bool:
+        """Whether the servers file that imported this row still lists it."""
+        if module.origin != "import":
+            return False
+        source = str((module.provenance or {}).get("source") or "")
+        path = Path(source).expanduser() if source else None
+        if path is None:
+            return False
+        if not path.is_absolute():
+            path = self.registry.data_dir / path
+        if not path.is_file():
+            return False
+        try:
+            import yaml
+
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return False
+        names = {
+            str(entry.get("name") or "").strip()
+            for entry in self._entries(data)
+        }
+        return module.name.strip() in names
 
     def command_allowed(
         self, command: str, *, allow_any: bool = False
@@ -682,7 +706,8 @@ class McpModuleLoader:
         self.registry.save(updated)
         if self.tools is not None:
             self.tools.unregister_module(module_id)
-        self._activate(updated, force=True)
+        if updated.status == "active":
+            self._activate(updated, force=True)
         self.events.record("module.tool_risk", data={
             "module_id": module_id,
             "tool": tool_name,
@@ -946,6 +971,7 @@ class McpModuleLoader:
             ]
         config_path = self.registry.root / "mcp" / f"{safe_name}.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        existed = config_path.exists()
         config_path.write_text(
             util.dumps(validated) + "\n", encoding="utf-8"
         )
@@ -963,11 +989,21 @@ class McpModuleLoader:
         ]
         entry["domains"] = selected_domains
         entry["env"] = {}
-        module = self.create_server(
-            entry,
-            confirm=True,
-            allow_any_command=allow_any_command,
-        )
+        try:
+            module = self.create_server(
+                entry,
+                confirm=True,
+                allow_any_command=allow_any_command,
+            )
+        except Exception:
+            # Do not leave a template config file (which can contain a
+            # credential) behind when the server row could not be created.
+            if not existed:
+                try:
+                    config_path.unlink()
+                except OSError:
+                    pass
+            raise
         relative_config = str(
             config_path.relative_to(self.registry.data_dir)
         ).replace("\\", "/")
@@ -993,7 +1029,12 @@ class McpModuleLoader:
         A lazy module uses its cached discovery. A cache miss (fresh install)
         discovers once so the capability is usable immediately; later starts
         do not launch the server just to build schemas.
+
+        Only ``active`` modules register tools. Editing or re-risking a
+        disabled/error module must never make its cached tools callable.
         """
+        if module.status != "active":
+            return False
         cached = self.registry.tools(module.id)
         startup = str(module.manifest.get("startup") or "")
         lazy = bool(self.config.get("modules.lazy_start", True))

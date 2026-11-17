@@ -194,6 +194,24 @@ def test_list_models_reports_unreachable_cleanly(tmp_path):
     client.close()
 
 
+def test_probe_reports_an_unknown_provider_cleanly(tmp_path):
+    config = load_config(tmp_path)
+    config.set("model.provider", "missing")
+    client = ModelClient(
+        config,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=_chat_body())
+        ),
+    )
+
+    result = client.probe()
+
+    assert result["provider"] == "missing"
+    assert result["reachable"] is False
+    assert "unknown model provider" in result["detail"]
+    client.close()
+
+
 def test_set_model_switches_model_and_records_event(tmp_path):
     model = ScriptedModel(models=["a", "b"])
     app = build_app(tmp_path, model=model)
@@ -491,6 +509,15 @@ def test_model_picker_is_wired_into_the_shell(make_app, client):
     assert "modelOptionsHtml" in script
     assert "modelselect" in script
     assert "/api/guard" not in script
+
+    # The picker builds option markup with innerHTML, so the helper must
+    # actually escape: model names and provider ids come from the endpoint.
+    esc_start = script.index("function esc(text)")
+    esc_body = script[esc_start:script.index("}", esc_start)]
+    for entity in ("&amp;", "&lt;", "&gt;", "&quot;", "&#39;"):
+        assert entity in esc_body
+    assert "\\u0026" not in esc_body
+    assert "\\u003c" not in esc_body
 
     style = http.get("/assets/style.css").text
     assert "#modelpick" in style

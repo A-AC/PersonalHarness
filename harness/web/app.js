@@ -35,11 +35,11 @@ const $ = (id) => document.getElementById(id);
 
 function esc(text) {
   return String(text == null ? '' : text)
-    .replace(/&/g, '\u0026')
-    .replace(/</g, '\u003c')
-    .replace(/>/g, '\u003e')
-    .replace(/"/g, '\u0022')
-    .replace(/'/g, '\u0027');
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 async function api(path, opts) {
@@ -333,8 +333,8 @@ function renderDomainPicker() {
   const wanted = pick.value;
   const options = ['<option value="">Auto-route</option>'].concat(
     activeDomains().map(d =>
-      '<option value="' + d.id.replace(/"/g, '&quot;') + '">' +
-      (d.name || d.id).replace(/</g, '&lt;') + '</option>')
+      '<option value="' + esc(d.id) + '">' +
+      esc(d.name || d.id) + '</option>')
   );
   const html = options.join('');
   if (pick.dataset.html !== html) {

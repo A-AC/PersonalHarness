@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -42,9 +43,14 @@ from .tools import ToolError, validate_arguments
 SKILL_WRITE_TOOLS = frozenset({"propose_skill", "edit_skill"})
 
 _REVISION_CUES = (
-    "instead", "change", "make it", "change it", "use ", "not that",
-    "rather", "shorter", "longer", "different", "rename", "add ", "remove ",
-    "rewrite", "try ", "but ", "don't", "do not", "actually",
+    "instead", "change", "make it", "change it", "use", "not that",
+    "rather", "shorter", "longer", "different", "rename", "add", "remove",
+    "rewrite", "try", "but", "don't", "do not", "actually",
+)
+# Match whole words: a substring test read "exchange rates" as a change
+# request and swallowed a new topic while an approval was pending.
+_REVISION_CUE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(cue) for cue in _REVISION_CUES) + r")\b"
 )
 
 
@@ -495,7 +501,7 @@ class AgentRuntime:
             return None
 
         lowered = " ".join(stripped.lower().split())
-        if any(cue in lowered for cue in _REVISION_CUES):
+        if _REVISION_CUE_RE.search(lowered):
             return approval
 
         reply_words = set(util.keywords(stripped))

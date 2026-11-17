@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -127,6 +128,30 @@ def test_connection_preview_lists_tools_and_reports_stderr(
     assert result["ok"] is False
     assert result["tools"] == []
     assert "broken-preview-marker" in result["stderr_tail"]
+
+
+def test_connection_preview_times_out_a_silent_server(
+    make_app, client, tmp_path
+):
+    silent = tmp_path / "silent_server.py"
+    silent.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    app = make_app.build(default="ok")
+    api = client(app)
+
+    started = time.monotonic()
+    preview = api.post("/api/modules/test", json={
+        "command": sys.executable,
+        "args": [str(silent)],
+        # A hanging server must not hang the preview request.
+        "timeout_s": 0.5,
+    })
+    elapsed = time.monotonic() - started
+
+    assert preview.status_code == 200
+    payload = preview.json()
+    assert payload["ok"] is False
+    assert "timed out" in payload["error"].lower()
+    assert elapsed < 8
 
 
 def test_env_values_stay_in_the_private_sidecar(make_app, client):
@@ -259,6 +284,43 @@ def test_bundled_templates_install_private_config_and_tools(
     assert password in calendar_config.read_text(encoding="utf-8")
 
 
+def test_disabled_module_edits_never_register_tools(make_app, client):
+    app = make_app.build(default="ok")
+    api = client(app)
+    created = api.post(
+        "/api/modules/mcp",
+        json={**_echo_entry("disabled_edit"), "confirm": True},
+    )
+    assert created.status_code == 200
+    assert "echo" in app.tools.names()
+
+    disabled = api.post("/api/modules/mcp:disabled_edit/disable")
+    assert disabled.status_code == 200
+    assert "echo" not in app.tools.names()
+
+    patched = api.patch(
+        "/api/modules/mcp:disabled_edit", json={"tools_allow": ["add"]}
+    )
+    assert patched.status_code == 200
+    assert "echo" not in app.tools.names()
+    assert "add" not in app.tools.names()
+
+    risk = api.post(
+        "/api/modules/mcp:disabled_edit/tool-risk",
+        json={"tool": "add", "risk": "confirm"},
+    )
+    assert risk.status_code == 200
+    assert "add" not in app.tools.names()
+
+    enabled = api.post("/api/modules/mcp:disabled_edit/enable")
+    assert enabled.status_code == 200
+    assert "add" in app.tools.names()
+    # Enabling rediscovers, so the edited tools_allow applies instead of the
+    # stale cached tool set.
+    assert "echo" not in app.tools.names()
+    assert app.tools.resolve("add").risk == "confirm"
+
+
 def test_delete_refuses_an_import_owned_module_still_in_its_file(
     make_app, client, tmp_path
 ):
@@ -279,3 +341,21 @@ def test_delete_refuses_an_import_owned_module_still_in_its_file(
         deleted.json()["error"]
     )
     assert app.modules.get("mcp:imported_echo") is not None
+
+    listed = api.get("/api/modules").json()["modules"]
+    imported = next(
+        item for item in listed if item["id"] == "mcp:imported_echo"
+    )
+    assert imported["editable"] is False
+    assert imported["import_source"] == str(servers)
+
+    patched = api.patch(
+        "/api/modules/mcp:imported_echo", json={"tools_allow": ["echo"]}
+    )
+    assert patched.status_code == 409
+    assert "edit or remove the entry there and reload" in (
+        patched.json()["error"]
+    )
+    assert app.modules.get("mcp:imported_echo").manifest.get(
+        "tools_allow"
+    ) == []

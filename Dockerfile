@@ -36,7 +36,7 @@ COPY scripts ./scripts
 COPY eval ./eval
 COPY Dockerfile docker-compose.stage.yml .
 RUN pip install --no-cache-dir pytest
-CMD ["python", "-m", "pytest", "tests", "-o", "addopts=", "-q"]
+CMD ["python", "-m", "pytest", "tests", "-m", "not live", "-o", "addopts=", "-q"]
 
 # Default (last) stage: the runtime image.
 FROM base AS runtime

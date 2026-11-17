@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 
 import pytest
@@ -328,6 +329,50 @@ def test_always_allow_remember_requires_safe_untainted_tool(make_app):
     )
 
 
+def test_skill_writes_are_side_effecting_and_not_bulk_safe(make_app, client):
+    app = make_app.build(scripts=[
+        {"tool_calls": [{
+            "name": "propose_skill",
+            "arguments": {
+                "name": "weekly review",
+                "description": "run a weekly review",
+                "body": "1. Gather open tasks.",
+            },
+        }]},
+        {"content": "Draft proposed."},
+    ])
+    result = app.runtime.submit_user_message("propose a weekly review skill")
+    assert result.status == "waiting_approval"
+
+    approval = client(app).get("/api/approvals").json()["approvals"][0]
+    assert approval["tool"] == "propose_skill"
+    # Skill rows are durable state, so the UI must not offer always-allow or
+    # include the approval in "Approve all safe".
+    assert approval["side_effects"] is True
+    with pytest.raises(ValueError):
+        app.runtime.decide_approval(
+            approval["id"], "approve", remember=True
+        )
+    assert app.approvals.get(approval["id"])["status"] == "pending"
+
+
+def test_cue_words_inside_other_words_are_not_revision_feedback(make_app):
+    app = make_app.build(scripts=[
+        _proposal("hello"),
+        {"content": "ambiguous"},
+    ])
+    _register_confirm_tool(app)
+    app.runtime.submit_user_message("send hello")
+    approval = app.approvals.pending()[0]
+
+    # "exchange" contains "change", but it is a new topic, not a change
+    # request for the pending action.
+    app.runtime.submit_user_message("exchange rates for tomorrow")
+
+    assert app.approvals.get(approval["id"])["status"] == "pending"
+    assert not app.db.query("SELECT id FROM approvals WHERE status='revised'")
+
+
 def test_risk_override_revoke_restores_confirm(make_app):
     app = make_app.build(default="ok")
     _register_confirm_tool(app)
@@ -465,13 +510,25 @@ def test_calendar_and_web_summary_templates_present(monkeypatch):
         "Create the event '{summary}' ({start} → {end})"
     )
     assert schemas["calendar_update_event"]["summary_template"] == (
-        "Update the event '{event_id}'"
+        "Update the event '{uid}'"
     )
     assert schemas["calendar_delete_event"]["summary_template"] == (
-        "Delete the event '{event_id}'"
+        "Delete the event '{uid}'"
     )
     assert "summary_template" not in schemas["calendar_list_events"]
     assert "query" in web.tool_schema()["summary_template"]
+
+    # A template placeholder that is not an actual argument renders as
+    # "(not set)" on the approval card, so the two must stay in sync.
+    for schema in [*schemas.values(), web.tool_schema()]:
+        template = schema.get("summary_template") or ""
+        placeholders = set(re.findall(r"\{([A-Za-z0-9_]+)\}", template))
+        properties = set(
+            (schema.get("inputSchema") or {}).get("properties") or {}
+        )
+        assert placeholders <= properties, (
+            schema["name"], sorted(placeholders - properties)
+        )
 
 
 def test_v7_approvals_survive_the_v8_chain_migration(tmp_path):

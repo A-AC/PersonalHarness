@@ -20,7 +20,12 @@ import httpx
 
 from . import util
 from .config import Config
-from .providers import ModelSelectionError, Provider, get_provider
+from .providers import (
+    ModelSelectionError,
+    Provider,
+    configured_provider_id,
+    get_provider,
+)
 
 # Markers used by servers that embed tool requests in content. Built by
 # concatenation so the literal sequences never need to appear in this file.
@@ -392,7 +397,23 @@ class ModelClient:
 
     def probe(self, provider_id: str | None = None) -> dict[str, Any]:
         """Check connectivity and the configured model without side effects."""
-        provider = get_provider(self.config, provider_id)
+        try:
+            provider = get_provider(self.config, provider_id)
+        except ModelSelectionError as exc:
+            # Report an invalid/unresolvable selection instead of raising:
+            # the diagnostics endpoint must stay a diagnostics endpoint.
+            return {
+                "provider": str(provider_id or configured_provider_id(
+                    self.config
+                )),
+                "base_url": "",
+                "model": self.config.get("model.name"),
+                "reachable": False,
+                "model_listed": None,
+                "chat_ok": False,
+                "tool_call_ok": False,
+                "detail": str(exc),
+            }
         result: dict[str, Any] = {
             "provider": provider.id,
             "base_url": provider.base_url,
@@ -407,6 +428,9 @@ class ModelClient:
             response = self._client.get(
                 self._models_url_for(provider),
                 headers=self._headers_for(provider),
+                # A probe must answer promptly even when the endpoint hangs;
+                # the chat budget stays the normal (long) model timeout.
+                timeout=httpx.Timeout(4.0, connect=2.0),
             )
             result["reachable"] = response.status_code < 500
             if response.status_code == 200:

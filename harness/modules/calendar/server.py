@@ -1693,7 +1693,7 @@ def tool_schemas() -> list[dict]:
                 "Update fields on an existing event by UID. Requires approval. "
                 "Uses the event ETag so concurrent edits are not clobbered."
             ),
-            "summary_template": "Update the event '{event_id}'",
+            "summary_template": "Update the event '{uid}'",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1720,7 +1720,7 @@ def tool_schemas() -> list[dict]:
                 "Delete an event by UID. Requires approval and uses the "
                 "event ETag."
             ),
-            "summary_template": "Delete the event '{event_id}'",
+            "summary_template": "Delete the event '{uid}'",
             "inputSchema": {
                 "type": "object",
                 "properties": {

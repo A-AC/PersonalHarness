@@ -1177,7 +1177,9 @@ class Server:
                     str((module.provenance or {}).get("source") or "")
                     if module.origin == "import" else ""
                 ),
-                "editable": True,
+                # Imported rows are owned by their servers file; editing them
+                # here would be discarded by the next sync reload.
+                "editable": module.origin != "import",
             })
         return payload
 
