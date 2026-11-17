@@ -41,7 +41,9 @@ CMD ["python", "-m", "pytest", "tests", "-m", "not live", "-o", "addopts=", "-q"
 # Default (last) stage: the runtime image.
 FROM base AS runtime
 
-RUN useradd --create-home --uid 10001 harness \
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
+    && useradd --create-home --uid 10001 harness \
     && mkdir -p /data \
     && chown -R harness:harness /app /data
 
@@ -53,4 +55,5 @@ VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
 
-CMD ["python", "-m", "harness", "serve"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["serve"]

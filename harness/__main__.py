@@ -102,6 +102,93 @@ def cmd_serve(args: argparse.Namespace) -> None:
     serve(app, host=args.host, port=args.port)
 
 
+def cmd_init(args: argparse.Namespace) -> None:
+    """Create the first configuration file, from env or an interactive prompt."""
+    from . import setup as setup_helpers
+    from .config import load_config
+
+    data_dir = Path(args.data_dir)
+    config_path = data_dir / "config.yaml"
+    if config_path.exists() and not args.force:
+        raise SystemExit(
+            f"{config_path} already exists; pass --force to overwrite"
+        )
+
+    if args.non_interactive:
+        try:
+            values = setup_helpers.values_from_env(os.environ)
+        except setup_helpers.SetupError as exc:
+            raise SystemExit(str(exc)) from exc
+        if args.probe:
+            probe = setup_helpers.probe_model_endpoint(
+                values["model_base_url"],
+                api_key=values["api_key"],
+                model=values["model_name"],
+            )
+            print(json.dumps(probe, indent=2, default=str))
+        config = load_config(data_dir)
+        try:
+            setup_helpers.apply_setup(config, values)
+        except (setup_helpers.SetupError, OSError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"configured {config_path}")
+        return
+
+    try:
+        token = input("Access token: ")
+        base_url = input("Model endpoint base URL: ")
+        probe = setup_helpers.probe_model_endpoint(base_url)
+        if probe.get("models"):
+            print("models: " + ", ".join(probe["models"][:20]))
+        if not probe.get("reachable"):
+            print(
+                "warning: endpoint unreachable: "
+                f"{probe.get('error') or 'no response'}"
+            )
+        model_name = input("Model name: ")
+        timezone = input("Timezone [system]: ").strip() or "system"
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise SystemExit("init cancelled") from exc
+    try:
+        values = setup_helpers.validate_setup_values(
+            token=token,
+            model_base_url=base_url,
+            model_name=model_name,
+            timezone=timezone,
+        )
+    except setup_helpers.SetupError as exc:
+        raise SystemExit(str(exc)) from exc
+    config = load_config(data_dir)
+    try:
+        setup_helpers.apply_setup(config, values)
+    except (setup_helpers.SetupError, OSError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"configured {config_path}")
+
+
+def cmd_reset(args: argparse.Namespace) -> None:
+    if not args.yes:
+        raise SystemExit("reset is destructive; pass --yes to confirm")
+    client = Client(_base_url(args), _token(args))
+    out = client.call("POST", "/api/reset", {
+        "confirm": True,
+        "keep_config": bool(args.keep_config),
+    })
+    print(json.dumps(out, indent=2, default=str))
+    print("The service is restarting itself; it will be back in a few seconds.")
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    from .doctor import format_report, run_doctor
+
+    report = run_doctor(Path(args.data_dir))
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(format_report(report))
+    raise SystemExit(0 if report["ok"] else 1)
+
+
 def cmd_endpoint_check(args: argparse.Namespace) -> None:
     """Direct diagnostic: verifies the configured endpoint without a server."""
     from .config import load_config
@@ -641,6 +728,40 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
     serve.set_defaults(func=cmd_serve)
+
+    init = sub.add_parser(
+        "init", help="write the first configuration (setup wizard headless)",
+    )
+    common(init)
+    init.add_argument(
+        "--non-interactive", action="store_true",
+        help="read HARNESS_TOKEN, HARNESS_MODEL_BASE_URL, etc. from the "
+             "environment instead of prompting",
+    )
+    init.add_argument("--force", action="store_true",
+                      help="overwrite an existing config.yaml")
+    init.add_argument("--probe", action="store_true",
+                      help="probe the endpoint before writing (with "
+                           "--non-interactive)")
+    init.set_defaults(func=cmd_init)
+
+    reset = sub.add_parser(
+        "reset", help="back up and wipe runtime state (requires --yes)",
+    )
+    common(reset)
+    reset.add_argument("--keep-config", action="store_true",
+                       help="keep config.yaml so the install stays configured")
+    reset.add_argument("--yes", action="store_true",
+                       help="confirm this destructive operation")
+    reset.set_defaults(func=cmd_reset)
+
+    doctor = sub.add_parser(
+        "doctor", help="run preflight diagnostics without a server",
+    )
+    common(doctor)
+    doctor.add_argument("--json", action="store_true",
+                        help="print the report as JSON")
+    doctor.set_defaults(func=cmd_doctor)
 
     check = sub.add_parser("endpoint-check",
                            help="verify the configured model endpoint")

@@ -20,6 +20,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from . import __version__, git_sha, util
+from . import setup as setup_helpers
 from .app import App
 from .approvals import ApprovalError
 from .config import EDITABLE_KEYS, ConfigError, save_config, validate_group_update
@@ -29,6 +30,7 @@ from .memory import KINDS as MEMORY_KINDS
 from .modules.mcp import McpSetupError
 from .modules.types import ModuleBinding
 from .providers import ModelSelectionError, configured_provider_id
+from .setup import SetupError
 from .tools import ToolError
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -73,6 +75,9 @@ class Server:
                                 samesite="lax")
         return response
 
+    def _needs_setup(self) -> bool:
+        return not bool(self.config.get("setup.complete"))
+
     async def _body(self, request: Request) -> dict[str, Any]:
         try:
             data = await request.json()
@@ -86,6 +91,17 @@ class Server:
         return _json({"status": "ok"})
 
     async def page(self, request: Request) -> Response:
+        if self._needs_setup():
+            # The wizard is the only page an unconfigured instance serves; it
+            # must be reachable before any token exists.
+            path = WEB_DIR / "setup.html"
+            if not path.is_file():
+                return Response("setup page missing", status_code=500)
+            response = Response(
+                path.read_text(encoding="utf-8"), media_type="text/html"
+            )
+            response.headers["Cache-Control"] = "no-store"
+            return response
         if not self._authorized(request):
             return Response("unauthorized", status_code=401)
         html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
@@ -105,6 +121,112 @@ class Server:
         response = Response(path.read_text(encoding="utf-8"), media_type=media_type)
         response.headers["Cache-Control"] = "no-cache"
         return self._set_cookie(request, response)
+
+    # -- first-run setup -----------------------------------------------------
+
+    def _setup_payload(self) -> dict[str, Any]:
+        payload = setup_helpers.setup_state(self.config)
+        payload["templates"] = [
+            {
+                "id": template.get("id"),
+                "title": template.get("title"),
+                "description": template.get("description"),
+                "fields": template.get("fields") or [],
+                "installed": bool(template.get("installed")),
+            }
+            for template in self.app.modules.loader.templates()
+        ]
+        return payload
+
+    async def setup_get(self, request: Request) -> Response:
+        if not self._needs_setup():
+            return _err("setup already complete", 409)
+        return _json(await run_in_threadpool(self._setup_payload))
+
+    async def setup_probe(self, request: Request) -> Response:
+        if not self._needs_setup():
+            return _err("setup already complete", 409)
+        body = await self._body(request)
+        try:
+            result = await run_in_threadpool(
+                setup_helpers.probe_model_endpoint,
+                body.get("base_url"),
+                api_key=str(body.get("api_key") or ""),
+                model=str(body.get("model") or ""),
+            )
+        except SetupError as exc:
+            return _err(str(exc), exc.status)
+        return _json(result)
+
+    async def setup_submit(self, request: Request) -> Response:
+        if not self._needs_setup():
+            return _err("setup already complete", 409)
+        body = await self._body(request)
+        modules = body.get("modules")
+        if modules is not None and not isinstance(modules, list):
+            return _err("modules must be a list")
+        values = {
+            "token": body.get("token"),
+            "model_base_url": body.get("model_base_url"),
+            "model_name": body.get("model_name"),
+            "api_key": body.get("api_key") or "",
+            "timezone": body.get("timezone") or "system",
+        }
+        try:
+            normalized = await run_in_threadpool(
+                setup_helpers.apply_setup, self.config, values
+            )
+        except SetupError as exc:
+            return _err(str(exc), exc.status)
+        except OSError as exc:
+            return _err(f"could not save configuration: {exc}", 500)
+
+        results: list[dict[str, Any]] = []
+        installed: list[str] = []
+        for item in modules or []:
+            if not isinstance(item, dict):
+                results.append({
+                    "id": "", "installed": False,
+                    "error": "module entry must be an object",
+                })
+                continue
+            module_id = str(item.get("id") or "")
+            try:
+                await run_in_threadpool(
+                    self.app.modules.loader.install_template,
+                    module_id,
+                    item.get("values") or {},
+                    confirm=True,
+                )
+            except Exception as exc:
+                # One broken optional module must not fail the whole setup.
+                results.append({
+                    "id": module_id,
+                    "installed": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+            else:
+                results.append({
+                    "id": module_id, "installed": True, "error": "",
+                })
+                installed.append(module_id)
+
+        self.app.events.record(
+            "system.configured",
+            data={"source": "wizard", "modules": installed},
+        )
+        response = _json({
+            "status": "configured",
+            "modules": results,
+            "env_overrides": setup_helpers.setup_state(
+                self.config
+            )["env_overrides"],
+        })
+        response.set_cookie(
+            "harness_token", normalized["token"],
+            httponly=True, samesite="lax",
+        )
+        return response
 
     # -- state --------------------------------------------------------------
 
@@ -1544,6 +1666,25 @@ class Server:
         threading.Timer(1.5, os._exit, [0]).start()
         return _json(outcome)
 
+    async def reset(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        body = await self._body(request)
+        if body.get("confirm") is not True:
+            return _err("reset requires confirm=true")
+        try:
+            outcome = await run_in_threadpool(
+                self.app.reset,
+                keep_config=bool(body.get("keep_config", False)),
+            )
+        except OSError as exc:
+            return _err(str(exc), 500)
+        # Only a real serve process holds the writer lock; tests build an App
+        # without it and must not be terminated by a timer.
+        if self.app._lock is not None:
+            threading.Timer(1.5, os._exit, [0]).start()
+        return _json(outcome)
+
     # ------------------------------------------------------------------
 
     def routes(self) -> Starlette:
@@ -1551,6 +1692,9 @@ class Server:
             Route("/health", self.health, methods=["GET"]),
             Route("/", self.page, methods=["GET"]),
             Route("/assets/{name}", self.asset, methods=["GET"]),
+            Route("/api/setup", self.setup_get, methods=["GET"]),
+            Route("/api/setup", self.setup_submit, methods=["POST"]),
+            Route("/api/setup/probe", self.setup_probe, methods=["POST"]),
             Route("/api/state", self.state, methods=["GET"]),
             Route("/api/summary", self.summary, methods=["GET"]),
             Route("/api/messages", self.messages, methods=["GET"]),
@@ -1634,6 +1778,7 @@ class Server:
             Route("/api/backup", self.backup, methods=["POST"]),
             Route("/api/backups", self.backups_list, methods=["GET"]),
             Route("/api/restore", self.restore, methods=["POST"]),
+            Route("/api/reset", self.reset, methods=["POST"]),
         ]
         return Starlette(routes=routes)
 

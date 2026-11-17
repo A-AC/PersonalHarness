@@ -1,0 +1,357 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Personal Harness - First-run setup</title>
+<style>
+  :root { --bg:#101418; --panel:#1a2027; --panel2:#141a20; --line:#2b333d;
+          --text:#e8ecef; --dim:#93a1ad; --accent:#5aa9e6; --warn:#e0b050;
+          --ok:#69c07d; --bad:#e07b7b; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+         font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif;
+         display:flex; justify-content:center; padding:32px 16px; }
+  .card { width:min(720px,100%); background:var(--panel); border:1px solid var(--line);
+          border-radius:10px; padding:22px 24px 26px; }
+  h1 { margin:0 0 4px; font-size:22px; }
+  h2 { margin:22px 0 8px; font-size:13px; color:var(--accent);
+       text-transform:uppercase; letter-spacing:.06em; }
+  p { margin:4px 0 0; }
+  .muted { color:var(--dim); font-size:13px; }
+  .help { color:var(--dim); font-size:12px; margin:4px 0 0; }
+  label { display:block; margin:10px 0 0; font-size:13px; }
+  label > span { display:block; margin-bottom:4px; color:var(--dim); }
+  input[type=text], input[type=password], input[type=url],
+  input[type=number], select {
+    width:100%; background:var(--panel2); color:var(--text);
+    border:1px solid var(--line); border-radius:6px; padding:8px 10px;
+    font:inherit;
+  }
+  input:focus, select:focus { outline:2px solid #2d5a7a; outline-offset:1px; }
+  input[type=checkbox] { accent-color:var(--accent); width:16px; height:16px; }
+  fieldset { border:1px solid var(--line); border-radius:8px; margin:18px 0 0;
+             padding:2px 14px 14px; }
+  legend { padding:0 6px; color:var(--dim); font-size:12px; text-transform:uppercase;
+           letter-spacing:.06em; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+  button { background:#243041; color:var(--text); border:1px solid var(--line);
+           border-radius:6px; padding:8px 14px; font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); color:#08121b; border-color:var(--accent);
+                   font-weight:600; }
+  button:disabled { opacity:.55; cursor:default; }
+  .status { font-size:13px; color:var(--dim); }
+  .status.ok { color:var(--ok); }
+  .status.bad { color:var(--bad); }
+  .status.warn { color:var(--warn); }
+  .hidden { display:none !important; }
+  .notice { border:1px solid #4a4a2f; background:#22261b; color:#d8d3ae;
+            border-radius:6px; padding:8px 10px; font-size:13px; margin-top:14px; }
+  .template { border:1px solid var(--line); border-radius:6px; margin:8px 0 0;
+              padding:8px 10px; background:var(--panel2); }
+  .template .head { display:flex; gap:8px; align-items:flex-start; }
+  .template .head label { margin:0; display:flex; gap:8px; align-items:center;
+                          font-size:13px; }
+  .template .desc { color:var(--dim); font-size:12px; margin-left:24px; }
+  .template-fields { margin-left:24px; border-top:1px dashed var(--line);
+                     margin-top:8px; padding-top:2px; }
+  .template-fields label { margin-top:8px; }
+  #setup-form { margin-top:6px; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>First-run setup</h1>
+  <p class="muted">This harness has no saved configuration yet. Set the
+    access token and the model endpoint to finish installing it. The same
+    values can be provided non-interactively with <code>harness init</code>
+    and the <code>HARNESS_*</code> environment variables.</p>
+
+  <div id="env-warning" class="notice hidden"></div>
+
+  <form id="setup-form" autocomplete="off">
+    <fieldset>
+      <legend>Access token</legend>
+      <label><span>Token</span>
+        <input id="token" name="token" type="password"
+               autocomplete="new-password" required>
+      </label>
+      <p class="help">Protects the UI and API. Use a long random value and keep
+        it private.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Model endpoint</legend>
+      <label><span>Base URL</span>
+        <input id="base-url" type="url" spellcheck="false"
+               placeholder="http://192.168.50.40:8181" required>
+      </label>
+      <label><span>API key (optional)</span>
+        <input id="api-key" type="password" autocomplete="new-password">
+      </label>
+      <div class="row">
+        <button id="probe" type="button">Check connection</button>
+        <span id="probe-status" class="status"></span>
+      </div>
+      <label><span>Model</span>
+        <input id="model-name" list="model-options" spellcheck="false"
+               placeholder="qwen3.5-9b" required>
+        <datalist id="model-options"></datalist>
+      </label>
+      <p class="help">Check the connection to list the models the endpoint
+        advertises, then pick one. The endpoint must be reachable from inside
+        the container.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Timezone</legend>
+      <label><span>IANA zone or <code>system</code></span>
+        <input id="timezone" type="text" spellcheck="false"
+               placeholder="system">
+      </label>
+      <p class="help">Leave as <code>system</code> to use the container clock.
+        Set <code>TZ</code> or this value when the clock is UTC but you are
+        not.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Optional modules</legend>
+      <div id="templates"></div>
+    </fieldset>
+
+    <div class="row">
+      <button id="submit" class="primary" type="submit">Finish setup</button>
+      <span id="submit-status" class="status"></span>
+    </div>
+  </form>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var state = null;
+
+  function status(el, text, kind) {
+    el.textContent = text || "";
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function api(path, options) {
+    options = options || {};
+    options.headers = {"Content-Type": "application/json"};
+    return fetch(path, options).then(function (response) {
+      return response.json().catch(function () { return {}; })
+        .then(function (data) {
+          if (!response.ok) {
+            throw new Error(data.error || ("HTTP " + response.status));
+          }
+          return data;
+        });
+    });
+  }
+
+  function fieldInput(field, templateId) {
+    var type = String(field.type || "string").toLowerCase();
+    var input;
+    if (type === "boolean") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      if (field["default"] === true) input.checked = true;
+    } else if (type === "secret") {
+      input = document.createElement("input");
+      input.type = "password";
+      input.autocomplete = "new-password";
+    } else if (type === "integer" || type === "number") {
+      input = document.createElement("input");
+      input.type = "number";
+      if (type === "integer") input.step = "1";
+      if (field.min != null) input.min = field.min;
+      if (field.max != null) input.max = field.max;
+      if (field["default"] != null) input.value = field["default"];
+    } else {
+      input = document.createElement("input");
+      input.type = type === "url" ? "url" : "text";
+      input.spellcheck = false;
+      if (field["default"] != null) input.value = field["default"];
+    }
+    input.dataset.field = String(field.name || "");
+    input.id = "template-" + String(templateId || "") + "-" +
+      String(field.name || "");
+    return input;
+  }
+
+  function renderTemplates(templates) {
+    var box = $("templates");
+    box.innerHTML = "";
+    if (!templates.length) {
+      box.innerHTML = '<p class="muted">No bundled modules are available.</p>';
+      return;
+    }
+    templates.forEach(function (template) {
+      var wrap = document.createElement("div");
+      wrap.className = "template";
+      wrap.dataset.template = template.id;
+      var head = document.createElement("div");
+      head.className = "head";
+      var label = document.createElement("label");
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.template = template.id;
+      label.appendChild(checkbox);
+      label.appendChild(document.createTextNode(template.title || template.id));
+      head.appendChild(label);
+      wrap.appendChild(head);
+      if (template.description) {
+        var desc = document.createElement("div");
+        desc.className = "desc";
+        desc.textContent = template.description;
+        wrap.appendChild(desc);
+      }
+      var fields = document.createElement("div");
+      fields.className = "template-fields hidden";
+      (template.fields || []).forEach(function (field) {
+        var line = document.createElement("label");
+        var caption = document.createElement("span");
+        caption.textContent = (field.label || field.name) +
+          (field.required ? " (required)" : "");
+        line.appendChild(caption);
+        line.appendChild(fieldInput(field, template.id));
+        if (field.help) {
+          var help = document.createElement("p");
+          help.className = "help";
+          help.textContent = field.help;
+          line.appendChild(help);
+        }
+        fields.appendChild(line);
+      });
+      wrap.appendChild(fields);
+      checkbox.addEventListener("change", function () {
+        fields.classList.toggle("hidden", !checkbox.checked);
+      });
+      box.appendChild(wrap);
+    });
+  }
+
+  function collectModules() {
+    var modules = [];
+    document.querySelectorAll("input[data-template]:checked").forEach(function (box) {
+      var wrap = box.closest(".template");
+      var values = {};
+      wrap.querySelectorAll("[data-field]").forEach(function (input) {
+        if (!input.dataset.field) return;
+        if (input.type === "checkbox") {
+          values[input.dataset.field] = input.checked;
+        } else if (input.value !== "") {
+          values[input.dataset.field] = input.value;
+        }
+      });
+      modules.push({id: box.dataset.template, values: values});
+    });
+    return modules;
+  }
+
+  function load() {
+    api("/api/setup").then(function (data) {
+      state = data;
+      if (!data.required) { window.location.replace("/"); return; }
+      $("base-url").value = data.model_base_url || "";
+      $("model-name").value = data.model_name || "";
+      $("timezone").value = data.timezone || "system";
+      if (data.env_overrides && data.env_overrides.length) {
+        var warning = $("env-warning");
+        warning.textContent = "These environment variables override the saved " +
+          "file and must be changed where the container is started: " +
+          data.env_overrides.join(", ");
+        warning.classList.remove("hidden");
+      }
+      renderTemplates(data.templates || []);
+    }).catch(function (error) {
+      status($("submit-status"), error.message, "bad");
+    });
+  }
+
+  $("probe").addEventListener("click", function () {
+    var button = $("probe");
+    button.disabled = true;
+    status($("probe-status"), "Checking...", "");
+    api("/api/setup/probe", {
+      method: "POST",
+      body: JSON.stringify({
+        base_url: $("base-url").value.trim(),
+        api_key: $("api-key").value,
+        model: $("model-name").value.trim()
+      })
+    }).then(function (data) {
+      var options = $("model-options");
+      options.innerHTML = "";
+      (data.models || []).forEach(function (name) {
+        var option = document.createElement("option");
+        option.value = name;
+        options.appendChild(option);
+      });
+      if (!data.reachable) {
+        status($("probe-status"), data.error || "Unreachable", "bad");
+      } else if (data.models && data.models.length) {
+        status($("probe-status"),
+          "Reachable; " + data.models.length + " model(s) listed", "ok");
+        if (!$("model-name").value) $("model-name").value = data.models[0];
+      } else {
+        status($("probe-status"), "Reachable, but no models were listed", "warn");
+      }
+    }).catch(function (error) {
+      status($("probe-status"), error.message, "bad");
+    }).then(function () {
+      button.disabled = false;
+    });
+  });
+
+  $("setup-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var button = $("submit");
+    button.disabled = true;
+    status($("submit-status"), "Saving...", "");
+    api("/api/setup", {
+      method: "POST",
+      body: JSON.stringify({
+        token: $("token").value,
+        model_base_url: $("base-url").value.trim(),
+        model_name: $("model-name").value.trim(),
+        api_key: $("api-key").value,
+        timezone: $("timezone").value.trim() || "system",
+        modules: collectModules()
+      })
+    }).then(function (data) {
+      var failed = (data.modules || []).filter(function (module) {
+        return !module.installed;
+      });
+      var card = document.querySelector(".card");
+      if (!failed.length) {
+        card.innerHTML =
+          '<h1>Configured</h1><p class="muted">Opening the harness...</p>';
+        window.setTimeout(function () { window.location.replace("/"); }, 700);
+        return;
+      }
+      card.innerHTML =
+        '<h1>Configured</h1><p class="muted">The core setup is saved, but ' +
+        'these optional modules did not install. You can retry them under ' +
+        'System &rarr; Modules.</p><ul id="module-errors"></ul>' +
+        '<p><a href="/">Continue to the harness</a></p>';
+      var list = document.getElementById("module-errors");
+      failed.forEach(function (module) {
+        var item = document.createElement("li");
+        item.textContent = (module.id || "module") + ": " +
+          (module.error || "failed");
+        list.appendChild(item);
+      });
+    }).catch(function (error) {
+      button.disabled = false;
+      status($("submit-status"), error.message, "bad");
+    });
+  });
+
+  load();
+}());
+</script>
+</body>
+</html>

@@ -700,6 +700,79 @@ class App:
         log.info("state restored from %s", archive)
         return {"restored": True, "restart_required": True}
 
+    def reset(self, *, keep_config: bool = False) -> dict[str, Any]:
+        """Back up, then wipe runtime state. The process must restart afterwards.
+
+        The database and every handle are closed, so the running process
+        cannot keep serving safely: restart the container (or ``serve``)
+        so it reopens against the emptied data directory. A configuration
+        left in place keeps the install configured; otherwise the next start
+        begins at the first-run wizard again.
+        """
+        warnings: list[str] = []
+        try:
+            self.scheduler.stop()
+        except Exception as exc:
+            warnings.append(f"scheduler did not stop cleanly: {exc}")
+        backup = self.backup()
+
+        db_path = self.db.path
+        try:
+            self.db.close()
+        except Exception as exc:
+            warnings.append(f"database close failed: {exc}")
+        for path in (db_path,) + tuple(
+            Path(str(db_path) + suffix) for suffix in ("-wal", "-shm")
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                warnings.append(f"could not remove {path}: {exc}")
+
+        base = self.data_dir.resolve()
+
+        def safe_to_wipe(path: Path) -> bool:
+            """Only ever wipe a directory strictly inside the data dir."""
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return False
+            return resolved != base and base in resolved.parents
+
+        for directory in (self.artifacts_dir, Path(self.modules.root)):
+            if not safe_to_wipe(directory):
+                warnings.append(
+                    f"refused to wipe {directory}: outside the data directory"
+                )
+                continue
+            try:
+                shutil.rmtree(directory)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                # A read-only bind mount cannot be cleared; report it rather
+                # than failing the reset and leaving a half-wiped state.
+                warnings.append(f"could not fully clear {directory}: {exc}")
+        try:
+            self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            warnings.append(
+                f"could not recreate {self.artifacts_dir}: {exc}"
+            )
+
+        if not keep_config:
+            config_path = self.data_dir / "config.yaml"
+            try:
+                config_path.unlink(missing_ok=True)
+            except OSError as exc:
+                warnings.append(f"could not remove {config_path}: {exc}")
+        return {
+            "reset": True,
+            "backup": str(backup),
+            "keep_config": bool(keep_config),
+            "warnings": warnings,
+        }
+
 
 def build_app(
     data_dir: str | Path,
@@ -710,4 +783,8 @@ def build_app(
     """Test/CLI helper: build an App (recovery NOT run; call startup())."""
     path = Path(data_dir)
     config = load_config(path, environ=environ)
+    # This helper represents an already-configured instance (tests and the
+    # CLI build it around a prepared data dir); the first-run wizard is only
+    # reachable through ``serve`` with a fresh config.
+    config.set("setup.complete", True)
     return App(path, config=config, model=model or ScriptedModel())

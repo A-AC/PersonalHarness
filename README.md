@@ -98,6 +98,13 @@ terminal CLI that are two views of the same runtime.
   become unknown, never success. Unknown outcomes are surfaced and
   reconciled instead of silently retried. Runs paused by limits stay paused
   until the user or scheduler resumes them deliberately.
+- **Install, reset, and doctor.** A first-run web wizard writes the token,
+  model endpoint (with a live probe and model pick), timezone, and optional
+  modules; `harness init --non-interactive` does the same from `HARNESS_*`
+  environment variables so the container entrypoint can bootstrap itself.
+  `harness doctor` checks Python, the data volume, the endpoint, the port,
+  the writer lock, module health, and disk. `harness reset` backs up first,
+  then wipes the runtime state.
 - **Web UI + terminal CLI.** A polling chat page with grouped navigation:
   *Conversation* (chat and the live working-task strip), *Work* (tasks with a
   detail drawer showing the full persisted model transcript, context sources,
@@ -147,7 +154,7 @@ web UI / CLI / schedule / heartbeat / approval decision
 
 ## Requirements
 
-- Python 3.12+ (native path), or Docker 24+ with Compose v2
+- Python 3.12+ (native path), or Docker 24+ (Compose v2 is optional)
 - An OpenAI-compatible chat-completions endpoint that supports native tool
   calls (this deployment uses a llama.cpp server; see below)
 
@@ -208,8 +215,20 @@ pip install -e ".[dev]"
 python -m harness --data-dir ./data serve
 ```
 
-Open `http://127.0.0.1:8080/?token=dev-token` (the default token; change it
-before exposing the UI beyond localhost). `/health` is unauthenticated.
+Open `http://127.0.0.1:8080/` and complete the first-run wizard. To skip
+the wizard, write the same values headlessly **before** starting `serve`:
+
+```bash
+export HARNESS_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export HARNESS_MODEL_BASE_URL=http://192.168.50.40:8181
+export HARNESS_MODEL_NAME=qwen3.5-9b
+python -m harness init --non-interactive --data-dir ./data
+```
+
+The wizard is only served while setup is incomplete; after it finishes, `/`
+is the normal token-protected UI. A config created by an older release is
+treated as configured and keeps its existing token. `/health` is always
+unauthenticated.
 
 In a second terminal, talk to the same runtime:
 
@@ -221,11 +240,47 @@ python -m harness status
 The CLI is an HTTP client of the running server — it never opens the
 database or runs its own model loop.
 
-## Deployment (Docker Compose, recommended)
+## Deployment (Docker)
 
 One container runs the web UI, API, agent runtime, scheduler, heartbeat,
 memory, and context management. SQLite and artifacts live in one mounted
-volume; the model endpoint is external.
+volume; the model endpoint is external. Setup from zero needs no hand-edited
+files and no Compose file.
+
+### Compose-free `docker run`
+
+```bash
+docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
+  -t personal-harness:2.0.0 .
+
+docker run -d --name harness \
+  -p 8080:8080 \
+  -v harness-data:/data \
+  -e HARNESS_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+  -e HARNESS_MODEL_BASE_URL=http://192.168.50.40:8181 \
+  -e HARNESS_MODEL_NAME=qwen3.5-9b \
+  -e HARNESS_TIMEZONE=system \
+  --restart unless-stopped \
+  personal-harness:2.0.0
+
+curl -fsS http://127.0.0.1:8080/health      # {"status":"ok"}
+```
+
+The image entrypoint runs `python -m harness init --non-interactive` on a
+fresh volume when `HARNESS_TOKEN` is present (with
+`HARNESS_MODEL_BASE_URL`, as in the example), so those values become
+`data/config.yaml` without a manual edit. Without `HARNESS_TOKEN` the
+container starts unconfigured and `http://127.0.0.1:8080/` serves the
+first-run setup wizard: set the token, probe and pick the model endpoint,
+choose the timezone, and optionally install the bundled web/calendar
+modules. The setup endpoints are unauthenticated only until the first
+successful setup and return `409` afterwards — open them on a trusted
+network. `harness init --non-interactive --force` rewrites an existing
+config deliberately.
+
+### Compose (optional)
+
+Compose is a convenient wrapper around the same image and volume:
 
 ```bash
 cp .env.example .env       # set HARNESS_TOKEN to a long random value
@@ -297,6 +352,50 @@ upgrading. There is no in-place migration between v1 (the previous
 file-based prototype) and v2: v2 does not read v1's files, and they remain
 untouched on disk if present.
 
+### Install, reset, and doctor
+
+`harness init` writes the first `config.yaml`. Interactive mode prompts for
+the token, endpoint, model, and timezone and probes the endpoint; the
+non-interactive path reads the same values from the environment and does
+not contact the endpoint unless `--probe` is given:
+
+```bash
+export HARNESS_TOKEN=...
+export HARNESS_MODEL_BASE_URL=http://HOST:PORT
+export HARNESS_MODEL_NAME=MODEL
+export HARNESS_TIMEZONE=system       # optional; system is the default
+python -m harness init --non-interactive
+```
+
+`harness doctor` runs preflight checks without a server and exits non-zero
+on a hard failure:
+
+```bash
+python -m harness doctor          # or: python -m harness doctor --json
+```
+
+It checks the Python version; that the data directory is writable (it should
+be writable by the container user, UID 10001); that the model endpoint is
+reachable from this process/container and advertises the configured model;
+whether the server port is free or already owned by a harness (a foreign
+listener, such as SearXNG on 8080, is a warning); the `process.lock` writer
+lock; stored module status; and free disk space. Warnings do not fail.
+
+`harness reset` is destructive and requires `--yes`. It takes a backup first,
+then removes the database, artifacts, and module runtime state, and (without
+`--keep-config`) `config.yaml`, so the next start is a fresh install.
+Backups, logs, and a data-root `mcp.json` import file are kept. It is an
+authenticated call to the running server, which exits afterwards; the
+container's `restart` policy brings it back:
+
+```bash
+python -m harness reset --yes                     # via the running server
+python -m harness reset --yes --keep-config       # keep token/model/timezone
+docker compose exec harness python -m harness reset --yes
+```
+
+On staging, deleting the `harness-stage-data` volume is the equivalent reset.
+
 ## CLI reference
 
 Global options (`--data-dir`, `--url`, `--token`) may appear before or
@@ -324,6 +423,9 @@ value in `data/config.yaml`.
 | `config` | Effective configuration (secrets redacted) |
 | `models [--set NAME] [--provider ID]` | List provider/model choices or switch the active model |
 | `endpoint-check` | Probe the configured model endpoint directly |
+| `init [--non-interactive] [--force] [--probe]` | Write the first configuration from prompts or `HARNESS_*` env |
+| `reset --yes [--keep-config]` | Back up, then wipe runtime state (server must be running) |
+| `doctor [--json]` | Preflight checks without a server |
 
 Example schedule creation (single quotes on POSIX shells):
 
@@ -819,6 +921,8 @@ Main groups:
   preferences — the entire visible personality is here, not in code
 - `timezone`: `system` (default; use the host clock) or an IANA name to
   override; `logging.*`
+- `setup.*`: `complete`/`completed_at`, the first-run marker. Managed by
+  the wizard and `harness init`, not editable through the config UI.
 
 Changing the persona or budgets takes effect on the next run; endpoint and
 server changes need a restart. The web UI shows the redacted configuration
@@ -936,9 +1040,10 @@ Deterministic mode measures the harness, not the model.
 
 The deterministic pytest suite covers core runtime, unified history,
 domains/resumption, context/memory, scheduling/heartbeat,
-approvals/permissions, recovery/deployment, memory lifetime/archive,
-sequential sub-agents, durable inbox/automations/self-scheduling, and the ten
-end-to-end acceptance scenarios.
+approvals/permissions, recovery/deployment, install/setup/reset/doctor,
+memory lifetime/archive, sequential sub-agents,
+durable inbox/automations/self-scheduling, and the ten end-to-end acceptance
+scenarios.
 
 Live scenarios are split into `g_live.yaml` (single-turn smoke and capability
 checks), `i_live_behavior.yaml` (behavioral coverage), and
@@ -1061,6 +1166,10 @@ scenario between paths.
   tainted, so no inbox text can trigger an outbound side effect without the
   same explicit approval; automations can schedule work but cannot widen
   permissions.
+- An unconfigured instance serves the first-run wizard at `/` without
+  authentication, including the ability to set the token. Start it on
+  localhost or a trusted network, or bootstrap it with `harness init` and
+  `HARNESS_TOKEN`. The setup endpoints return `409` once configured.
 - Backups contain the full conversation and memory state; protect them.
 
 

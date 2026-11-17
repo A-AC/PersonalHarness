@@ -1,6 +1,6 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phases 0-6 and 8 complete; 9A implemented; Phase 7 waits on LaYa; 9B and Phases 10-13 proposed)
+Status: in progress (Phases 0-6 and 8 complete; 9A, 12A, and 12B implemented; Phase 7 waits on LaYa; 9B and Phases 10, 11, and 13 proposed)
 Last updated: 2026-11-16
 Scope: capability modules (skills + MCP servers), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture, approvals,
@@ -1612,7 +1612,36 @@ raw groups, many features reachable only by knowing they exist.
 
 ### Phase 12 - Install, reset, doctor, and MCP setup UI
 
-**Status:** 12B implemented (2026-11-16); 12A remains proposed.
+**Status:** 12A and 12B implemented (2026-11-16).
+
+**Implementation notes (12A).**
+
+- The first-run marker is `setup.complete` in `config.yaml`, not the absence
+  of the file: `serve` always materializes the file, an existing config
+  without the key is treated as already configured, and `/` serves the
+  wizard only while the marker is false. The setup endpoints are
+  unauthenticated only in that window and return `409` afterwards.
+- `harness init` is interactive by default; `--non-interactive` reads
+  `HARNESS_TOKEN`, `HARNESS_MODEL_BASE_URL`, `HARNESS_MODEL_NAME`,
+  `HARNESS_TIMEZONE`, and `HARNESS_MODEL_API_KEY`. It does not probe by
+  default (bootstrap must not depend on the endpoint), and refuses to
+  overwrite an existing config without `--force`.
+- The wizard offers the bundled MCP templates as optional modules with their
+  schema-driven fields. A module that fails to install is reported in the
+  response without failing the core setup.
+- The Docker entrypoint runs `harness init --non-interactive` on a fresh
+  volume when `HARNESS_TOKEN` is set; without it the container starts
+  unconfigured and the wizard runs. A single `docker run` is the
+  compose-free install path; Compose remains optional.
+- `harness reset` is an authenticated server operation: stop the scheduler,
+  take a normal backup, close and delete the database, wipe artifacts and
+  module runtime state (guarded to stay inside the data directory), keep
+  `backups/`, `logs/`, and a data-root `mcp.json`, and delete `config.yaml`
+  unless `--keep-config`. The process exits and the container restarts.
+- `harness doctor` needs no server and reads config/database read-only. Only
+  hard failures (Python below 3.12, unwritable data, unreachable endpoint,
+  critically low disk) make it exit non-zero; a foreign port listener and a
+  stale writer lock are warnings.
 
 **12A - Docker-first install, reset, and doctor**
 - The deployed form stays a container on Ares; the goal is that setup from zero
@@ -1942,6 +1971,11 @@ log before starting the next one.
 | 2026-11-16 | An unreachable provider may accept only a name named by a configured allowlist | Reachability cannot be verified, so the static allowlist is the only bounded authorization |
 | 2026-11-16 | Use the dedicated `POST /api/model` for switching rather than making the `model` config group editable | Selection needs validation, attribution, and an explicit no-fallback contract |
 | 2026-11-16 | Phase 12B uses a command allowlist plus explicit confirmation, with schema-driven bundled templates | A token holder can otherwise launch arbitrary commands; confirmation and the allowlist bound that exposure while templates keep common servers easy to install |
+| 2026-11-16 | First-run setup is gated by `setup.complete`, not by the absence of `config.yaml` | `serve` materializes the config on first start; the marker survives restarts and lets reset keep or clear configuration deliberately |
+| 2026-11-16 | The setup API is unauthenticated only while setup is incomplete and returns 409 afterwards | The wizard must be able to set the first token; closing the surface after one use bounds the exposure |
+| 2026-11-16 | The Docker entrypoint bootstraps from `HARNESS_*` when a fresh volume has a token | Headless installs need no hand-edited file and no Compose file; without a token the web wizard is the fallback |
+| 2026-11-16 | Reset is an authenticated server call that backs up before wiping and keeps backups/logs/import files | The live process owns the writer lock and SQLite handles; it exits and the container restarts |
+| 2026-11-16 | Doctor reads config and modules read-only and only fails on hard failures | It must be safe to run beside a live server; warnings stay visible without blocking a diagnosis |
 | 2026-11-17 | Rehearse deployment migrations by replaying the pre-migrate archive from the live volume, not by standing up staging | Same database, same migration code, and the real rows; staging would only add a second service identity, which the owner judged not worth another stack |
 
 ---

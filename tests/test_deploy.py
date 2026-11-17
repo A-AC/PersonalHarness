@@ -166,4 +166,5 @@ def test_dockerfile_exposes_test_and_runtime_stages():
     runtime_stage = text.split("FROM base AS runtime", 1)[1]
     assert "COPY tests" not in runtime_stage
     assert "USER harness" in runtime_stage
-    assert 'CMD ["python", "-m", "harness", "serve"]' in runtime_stage
+    assert 'ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]' in runtime_stage
+    assert 'CMD ["serve"]' in runtime_stage

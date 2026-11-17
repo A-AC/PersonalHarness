@@ -222,6 +222,9 @@ DEFAULTS: dict[str, Any] = {
     # "system" means the host clock. Set an IANA name only to override it.
     "timezone": "system",
     "logging": {"level": "info", "file": "logs/harness.log"},
+    # First-run setup marker. Not editable through the UI: the wizard sets it
+    # once, and reset clears it by removing the file (or keeping it).
+    "setup": {"complete": False, "completed_at": ""},
 }
 
 # Values that mean "use the machine's own timezone".
@@ -541,11 +544,19 @@ class Config:
         return out
 
 
-def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config:
+def load_config(
+    data_dir: Path,
+    environ: dict[str, str] | None = None,
+    *,
+    create: bool = True,
+) -> Config:
     """Load ``<data_dir>/config.yaml`` over defaults, then apply env overrides.
 
     Creates the file with defaults on first start so it is inspectable and
     editable. Unknown keys raise ConfigError so typos never run silently.
+
+    ``create=False`` is a read-only load for diagnostics: it never creates the
+    data directory, writes ``config.yaml``, or persists a migration.
     """
     file = data_dir / "config.yaml"
     legacy = data_dir / "settings.yaml"
@@ -553,7 +564,9 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
     removed: dict[str, Any] = {}
     migrated = False
     timezone_migrated = False
-    if file.exists():
+    file_existed = file.exists()
+    has_setup_key = False
+    if file_existed:
         try:
             loaded = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError as exc:
@@ -561,6 +574,7 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
         if not isinstance(loaded, dict):
             raise ConfigError(f"{file} must contain a mapping")
         overlay = loaded
+        has_setup_key = "setup" in overlay
         for key in RETIRED_GROUPS:
             if key in overlay:
                 removed[key] = overlay.pop(key)
@@ -571,9 +585,15 @@ def load_config(data_dir: Path, environ: dict[str, str] | None = None) -> Config
         overlay = _legacy_settings_overlay(legacy)
         migrated = True
     merged = _merge(DEFAULTS, overlay)
+    if (file_existed and not has_setup_key) or migrated:
+        # A config written before the first-run wizard existed belongs to an
+        # install that is already configured; never send it back to setup.
+        merged["setup"]["complete"] = True
     _apply_env(merged, environ)
     config = Config(merged, file, removed)
-    if not file.exists():
+    if not create:
+        return config
+    if not file_existed:
         data_dir.mkdir(parents=True, exist_ok=True)
         file.write_text(
             "# Personal assistant harness configuration.\n"

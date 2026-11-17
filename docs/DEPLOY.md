@@ -12,6 +12,32 @@ migrations and phase upgrades are rehearsed on staging and reversible.
   therefore use a different host port (`HARNESS_STAGE_PORT`, default 8081);
   the container itself always listens on 8080.
 
+## 0. Install from zero, doctor, and reset
+
+A fresh install needs no hand-edited file. Either let the image entrypoint
+bootstrap from the environment (`HARNESS_TOKEN`, `HARNESS_MODEL_BASE_URL`,
+`HARNESS_MODEL_NAME`; see the compose-free `docker run` example in the
+README), or start the container unconfigured and use the first-run wizard at
+`/`.
+
+Run the preflight checks inside the container before mounting real data:
+
+```bash
+docker compose exec harness python -m harness doctor
+# or: docker compose exec harness python -m harness doctor --json
+```
+
+`harness reset --yes` takes a backup, then wipes the database, artifacts,
+and module runtime state and (without `--keep-config`) the config, so the
+next start is a fresh install:
+
+```bash
+docker compose exec harness python -m harness reset --yes
+```
+
+The service exits and `restart: unless-stopped` brings it back. On staging,
+deleting the `harness-stage-data` volume is the equivalent reset.
+
 ## 1. Build and tag an image per phase
 
 Build from the phase's checkout and tag the image per phase so every
