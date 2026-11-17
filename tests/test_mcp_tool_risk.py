@@ -200,6 +200,90 @@ def test_unannotated_write_waits_for_approval(make_app, tmp_path):
     assert len(app.approvals.pending()) == 1
 
 
+def test_bundled_server_paths_default_to_trusted_annotations():
+    from harness.modules.mcp import McpModuleLoader
+
+    assert McpModuleLoader._manifest_from_entry({
+        "command": "python",
+        "args": ["harness/modules/calendar/server.py", "--config", "x"],
+    })["trust_annotations"] is True
+    assert McpModuleLoader._manifest_from_entry({
+        "command": "python",
+        "args": ["harness\\modules\\web\\server.py"],
+    })["trust_annotations"] is True
+    # An explicit false always wins, and unrelated servers stay untrusted.
+    assert McpModuleLoader._manifest_from_entry({
+        "command": "python",
+        "args": ["harness/modules/calendar/server.py"],
+        "trust_annotations": False,
+    })["trust_annotations"] is False
+    assert McpModuleLoader._manifest_from_entry({
+        "command": "python",
+        "args": ["somewhere/else.py"],
+    })["trust_annotations"] is False
+
+
+def test_legacy_bundled_import_upgrades_annotations_on_startup(
+    make_app, tmp_path
+):
+    """A pre-Phase-8 calendar import gains trusted reads without a manual edit."""
+    app = make_app.build(default="ok")
+    servers = app.data_dir / "mcp.json"
+
+    def write(args: list[str]) -> None:
+        servers.write_text(json.dumps({"servers": [{
+            "name": "legacy_bundled",
+            "command": sys.executable,
+            "args": args,
+            "tool_prefix": "",
+            "risk_default": "confirm",
+            "read_only": False,
+            "side_effects": True,
+        }]}), encoding="utf-8")
+
+    write([str(_fake_server(tmp_path))])
+    app.modules.reload()
+    assert _spec(app, "read_record").risk == "confirm"
+
+    # The entry now points at the bundled calendar server but still has no
+    # trust_annotations key: startup upgrades it and rediscovers the tools.
+    write([
+        str(_fake_server(tmp_path)),
+        "harness/modules/calendar/server.py",
+    ])
+    restarted = make_app.restart(default="ok")
+
+    module = restarted.modules.get("mcp:legacy_bundled")
+    assert module.manifest["trust_annotations"] is True
+    read_spec = _spec(restarted, "read_record")
+    assert read_spec.risk == "low"
+    assert read_spec.read_only is True
+    assert read_spec.side_effects is False
+    assert _spec(restarted, "write_record").risk == "confirm"
+
+
+def test_sync_reload_keeps_ui_tool_risk_for_imported_module(
+    make_app, tmp_path
+):
+    """A per-tool risk set in the UI survives an import-file sync."""
+    app = make_app.build(default="ok")
+    _configure(app, tmp_path)
+    assert _spec(app, "read_record").risk == "confirm"
+
+    app.modules.loader.set_tool_risk("mcp:risk_server", "read_record", "low")
+    assert _spec(app, "read_record").risk == "low"
+
+    app.modules.reload()
+
+    assert _spec(app, "read_record").risk == "low"
+    assert app.modules.get("mcp:risk_server").manifest["tool_risk"] == {
+        "read_record": "low"
+    }
+    # The servers file is unchanged; the override lives in the harness row.
+    text = (tmp_path / "mcp_servers.yaml").read_text(encoding="utf-8")
+    assert "tool_risk" not in text
+
+
 def test_untrusted_annotations_do_not_downgrade_read_tool(
     make_app, tmp_path
 ):

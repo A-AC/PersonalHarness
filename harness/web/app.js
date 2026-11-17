@@ -2295,6 +2295,8 @@ function renderAddMcpServerCard() {
   autoApprove.type = 'checkbox';
   const allowAny = el('input');
   allowAny.type = 'checkbox';
+  const trustAnnotations = el('input');
+  trustAnnotations.type = 'checkbox';
   const domains = moduleDomainSelect([]);
 
   card.appendChild(field('Name', name));
@@ -2308,6 +2310,10 @@ function renderAddMcpServerCard() {
     'Leave the tool prefix blank to use the server’s own tool names.'));
   card.appendChild(field('Read only', readOnly));
   card.appendChild(field('Auto-approve tools', autoApprove));
+  card.appendChild(field('Trust read-only annotations', trustAnnotations));
+  card.appendChild(el('div', 'small',
+    'Annotations are claims, not facts. Trust only a server you control; ' +
+    'an untrusted server cannot downgrade its own write tools.'));
   card.appendChild(field('Domains (Ctrl/Command-click to select)', domains));
   card.appendChild(field('Allow any command (override allowlist)', allowAny));
 
@@ -2372,6 +2378,7 @@ function renderAddMcpServerCard() {
       tool_prefix: toolPrefix.value.trim(),
       read_only: readOnly.checked,
       autoapprove: autoApprove.checked,
+      trust_annotations: trustAnnotations.checked,
       confirm: true,
     };
     if (allowAny.checked) body.allow_any_command = true;
@@ -2548,11 +2555,18 @@ function buildMcpServerEditor(m) {
   const allowAny = el('input');
   allowAny.type = 'checkbox';
   allowAny.checked = !!(m.provenance || {}).command_override;
+  const trustAnnotations = el('input');
+  trustAnnotations.type = 'checkbox';
+  trustAnnotations.checked = (m.manifest || {}).trust_annotations === true;
 
   editor.appendChild(field('Command', command));
   editor.appendChild(field('Arguments (one per line)', args));
   editor.appendChild(field('Tool prefix', toolPrefix));
   editor.appendChild(field('Domains (Ctrl/Command-click to select)', domains));
+  editor.appendChild(field('Trust read-only annotations', trustAnnotations));
+  editor.appendChild(el('div', 'small',
+    'Annotations are claims, not facts. Without this, every discovered tool ' +
+    'stays at the module risk default.'));
   editor.appendChild(field('Allow any command (override allowlist)', allowAny));
 
   editor.appendChild(el('h4', null, 'Environment'));
@@ -2614,6 +2628,7 @@ function buildMcpServerEditor(m) {
       command: command.value.trim(),
       args: parseMcpArgs(args.value),
       domains: selectedModuleDomains(domains),
+      trust_annotations: trustAnnotations.checked,
     };
     // Only send a tool prefix when the server already declared one or the
     // user typed a replacement; otherwise saving would silently rename tools.
@@ -2754,14 +2769,22 @@ function renderModules(side) {
         line.appendChild(el('span', 'small',
           (tool.side_effects ? 'side effects' : 'no side effects') + '  |  ' +
           (tool.read_only ? 'read-only' : 'not read-only')));
-        if (m.editable) {
+        if (m.kind === 'mcp') {
           const risk = el('select');
-          for (const value of ['default', 'low', 'confirm']) {
-            const option = el('option', null, value);
-            option.value = value === 'default' ? '' : value;
+          const overridden = toolRisks[tool.name];
+          const choices = [
+            [overridden ? 'default' : 'default (now ' + tool.risk + ')', ''],
+            ['low', 'low'],
+            ['confirm', 'confirm'],
+          ];
+          for (const [label, value] of choices) {
+            const option = el('option', null, label);
+            option.value = value;
             risk.appendChild(option);
           }
-          risk.value = toolRisks[tool.name] || '';
+          risk.value = overridden || '';
+          risk.title = 'Per-tool risk override for this server. "default" ' +
+            'uses the manifest and trusted read-only annotations.';
           risk.onchange = async () => {
             const out = await api('/api/modules/' +
               encodeURIComponent(m.id) + '/tool-risk', {

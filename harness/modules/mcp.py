@@ -76,6 +76,32 @@ MCP_DESCRIPTION_MAX_CHARS = 200
 DEFAULT_SERVERS_FILES = ("mcp.json", "mcp_servers.yaml", "mcp_servers.yml")
 _DATA_DIR_PLACEHOLDER = re.compile(r"\$\{data_dir\}|\$\{DATA_DIR\}")
 
+# The bundled servers own their annotations: their read tools carry
+# ``readOnlyHint`` and nothing else does. Entries whose command line points at
+# one of them are trusted for annotations unless the entry says otherwise, so
+# an older import file that predates Phase 8 still gets per-tool risk.
+BUNDLED_SERVER_PATHS = {
+    "calendar": "harness/modules/calendar/server.py",
+    "web": "harness/modules/web/server.py",
+}
+# Harness-owned policy keys. A sync reload keeps them when the servers file
+# does not declare them, so a UI edit is not silently discarded.
+POLICY_MANIFEST_KEYS = ("tool_risk", "summary_templates")
+
+
+def _bundled_server_name(entry: dict[str, Any]) -> str | None:
+    """Return the bundled server an entry's arguments point at, if any."""
+    args = entry.get("args")
+    if isinstance(args, (list, tuple)):
+        text = " ".join(str(arg) for arg in args)
+    else:
+        text = str(args or "")
+    normalized = text.replace("\\", "/")
+    for name, suffix in BUNDLED_SERVER_PATHS.items():
+        if suffix in normalized:
+            return name
+    return None
+
 
 def _sanitize(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(value or "")).strip("_")
@@ -1121,7 +1147,47 @@ class McpModuleLoader:
             now = util.iso()
             existing = self.registry.get(module_id)
             if existing is not None:
+                # A sync must not silently discard harness-owned policy that
+                # was set from the UI (per-tool risk, summary templates, or a
+                # trust decision for a non-bundled server) when the servers
+                # file does not mention the key. The file always wins when it
+                # does mention it.
+                for key in POLICY_MANIFEST_KEYS:
+                    if key not in entry:
+                        manifest[key] = existing.manifest.get(
+                            key, manifest.get(key)
+                        )
+                if (
+                    "trust_annotations" not in entry
+                    and _bundled_server_name(entry) is None
+                ):
+                    manifest["trust_annotations"] = (
+                        existing.manifest.get("trust_annotations") is True
+                    )
                 if not sync:
+                    # Upgrade an older bundled import that predates Phase 8:
+                    # apply the default trust decision now, without syncing
+                    # the rest of the file, and drop the stale discovery so
+                    # the next activation re-reads the annotations.
+                    if (
+                        "trust_annotations" not in entry
+                        and _bundled_server_name(entry) is not None
+                        and existing.manifest.get("trust_annotations") is not True
+                    ):
+                        self.registry.save(replace(
+                            existing,
+                            manifest={
+                                **dict(existing.manifest or {}),
+                                "trust_annotations": True,
+                            },
+                            updated_at=now,
+                        ))
+                        self.registry.replace_tools(module_id, [])
+                        self.events.record("module.updated", data={
+                            "module_id": module_id,
+                            "source": str(path),
+                            "reason": "bundled annotations now trusted",
+                        })
                     continue
                 changed = (
                     existing.manifest != manifest
@@ -1427,7 +1493,13 @@ class McpModuleLoader:
     @staticmethod
     def _manifest_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         autoapprove = bool(entry.get("autoapprove", False))
-        trust_annotations = entry.get("trust_annotations") is True
+        declared_trust = entry.get("trust_annotations")
+        if declared_trust is None:
+            # Bundled servers are trusted by default: their read tools are the
+            # only ones carrying readOnlyHint. An explicit false still wins.
+            trust_annotations = _bundled_server_name(entry) is not None
+        else:
+            trust_annotations = declared_trust is True
 
         def _strings(value: Any) -> list[str]:
             if isinstance(value, (list, tuple)):
