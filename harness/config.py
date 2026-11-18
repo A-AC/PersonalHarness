@@ -138,8 +138,9 @@ DEFAULTS: dict[str, Any] = {
         "max_results": 8,
         "temp_expiry_days": 14,       # default expiry for kind=temp
         "search_limit": 10,
-        # Phase 10 soft memory: off (today's partition) | boost | search.
-        "cross_domain": "boost",
+        # off = hard partition | boost = automatic sibling hits | search =
+        # sibling hits only through explicit search_knowledge (default).
+        "cross_domain": "search",
         "cross_domain_max": 3,
         "core_profile_chars": 1200,
         # Phase 3: usage-based lifetime. Deterministic; no model call is

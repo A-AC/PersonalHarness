@@ -85,10 +85,21 @@ class Messages:
         out.reverse()
         return out
 
-    def recent(self, limit: int = 20, include_hidden: bool = False) -> list[dict[str, Any]]:
+    def recent(
+        self, limit: int = 20, include_hidden: bool = False,
+        trusted_only: bool = False,
+    ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM messages"
+        clauses = []
         if not include_hidden:
-            sql += " WHERE visible=1"
+            clauses.append("visible=1")
+        if trusted_only:
+            clauses.extend([
+                "COALESCE(json_extract(meta, '$.tainted'), 0)=0",
+                "COALESCE(json_extract(meta, '$.derived_untrusted'), 0)=0",
+            ])
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC LIMIT ?"
         out = rows_to_dicts(self.db.query(sql, (limit,)))
         out.reverse()

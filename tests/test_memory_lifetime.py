@@ -177,18 +177,15 @@ def test_pinned_and_protected_kinds_never_archive(make_app):
     assert app.memory.get(plain["id"])["archived_at"] is not None
 
 
-def test_archived_memory_hidden_by_default_and_labelled_when_included(make_app):
+def test_archived_memory_read_does_not_restore_without_explicit_choice(make_app):
     app = make_app.build(default="ok")
     memory = app.memory.remember("The old wifi password was hunter2.",
                                  kind="fact", scope="global",
                                  origin="user")["memory"]
     app.memory.archive(memory["id"], changed_by="test", reason="test archive")
 
-    default = app.memory.search("wifi password",
-                                scope_priority=["global"])
+    default = app.memory.search("wifi password", scope_priority=["global"])
     assert memory["id"] not in {item["id"] for item in default}
-
-    # Context never resurrects an archived row.
     task = app.tasks.create(objective="what was the old wifi password",
                             origin="user")
     built = app.context.build(
@@ -201,24 +198,27 @@ def test_archived_memory_hidden_by_default_and_labelled_when_included(make_app):
     )
     hit = next(item for item in included if item["id"] == memory["id"])
     assert hit["archived"] is True
-    assert hit["restored"] is True
+    assert not hit.get("restored")
     assert hit["score_parts"]["archived"] < 0
     assert "archived" in hit["reason"]
-    # Explicit retrieval restored the row and audited why.
-    stored = app.memory.get(memory["id"])
-    assert stored["archived_at"] is None
-    assert stored["revision"] > memory["revision"]
-    revisions = app.memory.revisions(memory["id"])
+    assert app.memory.get(memory["id"])["archived_at"] is not None
+
+    restored = app.memory.search(
+        "wifi password", scope_priority=["global"], include_archived=True,
+        restore_archived=True,
+    )
+    hit = next(item for item in restored if item["id"] == memory["id"])
+    assert hit["restored"] is True
+    assert app.memory.get(memory["id"])["archived_at"] is None
     assert any("explicit retrieval" in (rev.get("reason") or "")
-               for rev in revisions)
-    assert any(event["type"] == "memory.restored"
-               for event in app.events.list(limit=50))
+               for rev in app.memory.revisions(memory["id"]))
 
 
 def test_search_knowledge_tool_can_reach_archived_memory(make_app):
     app = make_app.build(scripts=[
         {"tool_calls": [{"name": "search_knowledge", "arguments": {
-            "query": "vault code", "include_archived": True}}]},
+            "query": "vault code", "include_archived": True,
+            "restore_archived": True}}]},
         {"content": "I found the archived note."},
     ])
     memory = app.memory.remember("The vault code is 4411.",
@@ -323,20 +323,100 @@ def test_memory_api_archive_restore_filters_and_usage(make_app, client):
     assert unpinned.json()["memory"]["pinned"] is False
 
 
-def test_context_access_counts_once_per_run(make_app):
+def test_context_access_counts_only_final_model_visible_memory(make_app):
     app = make_app.build(default="ok")
     memory = app.memory.remember("The backup drive is labelled vault.",
                                  kind="fact", scope="global",
                                  origin="user")["memory"]
-    task = app.tasks.create(objective="where is the backup drive",
-                            origin="user")
-    for _ in range(2):
-        app.context.build(
-            task=task, domain=None, trigger={"kind": "user"},
-            run_id="run_same",
-        )
+
+    first = app.runtime.submit_user_message("where is the backup drive")
+    assert first.status == "completed"
     assert app.memory.get(memory["id"])["access_count"] == 1
-    app.context.build(
-        task=task, domain=None, trigger={"kind": "user"}, run_id="run_other"
+
+    # A tiny section budget clips away the memory marker before the model call.
+    # The candidate remains in the audit ledger as excluded and is not charged
+    # as a second disclosure.
+    budgets = dict(app.config.get("context.section_budgets", {}))
+    budgets["memories"] = 1
+    app.config.set("context.section_budgets", budgets)
+    second = app.runtime.submit_user_message("where is the backup drive")
+    assert second.status == "completed"
+    assert app.memory.get(memory["id"])["access_count"] == 1
+    run = app.db.query_one("SELECT * FROM runs WHERE id=?", (second.run_id,))
+    sources = util.loads(run["context_sources"], [])
+    memory_sources = [s for s in sources if s.get("memory_id") == memory["id"]]
+    assert memory_sources
+    assert all(s["disposition"] == "excluded" for s in memory_sources)
+
+
+
+
+def test_transcript_compaction_updates_ledger_without_double_counting(make_app):
+    app = make_app.build(default="ok")
+    memory = app.memory.remember("The compaction target is unique.",
+                                 kind="fact", scope="global",
+                                 origin="user")["memory"]
+    result = app.runtime.submit_user_message("compaction target")
+    assert result.status == "completed"
+    assert app.memory.get(memory["id"])["access_count"] == 1
+
+    # Simulate the later per-call compaction removing the memory section. The
+    # durable transcript is unchanged, but the final-payload ledger is not.
+    app.runtime._reconcile_prompt_context(
+        result.run_id,
+        [{"role": "system", "content": "# Current situation"}],
+        ["clipped system prompt"],
     )
-    assert app.memory.get(memory["id"])["access_count"] == 2
+    assert app.memory.get(memory["id"])["access_count"] == 1
+    run = app.db.query_one("SELECT * FROM runs WHERE id=?", (result.run_id,))
+    sources = util.loads(run["context_sources"], [])
+    target = [s for s in sources if s.get("memory_id") == memory["id"]]
+    assert target and all(s["disposition"] == "excluded" for s in target)
+    assert any(
+        s.get("disposition") == "transformed"
+        and "clipped system prompt" in s.get("reason", "")
+        for s in sources
+    )
+
+
+
+def test_context_retry_reconciles_tighter_payload(make_app, monkeypatch):
+    from harness import transcript as transcript_mod
+    from harness.model import ModelContextError, ScriptedModel
+
+    class ContextOnceModel(ScriptedModel):
+        def chat(self, messages, tools, **kwargs):
+            if not self.calls:
+                self.calls.append({"messages": messages, "tools": tools})
+                raise ModelContextError("prompt too long")
+            return super().chat(messages, tools, **kwargs)
+
+    model = ContextOnceModel(default="done")
+    app = make_app.build(model=model)
+    memory = app.memory.remember("The retry memory is visible only initially.",
+                                 kind="fact", scope="global",
+                                 origin="user")["memory"]
+    original = transcript_mod.compact
+    calls = 0
+
+    def shrinking(messages, budget, tools_schema=None):
+        nonlocal calls
+        calls += 1
+        prompt, repairs = original(messages, budget, tools_schema)
+        if calls == 2:
+            prompt[0]["content"] = "# Current situation"
+            repairs.append("tighter test compaction")
+        return prompt, repairs
+
+    monkeypatch.setattr(transcript_mod, "compact", shrinking)
+    result = app.runtime.submit_user_message("retry memory")
+    assert result.status == "completed"
+    assert calls == 2
+    # The initial attempted payload did disclose the memory once; the tighter
+    # retry excludes it and is reflected in the ledger without a second count.
+    assert app.memory.get(memory["id"])["access_count"] == 1
+    run = app.db.query_one("SELECT * FROM runs WHERE id=?", (result.run_id,))
+    sources = util.loads(run["context_sources"], [])
+    target = [s for s in sources if s.get("memory_id") == memory["id"]]
+    assert target and all(s["disposition"] == "excluded" for s in target)
+    assert any("tighter test compaction" in s.get("reason", "") for s in sources)

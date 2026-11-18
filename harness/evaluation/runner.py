@@ -29,6 +29,7 @@ from .models import (
     StepResult,
 )
 from .quality import evaluate_quality
+from .provenance import source_metadata
 from .safety import prepare_sandbox, scenario_dir
 
 # Settings applied to every scenario unless it overrides them. They remove
@@ -270,6 +271,7 @@ class Evaluator:
             model=self._model_descriptor(first_config),
             config=self._snapshot(first_config),
             endpoint=self.endpoint,
+            source=source_metadata(self.scenarios),
         )
         run.notes.append(
             "deterministic mode uses ScriptedModel; behavior and persistence "
@@ -444,6 +446,30 @@ class Evaluator:
                 "score": None,
                 "criteria": [],
             }
+        quality_spec = observation.step.expect.get("quality") or {}
+        if isinstance(quality_spec, dict) and quality_spec.get("required"):
+            minimum = step_result.quality.get("min_score")
+            passed = bool(
+                minimum is not None and step_result.quality.get("passed") is True
+            )
+            assertions.append(AssertionResult(
+                id=f"s{index}.quality.required",
+                check="quality",
+                status="passed" if passed else "failed",
+                expected={"min_score": minimum, "required": True},
+                observed={
+                    "score": step_result.quality.get("score"),
+                    "error": step_result.quality.get("error"),
+                },
+                message=(
+                    "required behavioral quality threshold was not met"
+                    if not passed else ""
+                ),
+                severity=observation.step.expect.get(
+                    "severity"
+                ) or scenario.severity,
+            ))
+            step_result.assertions = assertions
         step_result.status = (
             "failed" if any(a.status == "failed" for a in assertions) else "passed"
         )

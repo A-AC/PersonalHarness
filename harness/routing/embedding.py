@@ -28,8 +28,9 @@ class EmbeddingClient:
         return str(self.config.get("embeddings.model", "") or "")
 
     def _key(self, text: str) -> str:
+        endpoint = str(self.config.get("embeddings.base_url", "") or "").rstrip("/")
         return hashlib.sha256(
-            f"{self.model}\n{text}".encode("utf-8")
+            f"{endpoint}\n{self.model}\n{text}".encode("utf-8")
         ).hexdigest()
 
     def _load(self, keys: list[str]) -> dict[str, list[float]]:

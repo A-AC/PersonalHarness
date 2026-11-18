@@ -300,10 +300,12 @@ class Server:
         }
 
     def _approval_payload(self, approval: dict[str, Any]) -> dict[str, Any]:
-        """Add the fields needed to render and edit an approval."""
-        spec = self.app.tools.resolve_optional(
-            str(approval.get("tool") or "")
-        )
+        """Add the fields needed to render and edit an approval.
+
+        The schema and trust flags come from the run's frozen tool definition,
+        matching the arguments the user is actually approving.
+        """
+        spec = self.app.runtime.approval_tool_spec(approval)
         action = (approval.get("meta") or {}).get("action", "tool")
         meta = approval.get("meta") or {}
         feedback = meta.get("feedback") if isinstance(meta, dict) else ""
@@ -317,6 +319,9 @@ class Server:
         approval["supersedes_id"] = approval.get("supersedes_id")
         approval["feedback"] = str(feedback or "")
         approval["side_effects"] = bool(spec.side_effects) if spec else True
+        approval["external_egress"] = (
+            bool(spec.external_egress) if spec else True
+        )
         approval["read_only"] = bool(spec.read_only) if spec else False
         approval["tainted"] = bool(
             self.app.runtime.run_tainted(approval["run_id"])
@@ -1018,6 +1023,7 @@ class Server:
         results = await run_in_threadpool(
             self.app.memory.search, query, scope_priority=priority,
             include_archived=bool(body.get("include_archived")),
+            restore_archived=bool(body.get("restore_archived")),
         )
         # A search from the UI is an explicit read; count what it returned.
         await run_in_threadpool(
@@ -1574,6 +1580,9 @@ class Server:
             "tools": [
                 {"name": tool.tool_name, "risk": tool.risk,
                  "side_effects": tool.side_effects,
+                 "external_egress": bool(
+                     module.manifest.get("external_egress", True)
+                 ),
                  "read_only": tool.read_only,
                  "last_seen": tool.last_seen}
                 for tool in tools
@@ -1845,6 +1854,7 @@ class Server:
                 {"name": spec.name, "risk": spec.risk,
                  "module": spec.module,
                  "side_effects": spec.side_effects,
+                 "external_egress": spec.external_egress,
                  "read_only": spec.read_only,
                  "untrusted_output": spec.untrusted_output,
                  "risk_override": self.app.tools.risk_override(spec.name),

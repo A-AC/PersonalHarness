@@ -20,6 +20,7 @@ from .fixtures import apply_fixtures
 from .models import Scenario
 from .routing import routing_metrics
 from .runner import load_base_config
+from .provenance import source_metadata
 
 
 class _HashEmbeddingClient:
@@ -266,6 +267,7 @@ def run_bakeoff(
         "mode": mode,
         "strategies": list(strategies),
         "scenario_count": len(scenarios),
+        "source": source_metadata(scenarios),
         "results": [],
     }
     for strategy in strategies:

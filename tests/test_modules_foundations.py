@@ -6,6 +6,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
 import yaml
 from starlette.testclient import TestClient
 
@@ -363,6 +364,280 @@ def test_budget_dropped_tools_are_recorded_on_the_run(make_app):
         and source["reason"].startswith("excluded:")
         for source in sources
     )
+
+
+def _register_swap_tool(
+    app,
+    *,
+    risk: str,
+    description: str,
+    parameters: dict,
+    on_call=None,
+    received: list | None = None,
+    summary_template: str = "",
+) -> None:
+    """Register one module-owned probe tool; ``on_call`` runs in the handler."""
+    from harness.tools import ToolSpec
+
+    # A module must be active and global before its tools are eligible for a
+    # run's toolset; otherwise selection records ``module_not_eligible``.
+    app.modules.save(Module(
+        id="test:swap", kind="mcp", name="Swap probe", status="active",
+        scope="global", manifest={}, origin="system",
+    ))
+
+    def handler(ctx, args):
+        if received is not None:
+            received.append(dict(args))
+        if on_call is not None:
+            on_call()
+        return {"echo": args.get("text", ""), "definition": description}
+
+    app.tools.replace_module_tools("test:swap", [ToolSpec(
+        name="probe_tool",
+        description=description,
+        parameters=parameters,
+        risk=risk,
+        handler=handler,
+        module="test:swap",
+        scope="global",
+        summary_template=summary_template,
+    )])
+
+
+_OLD_PARAMETERS = {
+    "type": "object",
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+}
+_NEW_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "extra": {"type": "string"},
+    },
+    "required": ["text"],
+}
+
+
+def test_run_keeps_frozen_schema_and_risk_across_registry_replacement(
+    make_app,
+):
+    app = make_app.build(scripts=[
+        {"tool_calls": [{"name": "probe_tool",
+                         "arguments": {"text": "first"}}]},
+        {"tool_calls": [{"name": "probe_tool",
+                         "arguments": {"text": "second"}}]},
+        {"content": "done"},
+        {"tool_calls": [{"name": "probe_tool",
+                         "arguments": {"text": "new run"}}]},
+    ])
+
+    def replace_mid_run() -> None:
+        _register_swap_tool(
+            app, risk="confirm", description="new definition",
+            parameters=_NEW_PARAMETERS,
+        )
+
+    _register_swap_tool(
+        app, risk="low", description="old definition",
+        parameters=_OLD_PARAMETERS, on_call=replace_mid_run,
+    )
+
+    result = app.runtime.submit_user_message("use the probe")
+    assert result.status == "completed"
+
+    # The second model call in the same run still saw the frozen schema.
+    second = {
+        tool["function"]["name"]: tool
+        for tool in app.model.calls[1]["tools"]
+    }
+    assert second["probe_tool"]["function"]["description"] == "old definition"
+    properties = second["probe_tool"]["function"]["parameters"]["properties"]
+    assert "extra" not in properties
+
+    # Both calls ran without approval: the run's risk stayed low.
+    rows = app.db.query(
+        "SELECT status FROM tool_executions WHERE tool='probe_tool'"
+        " ORDER BY started_at"
+    )
+    assert [row["status"] for row in rows] == ["succeeded", "succeeded"]
+    assert app.approvals.pending() == []
+
+    run = app.db.query_one(
+        "SELECT meta FROM runs WHERE id=?", (result.run_id,)
+    )
+    snapshot = util.loads(run["meta"], {})["toolset"]
+    frozen = {
+        entry["name"]: entry for entry in snapshot["specs"]
+    }
+    assert frozen["probe_tool"]["risk"] == "low"
+    assert frozen["probe_tool"]["description"] == "old definition"
+
+    # A new run sees the replacement, so the same tool now needs approval.
+    assert app.tools.resolve("probe_tool").risk == "confirm"
+    second_run = app.runtime.submit_user_message(
+        "a completely unrelated new topic"
+    )
+    assert second_run.status == "waiting_approval"
+    assert app.approvals.pending()[0]["tool"] == "probe_tool"
+
+
+def test_removed_tool_fails_closed_for_an_existing_run(make_app):
+    app = make_app.build(scripts=[
+        {"tool_calls": [{"name": "probe_tool",
+                         "arguments": {"text": "first"}}]},
+        {"tool_calls": [{"name": "probe_tool",
+                         "arguments": {"text": "again"}}]},
+        {"content": "done"},
+    ])
+
+    _register_swap_tool(
+        app, risk="low", description="old definition",
+        parameters=_OLD_PARAMETERS,
+        on_call=lambda: app.tools.unregister_module("test:swap"),
+    )
+
+    result = app.runtime.submit_user_message("use the probe")
+    assert result.status == "completed"
+    rows = app.db.query(
+        "SELECT status, error FROM tool_executions WHERE tool='probe_tool'"
+        " ORDER BY started_at"
+    )
+    assert [row["status"] for row in rows] == ["succeeded", "denied"]
+    assert "no longer available" in rows[1]["error"]
+
+    # The frozen snapshot is still inspectable; the tool is simply gone.
+    run = app.db.query_one(
+        "SELECT meta FROM runs WHERE id=?", (result.run_id,)
+    )
+    snapshot = util.loads(run["meta"], {})["toolset"]
+    assert "probe_tool" in snapshot["names"]
+    frozen = {
+        entry["name"]: entry for entry in snapshot["specs"]
+    }
+    assert frozen["probe_tool"]["risk"] == "low"
+    snapshot_prompt = {
+        tool["function"]["name"]
+        for tool in app.model.calls[1]["tools"]
+    }
+    assert "probe_tool" not in snapshot_prompt
+
+
+def test_name_only_snapshot_still_resolves_from_the_live_registry(make_app):
+    app = make_app.build(default="ok")
+    legacy = {
+        "domain_id": None,
+        "role": "user",
+        "names": ["remember"],
+        "modules": ["builtin"],
+    }
+    schemas = app.tools.schemas_for_snapshot(legacy)
+    assert [schema["function"]["name"] for schema in schemas] == ["remember"]
+    spec = app.tools.resolve_frozen("remember", snapshot=legacy)
+    assert spec.name == "remember"
+    assert spec.risk == "low"
+
+
+def test_approval_edit_and_presentation_use_the_frozen_definition(
+    make_app, client
+):
+    """A reload between request and decision cannot change the approved tool."""
+    app = make_app.build(scripts=[
+        {"tool_calls": [{"name": "probe_tool",
+                         "arguments": {"text": "original"}}]},
+        {"content": "done"},
+    ])
+    received: list[dict] = []
+    _register_swap_tool(
+        app, risk="confirm", description="old definition",
+        parameters=_OLD_PARAMETERS, received=received,
+        summary_template="Send {text} (old)",
+    )
+
+    result = app.runtime.submit_user_message("use the probe")
+    assert result.status == "waiting_approval"
+    approval = app.approvals.pending()[0]
+
+    # The module reloads and advertises a stricter definition mid-approval:
+    # `extra` is now required, so anything validated against the live schema
+    # would refuse the arguments the user is actually approving.
+    stricter = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "extra": {"type": "string"},
+        },
+        "required": ["text", "extra"],
+    }
+    _register_swap_tool(
+        app, risk="confirm", description="new definition",
+        parameters=stricter, received=received,
+        summary_template="Send {text} (new)",
+    )
+    assert "extra" in app.tools.resolve("probe_tool").parameters["required"]
+
+    # The card keeps presenting the definition the user is approving.
+    card = client(app).get("/api/approvals").json()["approvals"][0]
+    assert card["summary"] == "Send original (old)"
+    assert set(card["schema"]["properties"]) == {"text"}
+
+    # An edit is still measured against the frozen schema, and arguments that
+    # were valid when the approval was requested are not rejected now.
+    with pytest.raises(ValueError):
+        app.runtime.edit_approval(
+            approval["id"], {"text": "edited", "extra": "x"}, "web"
+        )
+    assert app.approvals.get(approval["id"])["status"] == "pending"
+
+    edited = app.runtime.edit_approval(
+        approval["id"], {"text": "edited"}, "web"
+    )
+    assert edited.status == "completed"
+    assert received == [{"text": "edited"}]
+
+
+def test_replacement_name_collision_keeps_the_previous_module_surface(
+    make_app,
+):
+    """A refused swap must not delete the old tools before it is refused."""
+    from harness.tools import ToolSpec
+
+    app = make_app.build(default="ok")
+
+    def spec(name: str, module: str) -> ToolSpec:
+        return ToolSpec(
+            name=name, description="collision probe",
+            parameters={"type": "object", "properties": {}},
+            risk="low", handler=lambda ctx, args: {},
+            module=module, scope="global",
+        )
+
+    assert app.tools.replace_module_tools(
+        "test:a", [spec("a_old", "test:a")]
+    ) == []
+    assert app.tools.replace_module_tools(
+        "test:b", [spec("b_tool", "test:b")]
+    ) == []
+
+    refused = app.tools.replace_module_tools("test:a", [
+        spec("a_new", "test:a"),
+        spec("b_tool", "test:a"),
+    ])
+
+    assert [name for name, _ in refused] == ["b_tool"]
+    # The whole replacement was refused: the old surface is untouched and no
+    # part of the new surface leaked in.
+    assert app.tools.resolve_optional("a_old") is not None
+    assert app.tools.resolve_optional("a_new") is None
+    assert app.tools.resolve_optional("b_tool").module == "test:b"
+
+    # A later collision-free replacement still swaps the module surface.
+    assert app.tools.replace_module_tools(
+        "test:a", [spec("a_new", "test:a")]
+    ) == []
+    assert app.tools.resolve_optional("a_new") is not None
+    assert app.tools.resolve_optional("a_old") is None
 
 
 def test_tool_specs_drive_the_api_without_private_registry_access(

@@ -44,7 +44,7 @@ from .model import (
 from .providers import configured_provider_id
 from .store import Domains, Events, Messages, Tasks
 from .routing import RoutingService
-from .tools import ToolError, validate_arguments
+from .tools import ToolDenied, ToolError, ToolSpec, validate_arguments
 
 
 SKILL_WRITE_TOOLS = frozenset({"propose_skill", "edit_skill"})
@@ -202,14 +202,22 @@ class AgentRuntime:
 
     @staticmethod
     def _toolset_snapshot(selection: dict[str, Any]) -> dict[str, Any]:
-        """The durable part of a capability selection (never the schemas)."""
-        return {
+        """The durable part of a capability selection.
+
+        ``specs`` freezes each selected tool's schema and policy metadata.
+        Later model calls and permission decisions in this run read those
+        values instead of the live registry, so a reload cannot change them
+        mid-run.
+        """
+        snapshot = {
             key: selection[key]
             for key in (
                 "domain_id", "role", "names", "modules", "exclusions",
                 "tokens", "budget_tokens",
             )
         }
+        snapshot["specs"] = list(selection.get("specs") or [])
+        return snapshot
 
     def _model_stamp(self) -> dict[str, str]:
         """The model/provider a run records and keeps for its own turns."""
@@ -266,10 +274,35 @@ class AgentRuntime:
         snapshot = self._run_meta(run_id).get("toolset")
         return snapshot if isinstance(snapshot, dict) else {}
 
-    def _allowed_tool_names(self, run_id: str) -> set[str] | None:
-        """The run snapshot's tool names, or ``None`` before one exists."""
-        names = self._toolset(run_id).get("names")
-        return set(names) if isinstance(names, list) else None
+    def _frozen_spec(self, run_id: str, name: str) -> ToolSpec | None:
+        """The run's frozen definition for one tool, or ``None``.
+
+        The handler still comes from the live registry; a removed or disabled
+        tool fails closed here (returns ``None``) instead of being resurrected
+        from the snapshot.
+        """
+        try:
+            return self.tools.resolve_frozen(
+                name, snapshot=self._toolset(run_id)
+            )
+        except (ToolError, ToolDenied):
+            return None
+
+    def approval_tool_spec(
+        self, approval: dict[str, Any]
+    ) -> ToolSpec | None:
+        """The tool definition a pending approval was created against.
+
+        Approval summaries, the schema shown in the edit form, and edited
+        arguments all read the run's frozen definition, so a module reload
+        between the request and the decision cannot change what the user is
+        approving. A legacy name-only snapshot falls back to the live
+        definition; a tool removed since the run started returns ``None``.
+        """
+        return self._frozen_spec(
+            str(approval.get("run_id") or ""),
+            str(approval.get("tool") or ""),
+        )
 
     def _select_tools(
         self, domain_id: str | None, role: str = "user"
@@ -354,7 +387,7 @@ class AgentRuntime:
                 self._save_toolset(run["id"], selection)
                 self._record_toolset_change(run["id"], snapshot, selection)
                 return selection["schemas"]
-            return self.tools.schemas_for_names(snapshot["names"])
+            return self.tools.schemas_for_snapshot(snapshot)
         selection = self._select_tools(domain_id, role)
         self._save_toolset(run["id"], selection)
         return selection["schemas"]
@@ -396,6 +429,48 @@ class AgentRuntime:
                 return util.clip(content.strip(), 300)
         return util.clip(str(result or ""), 300)
 
+    def _dynamic_taint_sources(self, result: Any) -> list[dict[str, str]]:
+        """Validated untrusted provenance carried by a builtin tool result."""
+        if not isinstance(result, dict):
+            return []
+        raw = result.get("untrusted_sources")
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in raw[:20]:
+            if not isinstance(item, dict):
+                continue
+            origin = str(item.get("origin") or "").strip()
+            if not origin:
+                continue
+            out.append({
+                "tool": str(item.get("tool") or "builtin")[:120],
+                "module": str(item.get("module") or "builtin")[:120],
+                "origin": util.clip(origin, 300),
+                "at": str(item.get("at") or util.iso())[:40],
+                "derived": bool(item.get("derived")),
+            })
+        return out
+
+    def _record_result_taint(
+        self, run_id: str, call_name: str, spec: ToolSpec, result: Any
+    ) -> list[dict[str, str]]:
+        """Apply static and result-carried trust metadata to one run."""
+        sources: list[dict[str, str]] = []
+        if spec.untrusted_output:
+            sources.append({
+                "tool": call_name,
+                "module": spec.module,
+                "origin": self._taint_origin(result, call_name),
+                "at": util.iso(),
+            })
+        sources.extend(self._dynamic_taint_sources(result))
+        for source in sources:
+            self._mark_tainted(
+                run_id, source["tool"], source["module"], source["origin"]
+            )
+        return sources
+
     def _mark_tainted(
         self, run_id: str, tool: str, module: str, origin: str
     ) -> dict[str, Any]:
@@ -428,17 +503,87 @@ class AgentRuntime:
         self,
         transcript: list[dict[str, Any]],
         tools_schema: list[dict[str, Any]],
+        *,
+        run_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
-        """Repair protocol shape, then compact to the model's window.
-
-        Repairs are persisted by the caller (they fix invalid transcripts);
-        compaction is per-call and never rewrites stored history.
-        """
+        """Repair, compact, and reconcile actual model-visible context."""
         repaired, repairs = transcript_mod.repair(transcript)
         prompt, compacted = transcript_mod.compact(
             repaired, self._prompt_budget_tokens(), tools_schema
         )
-        return prompt, repairs + compacted, repaired
+        repairs = repairs + compacted
+        if run_id:
+            self._reconcile_prompt_context(run_id, prompt, repairs)
+        return prompt, repairs, repaired
+
+    def _reconcile_prompt_context(
+        self,
+        run_id: str,
+        prompt: list[dict[str, Any]],
+        repairs: list[str],
+    ) -> None:
+        """Make the source ledger and memory usage match the final payload."""
+        run = self._run_row(run_id)
+        if run is None:
+            return
+        sources = util.loads(run.get("context_sources") or "[]", [])
+        if not isinstance(sources, list):
+            sources = []
+        system = str(prompt[0].get("content") or "") if prompt else ""
+        access_ids: list[str] = []
+        changed = False
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            memory_id = str(source.get("memory_id") or "")
+            if not memory_id and not source.get("history_marker"):
+                continue
+            included = self.context.source_visible(source, system)
+            disposition = "included" if included else "excluded"
+            if source.get("disposition") != disposition:
+                source["disposition"] = disposition
+                changed = True
+                if not included:
+                    source["reason"] = (
+                        str(source.get("reason") or "memory candidate")
+                        + "; excluded by transcript compaction"
+                    )
+            if included and memory_id:
+                access_ids.append(memory_id)
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            if (
+                source.get("untrusted")
+                and source.get("disposition") != "excluded"
+                and source.get("seed_taint") is not False
+            ):
+                self._mark_tainted(
+                    run_id,
+                    str(source.get("tool") or "context"),
+                    str(source.get("module") or "context"),
+                    str(source.get("origin") or "untrusted context"),
+                )
+                # _mark_tainted owns the timestamp; attach the provenance hop
+                # without changing the deduplication key or approval origin.
+                meta = self._run_meta(run_id)
+                entries = meta.get("tainted_sources") or []
+                if entries:
+                    entries[-1]["derived"] = bool(source.get("derived"))
+                    self._save_meta(run_id, meta)
+        if repairs:
+            # Compaction is per-call, not a rewrite of the durable transcript;
+            # retain its effect in the final-payload audit trail instead.
+            sources.extend({
+                "section": "transcript", "ref": None,
+                "reason": f"final payload: {note}", "disposition": "transformed",
+            } for note in repairs)
+            changed = True
+        if changed:
+            self._save_run(run_id, context_sources=util.dumps(sources))
+        if access_ids:
+            self.memory.record_access(access_ids, run_id=run_id)
+
 
     # ------------------------------------------------------------------
     # Entry: user message from any interface
@@ -1373,7 +1518,7 @@ class AgentRuntime:
             task=task, domain=self.domains.get(task["domain_id"])
             if task.get("domain_id") else None,
             trigger=trigger, pending_approvals=pending, run_id=run_id,
-            routing=routing, tool_selection=selection,
+            routing=routing, tool_selection=selection, defer_access=True,
         )
         sources = list(built["sources"])
         for exclusion in selection["exclusions"]:
@@ -1409,9 +1554,10 @@ class AgentRuntime:
                 continue
             entry = {
                 "tool": str(source.get("tool") or "inbox"),
-                "module": str(source.get("module") or "inbox"),
+                "module": str(source.get("module") or "memory"),
                 "origin": util.clip(str(source.get("origin") or "external"), 300),
                 "at": source.get("at") or util.iso(),
+                "derived": bool(source.get("derived")),
             }
             if any(
                 existing.get("tool") == entry["tool"]
@@ -1633,7 +1779,11 @@ class AgentRuntime:
         action = (approval.get("meta") or {}).get("action", "tool")
         if action not in ("tool", "create_domain"):
             raise ValueError(f"approval action cannot be edited: {action}")
-        spec = self.tools.resolve_optional(str(approval.get("tool") or ""))
+        # Validate the edit against the definition this run froze when the
+        # approval was requested, not the live registry: a reload must not
+        # reject arguments that were valid when the user was asked to approve
+        # them, nor accept arguments the frozen schema never allowed.
+        spec = self.approval_tool_spec(approval)
         if spec is None:
             raise ValueError(
                 f"approval tool does not exist: {approval.get('tool')}"
@@ -1673,8 +1823,8 @@ class AgentRuntime:
         return self.resume_after_approval(decided, source)
 
     def summary_for(self, approval: dict[str, Any]) -> str:
-        """Human summary for an approval, using its tool template if present."""
-        spec = self.tools.resolve_optional(str(approval.get("tool") or ""))
+        """Human summary for an approval, using the run's frozen template."""
+        spec = self.approval_tool_spec(approval)
         if spec is not None and spec.summary_template:
             return self.approvals.summarize(
                 approval, spec.summary_template
@@ -1752,19 +1902,17 @@ class AgentRuntime:
         # tainted memory write must stay provenance-marked at the moment
         # the memory is actually written.
         ctx.tainted_origin = self._first_taint_origin(run["id"])
-        allowed = self._allowed_tool_names(run["id"])
-        spec = self.tools.resolve_optional(call.name)
+        snapshot = self._toolset(run["id"])
+        spec = self._frozen_spec(run["id"], call.name)
         outcome = self.tools.execute(
             call, ctx, run_id=run["id"], task_id=task["id"],
             execution_id=execution_id, approval_id=approval["id"],
-            allowed_names=allowed, role=task.get("role") or "user",
+            role=task.get("role") or "user", snapshot=snapshot,
         )
-        if outcome.get("status") == "succeeded":
-            if spec is not None and spec.untrusted_output:
-                self._mark_tainted(
-                    run["id"], call.name, spec.module,
-                    self._taint_origin(outcome.get("result"), call.name),
-                )
+        if outcome.get("status") == "succeeded" and spec is not None:
+            self._record_result_taint(
+                run["id"], call.name, spec, outcome.get("result")
+            )
         self.approvals.mark_executed(approval["id"])
         if (approval.get("meta") or {}).get("edited_from"):
             edited = dict(outcome)
@@ -1785,7 +1933,12 @@ class AgentRuntime:
             outcome = edited
         self._append_tool_result(
             run["id"], call.id, outcome, approval["id"],
-            untrusted=bool(spec is not None and spec.untrusted_output),
+            untrusted=bool(
+                spec is not None and (
+                    spec.untrusted_output
+                    or self._dynamic_taint_sources(outcome.get("result"))
+                )
+            ),
             tool=call.name,
             origin=self._first_taint_origin(run["id"]),
         )
@@ -2054,7 +2207,7 @@ class AgentRuntime:
             transcript = self._transcript(run)
             tools_schema = self._run_schemas(run, task)
             prompt, repairs, repaired = self._prepare_prompt(
-                transcript, tools_schema
+                transcript, tools_schema, run_id=run_id
             )
             if repairs:
                 self._save_run(run_id, transcript=util.dumps(repaired))
@@ -2079,6 +2232,7 @@ class AgentRuntime:
                 prompt, extra = transcript_mod.compact(
                     prompt, tighter, tools_schema
                 )
+                self._reconcile_prompt_context(run_id, prompt, extra)
                 self.events.record(
                     "model.context_retry", level="warn", task_id=task["id"],
                     run_id=run_id,
@@ -2155,12 +2309,15 @@ class AgentRuntime:
                             message=outcome.get("message", ""),
                             approval_id=outcome.get("approval_id"),
                         )
-                    spec = self.tools.resolve_optional(call.name)
+                    spec = self._frozen_spec(run_id, call.name)
                     self._append_tool_result(
                         run_id, call.id, outcome,
                         outcome.get("approval_id"),
                         untrusted=bool(
-                            spec is not None and spec.untrusted_output
+                            spec is not None and (
+                                spec.untrusted_output
+                                or self._dynamic_taint_sources(outcome.get("result"))
+                            )
                         ),
                         tool=call.name,
                         origin=self._first_taint_origin(run_id),
@@ -2207,10 +2364,19 @@ class AgentRuntime:
             )
             note_id = None
             if content:
+                message_meta = None
+                if any(
+                    not source.get("derived")
+                    for source in self._taint_sources(run_id)
+                ):
+                    message_meta = {
+                        "derived_untrusted": True,
+                        "tainted_origin": self._first_taint_origin(run_id),
+                    }
                 note_id = self.messages.record(
                     "assistant", content, source="agent", task_id=task["id"],
                     run_id=run_id, domain_id=task.get("domain_id"),
-                    visible=self._visible(task),
+                    visible=self._visible(task), meta=message_meta,
                 )
             live = self.app.approvals.live_for_run(run_id)
             if live is not None:
@@ -2353,7 +2519,17 @@ class AgentRuntime:
             limit=3,
         )
         memory_items: list[dict[str, Any]] = []
+        untrusted_sources: list[dict[str, Any]] = []
         for item in memories:
+            provenance = item.get("provenance") or {}
+            if isinstance(provenance, dict) and provenance.get("tainted"):
+                untrusted_sources.append({
+                    "tool": f"memory:{item['id']}", "module": "memory",
+                    "origin": util.clip(
+                        str(provenance.get("tainted_origin") or "external"), 300
+                    ),
+                    "at": util.iso(), "derived": False,
+                })
             memory_items.append({
                 "id": item["id"],
                 "kind": item.get("kind") or "memory",
@@ -2485,6 +2661,7 @@ class AgentRuntime:
             "memories": memory_items,
             "skills": skill_items,
             "new_tools": new_tools,
+            "untrusted_sources": untrusted_sources,
         }
 
     def _rebuild_context_after_domain_change(
@@ -2520,6 +2697,7 @@ class AgentRuntime:
             # would put a stale domain hint back into the rebuilt prompt.
             routing=None,
             tool_selection=self._select_tools(new_domain_id, role),
+            defer_access=True,
         )
 
         current = self._run_row(run_id) or run
@@ -2566,9 +2744,19 @@ class AgentRuntime:
         run_id, task_id = run["id"], task["id"]
         previous_domain = task.get("domain_id")
         role = task.get("role") or "user"
-        # A sub-agent asking for a confirm-risk or parent-only tool gets an
-        # explicit blocked result for its parent instead of an approval.
-        known = self.tools.resolve_optional(call.name)
+        # Everything below uses the run's frozen snapshot: the schema shown to
+        # the model, argument validation, and the risk/trust policy. A module
+        # reload mid-run cannot change any of them. A tool removed since the
+        # run started is not resolved at all (fail closed, never resurrected).
+        snapshot = self._toolset(run_id)
+        try:
+            known = self.tools.resolve_frozen(call.name, snapshot=snapshot)
+        except (ToolError, ToolDenied):
+            # A live tool outside this run's snapshot still needs its
+            # role restriction reported as ``blocked`` (sub-agents cannot use
+            # confirm-risk or delegation tools); a removed tool resolves to
+            # ``None`` and fails closed below instead.
+            known = self.tools.resolve_optional(call.name)
         validated_arguments: dict[str, Any] | None = None
         if known is not None:
             try:
@@ -2598,9 +2786,10 @@ class AgentRuntime:
             return {"status": "blocked", "error": restriction}
         # Visibility is enforced here as well as in the prompt: a call by name
         # for a tool outside this run's snapshot is denied, not executed.
-        allowed = self._allowed_tool_names(run_id)
         try:
-            spec = self.tools.resolve(call.name, allowed=allowed, role=role)
+            spec = self.tools.resolve_frozen(
+                call.name, snapshot=snapshot, role=role
+            )
         except Exception as exc:
             self.tools.record_rejected(
                 call, run_id=run_id, task_id=task_id, error=str(exc)
@@ -2713,7 +2902,9 @@ class AgentRuntime:
         tainted_side_effect = bool(
             taint and spec.side_effects and not spec.read_only
         )
-        escalated = tainted_side_effect and spec.risk != "confirm"
+        tainted_egress = bool(taint and spec.external_egress)
+        tainted_action = tainted_side_effect or tainted_egress
+        escalated = tainted_action and spec.risk != "confirm"
         effective_risk = "confirm" if escalated else spec.risk
         taint_origin = str(taint[0].get("origin") or "") if taint else ""
         if escalated:
@@ -2724,6 +2915,7 @@ class AgentRuntime:
                     "module": spec.module,
                     "from_risk": spec.risk,
                     "origin": taint_origin,
+                    "external_egress": tainted_egress,
                 },
             )
 
@@ -2752,7 +2944,7 @@ class AgentRuntime:
                 }
             try:
                 arguments = self.tools.validate(
-                    call, allowed=allowed, role=role
+                    call, role=role, snapshot=snapshot
                 )
             except Exception as exc:
                 return {"status": "denied", "error": str(exc)}
@@ -2861,8 +3053,8 @@ class AgentRuntime:
             action = "create_domain" if call.name == "create_domain" else "tool"
             reason = (
                 f"untrusted content from {taint_origin} requires approval "
-                f"before {call.name} can change state"
-                if tainted_side_effect else f"confirm-risk tool: {call.name}"
+                f"before {call.name} can change state or transmit data"
+                if tainted_action else f"confirm-risk tool: {call.name}"
             )
             revised = self.db.query_one(
                 "SELECT id FROM approvals WHERE run_id=? AND tool=?"
@@ -2903,8 +3095,8 @@ class AgentRuntime:
             )
             provenance = (
                 f" This run contains untrusted content from **{taint_origin}**, "
-                "so a side-effecting action needs your explicit approval."
-                if tainted_side_effect else ""
+                "so a state-changing or external-network action needs your explicit approval."
+                if tainted_action else ""
             )
             if call.name in SKILL_WRITE_TOOLS:
                 if call.name == "edit_skill":
@@ -2961,12 +3153,11 @@ class AgentRuntime:
         )
         outcome = self.tools.execute(
             call, ctx, run_id=run_id, task_id=task_id,
-            allowed_names=allowed, role=role,
+            role=role, snapshot=snapshot,
         )
-        if outcome.get("status") == "succeeded" and spec.untrusted_output:
-            self._mark_tainted(
-                run_id, call.name, spec.module,
-                self._taint_origin(outcome.get("result"), call.name),
+        if outcome.get("status") == "succeeded":
+            self._record_result_taint(
+                run_id, call.name, spec, outcome.get("result")
             )
         if outcome.get("status") == "succeeded" and call.name == "use_domain":
             self._announce_domain(

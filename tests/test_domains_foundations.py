@@ -295,7 +295,7 @@ def test_phase10_config_defaults_present():
     assert config.get("domains.stemming") is True
     assert config.get("domains.model_routing") == "off"
     assert config.get("domains.suggestions.min_tasks") == 6
-    assert config.get("memory.cross_domain") == "boost"
+    assert config.get("memory.cross_domain") == "search"
     assert config.get("memory.cross_domain_max") == 3
 
 

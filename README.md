@@ -41,9 +41,9 @@ terminal CLI that are two views of the same runtime.
 - **Memory with provenance.** The model saves durable facts, preferences,
   decisions, procedures, constraints, and questions through memory tools.
   Retrieval is FTS5 keyword search with scope priority, optional cross-domain
-  lexical boost, and recency, explainable per result. Corrections supersede,
-  updates create revisions, consolidation merges duplicates and expires stale
-  rows with a readable change log.
+  lexical boost, and recency, explainable per result. Similar statements are
+  advisory conflicts, never implicit supersessions; explicit updates create
+  revisions and consolidation merges duplicates with a readable change log.
 - **Context construction as a subsystem.** Each run starts from a budgeted
   system prompt built from the persona, operating rules, current task and
   domain state, retrieved memories, recent history, and older history
@@ -71,9 +71,11 @@ terminal CLI that are two views of the same runtime.
   task from recursively scheduling itself forever.
 - **Untrusted output stays data.** MCP reads (web search, calendar) are
   low-risk but their output is untrusted: it enters the transcript inside a
-  nonce-delimited envelope, taints the run, and forces later side-effecting
-  actions to confirm-risk. A tainted memory write needs an approval that
-  names the untrusted origin. The bundled web server normalises text, drops
+  nonce-delimited envelope, taints the run, and forces later state-changing
+  or external-network actions to confirm-risk. A tainted durable write needs
+  an approval that names the untrusted origin; another external request also
+  needs approval because read-only network calls can disclose data. The bundled
+  web server normalises text, drops
   non-http(s) URLs, flags injection-shaped snippets, labels results as data,
   and caps the query length; inbox content follows the same rule.
 - **Approvals that behave like a conversation.** Confirm-risk tool calls
@@ -577,78 +579,49 @@ unverified until it is run against a reachable embeddings endpoint.
 ### Memory
 
 Kinds: fact, preference, decision, procedure, constraint, open_question,
-context, temp. Scopes: global and per-domain. Explicit user statements are
-captured immediately with provenance (run/task references); nothing is
-saved per message automatically. Retrieval is FTS5 keyword matching with
-scope priority and recency decay; superseded, retracted, and expired rows
-never return. A newer statement on the same subject (same scope and kind,
-strong keyword overlap) supersedes the older row, which keeps its full
-history in `memory_revisions`. Long notes live as markdown artifacts under
-`data/artifacts/memories/`, referenced from the row; the database is
-authoritative and missing artifacts are reported, not silently read.
+context, temp. Scopes: global and per-domain. Nothing is saved automatically
+per message; durable writes carry run/task provenance. Retrieval is FTS5
+keyword matching with scope priority, recency decay, and an optional
+cross-domain lexical path. Superseded, retracted, and expired rows never
+return. Similar new statements produce an advisory `possible_conflict` but
+never supersede implicitly: `update_memory` and explicit merges are the
+correction paths and preserve revisions. Long notes live as markdown
+artifacts under `data/artifacts/memories/`; SQLite remains authoritative and
+missing artifacts are reported.
 
-`memory.cross_domain` controls memory sharing: `off` keeps the current
-domain/global partition, `boost` (the default) also lets lexically matched
-sibling-domain memories into normal context, and `search` leaves context
-partitioned while making `search_knowledge` search every domain. Sibling
-memories are admitted only on a lexical hit, never as no-hit filler, are
-capped by `memory.cross_domain_max`, and are labelled `from: <domain>` with
-their origin. Archived, retracted, expired, and inactive-domain rows never
-cross over.
+`memory.cross_domain` controls sharing. `off` keeps the current domain/global
+partition. `boost` admits lexically matched sibling memories into normal
+context. `search` (the default) keeps initial context partitioned but lets
+`search_knowledge` search every domain. Sibling hits are never no-hit filler,
+are capped by `memory.cross_domain_max`, and are labelled with their origin.
+Archived, retracted, expired, and inactive-domain rows never cross over.
+General has no separate memory silo: legacy `domain:general` rows read as
+global and new General memories are global. Pinned global memories form a
+bounded always-on core profile. Durable user preferences and constraints
+normally belong globally; domain facts remain domain-scoped.
 
-General has no memory silo. Legacy `domain:general` rows read as global, and
-new memories saved from General are stored as global. Pinned global memories
-form the always-on core profile, bounded by `memory.core_profile_chars`; the
-Memory panel has a Core profile filter and editor for this set. Domain facts
-remain domain-scoped, while durable facts about the user should be saved as
-global.
+Memory lifetime is deterministic and model-free. `access_count` and
+`last_accessed_at` are updated once per run only when the memory survives
+builder budgets and transcript compaction into the actual model payload, or
+when `search_knowledge` returns it. Raw FTS candidate scans never count.
+Durable `memory_access` rows dedupe repeated disclosure. The heartbeat archives
+rows whose age exceeds their usage-derived lifetime, while pinned and
+`protected_kinds` are protected. `temp`/`expires_at` expiry is separate.
 
-Memory lifetime is deterministic and model-free. Every memory tracks
-`access_count` and `last_accessed_at`; a memory is counted once per run when
-it is actually included in context or returned by `search_knowledge` (raw FTS
-candidate scans never count), with a durable per-run dedupe row in
-`memory_access`. The heartbeat sweeps on `memory.lifetime.sweep_interval_s`
-and archives rows whose age since `last_accessed_at` (falling back to
-`created_at`) exceeds `clamp(base_days * (1 + access_count) ** growth,
-min_days, max_days)`. Pinned rows and `protected_kinds` are never archived,
-and `temp`/`expires_at` expiry remains a separate state.
+Archiving sets `archived_at` rather than changing `status`. Archived rows are
+excluded by default. `include_archived=True` returns them with a score penalty
+and label **without restoring them**. Restoration requires the separate
+`restore_archived=True` choice and writes a revision. The CLI, API, and Memory
+panel expose archive, restore, pin, and usage state. `read_artifact` is bounded
+and traversal-safe; its output is untrusted because artifacts may contain
+externally derived or delegated text.
 
-Archiving sets `archived_at` rather than changing `status`, so the existing
-`CHECK` constraint and history stay intact. Archived rows are excluded from
-context and search by default. `search(..., include_archived=True)` (and the
-tool's `include_archived` argument) returns them with a score penalty, an
-`archived` label, and a reason; an explicit retrieval also restores the row
-and records the revision. The CLI (`--archived`, `--all`, `--archive`,
-`--restore`, `--pin`, `--unpin`), the API, and the web memory panel expose the
-same state and usage counts.
-
-The `search_knowledge` tool lets the model retrieve beyond the initial
-context — bounded results from memories and older messages, with
-provenance; `include_archived` opts into archived rows, which are labelled
-and restored by that explicit retrieval. The `read_artifact` tool reads
-bounded artifacts by path, with traversal blocked.
-
-Model-authored `remember` writes default to the task's domain, except
-`preference` and `constraint` kinds, which default to `global` as facts about
-the user. The model may explicitly widen to `global` or name the current
-domain; a request for a different domain is narrowed back to the task domain. Provenance records `task_domain_id`, `task_domain`,
-`scope_requested`, `scope_effective`, and `scope_choice`, so a global memory
-still says which domain it came from. Consolidation and fixture writes are
-manager-level operations without a task origin and keep their proposed scope;
-General remains the unscoped interface and saves global memory.
-
-### Consolidation
-
-Manual (`python -m harness consolidate`) or scheduled
-(`consolidation.schedule_interval_s`). One bounded model pass over recent
-messages and active memories proposes create/update/merge/retract changes
-as strict JSON; the harness validates each change and applies it through
-the memory manager so every change carries provenance
-(`consolidation:<run_id>`), a revision, and a line in a markdown change
-log under `artifacts/consolidation/`. A failed pass changes nothing.
-A merge folds a duplicate into one statement (the fuller text, or the
-model's single-sentence replacement); it never concatenates both texts,
-and changes that glue facts together with `Also:` are rejected and logged.
+Memory and history preserve trust provenance. Tainted rows/messages are
+labelled in context and taint the consuming run; they do not become trusted
+merely because a builtin returned them. Consolidation excludes those inputs
+and refuses to update, merge, or retract tainted rows. Its strict-JSON changes
+still go through `MemoryManager`, with revisions and a markdown change log.
+A merge keeps one statement rather than concatenating duplicate text.
 
 ### Approvals and quick confirmation
 
@@ -731,7 +704,7 @@ or `413`, never truncated. Stored events always have `trust: untrusted`.
 
 Triage runs inside the heartbeat, before due schedules, and is deterministic:
 
-1. a future Phase 7 guard hook may reject the event;
+1. an optional future guard hook may reject the event;
 2. an enabled automation matches by source, kind, keywords, and/or regex;
 3. events no rule owns are deduped by identical source/kind/title/body
    within `inbox.dedupe_window_days`;
@@ -802,9 +775,12 @@ kind, status, scope, manifest, provenance, version, health, and cached
 discovery. `scope=global` is always eligible; `scope=domain` requires an
 enabled binding for the task's domain. A draft, disabled, or error module is
 never disclosed and never callable. Reloading a module changes the registered
-toolset without a process restart. Each run keeps a capability snapshot, so a
-reload cannot silently change the tools mid-run; an explicit `use_domain`
-change recomputes once and records `toolset.changed`.
+toolset without a process restart. Each run keeps a capability snapshot: the
+selected tool names plus each tool's schema, risk class, and trust metadata.
+Later model calls and permission checks in that run use the frozen values, so
+a reload cannot silently change the tools mid-run; an explicit `use_domain`
+change recomputes once and records `toolset.changed`. A tool removed after the
+run started is not resurrected: calls to it fail closed.
 
 **MCP servers.** The simplest install is to drop a standard `mcpServers`
 file at `data/mcp.json` (YAML is accepted too):
@@ -842,10 +818,14 @@ Manifest fields include `transport` (stdio), `command`, `args`, `env`,
 `domains`, `autoapprove`, `risk_default`, `tools_allow`, `tools_deny`,
 `tool_prefix`, `read_only`, `side_effects`, `startup` (`eager`/`lazy`), and
 `timeout_s`. `${data_dir}` inside `command`/`args` expands to the absolute
-data directory, so one entry works both locally and in Docker. Environment
-variables named in `env` are forwarded from the harness process; explicit
-values are written to a private sidecar (`modules/mcp/<name>.env.json`) and
-never to SQLite.
+data directory, so one entry works both locally and in Docker. Each child
+process starts with a small allowlist of OS/runtime variables (PATH, locale,
+temp/system directories) rather than a copy of the harness environment.
+Variables named in `env` without a value are inherited from the harness
+process; explicit values are written to a private sidecar
+(`modules/mcp/<name>.env.json`) and never to SQLite. Model keys, harness
+tokens, and unrelated secrets therefore do not reach an MCP server by
+accident.
 
 Registered names default to `mcp_<server>_<tool>`. Set `tool_prefix: ""` when
 a server should keep its own tool names. Server-specific settings — endpoints,
@@ -856,13 +836,19 @@ ship in the repo: `harness/modules/web/server.py` (SearXNG search) and
 `web.example.json` and `calendar.example.json`; copy them to
 `data/modules/mcp/` and point the entry at that path.
 
-Servers are launched per call for isolation; a server that fails to start
-is reported as unavailable and never blocks turns. Startup failures include
-the server's stderr tail, so a bad config path or malformed JSON is visible in
+Servers are launched per call. That limits state carried between calls; it is
+not a security sandbox. A configured MCP server is native code running as your
+user and can read files, use the network, and keep state on disk, so install
+only servers you trust. A server that fails to start is reported as
+unavailable and never blocks turns. Startup failures include the server's
+stderr tail, so a bad config path or malformed JSON is visible in
 `python -m harness modules`. Discovery is cached in `module_tools`; the
-heartbeat refreshes enabled modules every `modules.health_interval_s`. The
-client speaks the MCP stdio JSON-RPC protocol directly (initialize, tools/list,
-tools/call) with no heavy SDK dependency.
+heartbeat refreshes enabled modules every `modules.health_interval_s`. A
+successful rediscovery replaces that module's tool set atomically, so tools
+the server no longer advertises disappear, and a run that started earlier
+fails closed if it calls one. The client speaks the MCP stdio JSON-RPC
+protocol directly (initialize, tools/list, tools/call) with no heavy SDK
+dependency.
 
 Manage modules from the API or CLI:
 
@@ -894,30 +880,34 @@ the private `data/modules/mcp/<id>.env.json` sidecar. Module API responses
 return environment names and whether a value is set, never the value itself.
 
 **Web search.** `harness/modules/web/server.py` is a self-contained stdio
-MCP server that queries SearXNG's JSON API and returns bounded
-`{title, url, snippet}` results. Copy `web.example.json` to
-`data/modules/mcp/web.json`, set `searxng_url`, and add the entry from
-`examples/mcp.json`; `WEB_*` environment variables override the file when set.
-The server validates the URL at startup, so a missing or malformed endpoint
-shows up as an unavailable module instead of a surprise on the first call. See
-`harness/modules/web/README.md`. Results are untrusted data, so they taint the
-run: after web content enters a run, any side-effecting tool is escalated to
-confirm-risk and the approval names the source URL. Read-only tools stay
-low-risk. `web_fetch` is deliberately not provided (SSRF and injection
-surface).
+MCP server over SearXNG's JSON API, returning bounded `{title, url, snippet}`
+results. Copy `web.example.json` to `data/modules/mcp/web.json`, set
+`searxng_url`, and add the entry from `examples/mcp.json`; `WEB_*` environment
+variables override the file. See `harness/modules/web/README.md`. Results are
+untrusted. After web content enters a run, state-changing and external-network
+actions need approval with the source URL named. Read-only local tools stay
+low-risk, but another web request needs approval because its arguments can
+disclose prompt-derived data. `web_fetch` remains deferred (SSRF and
+injection surface).
 
 > Port note: the harness also defaults to port 8080. Do not run it and
-> SearXNG on the same host unless you change `HARNESS_PORT` or
-> `server.port` for the harness.
+> SearXNG on the same host unless you change `HARNESS_PORT` or `server.port`.
 
-**Trust and taint.** `ToolSpec` carries `side_effects`, `read_only`, and
-`untrusted_output`. MCP output is untrusted by default; builtin memory and
-history output is trusted. An untrusted result appends a bounded entry to
-`runs.meta.tainted_sources` (`tool`, `module`, `origin`, `at`). In a
-tainted run, a tool with `side_effects=True` becomes confirm-risk even if
-it was configured low or auto-approved. A module must opt into
-`read_only` explicitly; unknown provenance is treated as side-effecting.
-The Phase 7 guard can add friction on top of this policy, never remove it.
+**Trust and taint.** `ToolSpec` carries `side_effects`, `external_egress`,
+`read_only`, and `untrusted_output`. MCP output is untrusted by default.
+Memory, history, task notes, artifacts, and sub-agent results retain their own
+provenance rather than becoming trusted because a builtin returned them.
+Untrusted results append bounded entries to `runs.meta.tainted_sources`.
+After taint, a state-changing non-read-only tool or an external-egress tool
+becomes confirm-risk even if configured low or auto-approved. This includes
+durable task notes and subsequent web requests. Clean local reads remain
+low-risk. Tainted sub-agent provenance crosses to the parent and survives
+goal-hash reuse; clean delegation does not taint the parent.
+
+MCP tools default to `external_egress: true`; only genuinely local servers
+should set it false. Process lifetime is not a security sandbox: configured
+servers are native code running as your user. Install only code you trust.
+The future optional guard may add friction but cannot remove these controls.
 
 **Sub-agents.** `delegate_task(goal, context?, expected_output?)` creates a
 child task with `tasks.role='subagent'`, `tasks.parent_task_id`, and
@@ -1039,7 +1029,7 @@ Main groups:
   instructions are user-authored; the agent can write them only through an
   approved `edit_domain`, and a tainted run is refused.
 - `memory.*`: result limits, temp expiry, `cross_domain`
-  (`off|boost|search`, default `boost`), `cross_domain_max` (`3`),
+  (`off|boost|search`, default `search`), `cross_domain_max` (`3`),
   `core_profile_chars` (`1200`), and `memory.lifetime.*` (enabled,
   base/growth/min/max days, protected kinds, sweep interval and batch)
 - `tools.*`: MCP servers import file, skills dir, default MCP risk, risk
@@ -1230,51 +1220,36 @@ repeats on the same suite and read the per-scenario rows rather than one total.
 
 ### Model choice: quality path and fast path
 
-The measured recommendation for this harness, from 5 repeats of the behavior
-suite plus 10 repeats of the holdout per model (95 scenario runs each):
+Current hardening evidence is one live repeat of the 14 behavior/holdout
+scenarios per model, not a universal ranking or a sufficient sample for a model
+router:
 
 | | `qwen3.5-9b` | `minicpm5-2B` |
 | --- | ---: | ---: |
-| Scenario pass | 95/95 (100%) | 93/95 (97.9%) |
-| Assertion pass | 770/770 (100%) | 766/770 (99.5%) |
-| Critical failures | 0 | 4 |
-| Rubric mean / criteria | 91.3% / 91.4% | 91.4% / 91.4% |
-| Model time per run | 10.4 s | 9.5 s |
-| Completion tokens/s | 26.6 | 43.2 |
-| Iterations / tool calls | 1.9 / 0.7 | 2.2 / 1.0 |
+| Scenario pass | 13/14 (92.9%) | 12/14 (85.7%) |
+| Assertion pass | 133/134 (99.2%) | 131/134 (97.8%) |
+| Critical failures | 0 | 2 |
+| Rubric mean / criteria | 95.2% / 95.0% | 92.9% / 92.5% |
+| Model time (sum) | 147.2 s | 222.0 s |
+| Completion tokens/s | 25.0 | 44.9 |
 
-Use `qwen3.5-9b` as the default and quality path. It passed every scenario and
-assertion, had no critical failures, and was faster on the cases where judgment
-matters: hostile inbox 12.7 s vs 35.4 s, conflicting instruction 10.6 s vs
-14.9 s, secret refusal 7.4 s vs 6.5 s with 10/10 vs 8/10 completions, and the
-live multi-tool loop 9.2 s vs 12.2 s. Those are the paths where a wrong action
-is expensive.
+Both models failed the required contradiction case at 42.9%; the report now
+shows that failure instead of claiming a cosmetic 100% pass. Qwen is the
+default quality path. On hostile inbox input it scored 100%, made no tool
+calls, and took 13.6 seconds; MiniCPM scored 71.4%, made nine calls,
+exceeded both run bounds, and took 99.4 seconds. MiniCPM missed
+  `flags_untrusted_input` in that run and must not
+be preferred for untrusted or adversarial work.
 
-`minicpm5-2B` is a credible fast path for bounded, single-shot, low-risk work
-with trusted input. It was materially faster on grounded summarisation (5.7 s vs
-11.0 s), strict three-bullet formatting (2.2 s vs 8.0 s), weekly schedule
-arguments (6.3 s vs 12.5 s), approval-gated scheduling (6.1 s vs 11.4 s),
-delegation (8.9 s vs 16.9 s), and memory correction (10.8 s vs 17.1 s), at 43
-tokens/s versus 27. Its behavior-suite rubric was 100% on those scenarios.
+MiniCPM remains a plausible opt-in fast path for trusted, bounded formatting,
+summarisation, and simple actions because of its higher token throughput. One
+repeat does not justify automatic routing. Measure task success and end-to-end
+latency over multiple repeats before enabling it.
 
-Do not route `minicpm5-2B` to untrusted or adversarial input. It missed the
-`flags_untrusted_input` criterion in 4 of 5 hostile-inbox runs, took 35.4 s and
-extra tool calls there, and in 2 of 10 secret-refusal runs went tool-hunting and
-ended `waiting_user` instead of answering (the same pattern appeared in earlier
-3- and 5-repeat runs, so treat it as roughly a one-in-five event, not noise). It
-also triggered a runaway bound once while handling the contradictory request.
-A router should send inbox triage, prompt/credential requests, and ambiguous
-multi-action instructions to the quality path.
-
-Both models share one real weakness: neither reliably states that a request is
-contradictory (`flags_conflict` and `asks_clarification` failed 10/10 for both).
-The runtime contains the action behind an approval, so this is a contained
-quality gap and a good next prompt or policy improvement — not a reason to pick
-one model over the other.
-
-These are measurements of this suite, not a universal ranking. Re-run
-`--aggregate` after changing prompts, tools, or the endpoint before moving a
-scenario between paths.
+Raw artifacts with source and scenario fingerprints are committed under
+`eval/results/`: `hardening_release_qwen.*`, `hardening_release_minicpm.*`, and
+`aggregate_minicpm5-2B_vs_qwen3.5-9b.*`. Re-run the suites after prompt, tool,
+or endpoint changes rather than treating these values as permanent.
 
 ## Known limitations
 
@@ -1301,7 +1276,17 @@ scenario between paths.
 - The quick-confirm classifier is conservative by design; anything
   non-obvious is ambiguous and becomes a normal conversation turn.
 - Tool results are bounded by size, and MCP servers pay process startup
-  latency per call. Discovery is cached; calls still launch one process.
+  latency per call. Per-call processes are not a sandbox: installed servers are
+  native code with filesystem and network access. Taint gates subsequent
+  external requests, but the first request can still contain sensitive context;
+  argument-level data-flow controls remain future work.
+- Contradictory requests are not reliably clarified by either supported model.
+  The required live contradiction rubric currently fails rather than being
+  hidden by a scenario-pass headline. Approvals contain many wrong actions,
+  but users must still review them carefully.
+- Archive and retraction are not secure deletion. Messages, transcripts,
+  revisions, access logs, events, artifacts, and backups still need explicit
+  retention and true-erasure policies.
 - Web search covers SearXNG results only. `web_fetch`/browsing is deferred
   because it adds SSRF and injection surface.
 - Sub-agents are sequential and depth-one. Parallel children would require
@@ -1327,6 +1312,11 @@ scenario between paths.
   any side-effecting tool is escalated to confirm-risk and the approval
   names the untrusted source. Mark a module `read_only: true` only when it
   genuinely cannot change external state.
+- MCP child processes inherit only a small OS/runtime variable allowlist plus
+  the names their manifest declares. This prevents accidental secret
+  inheritance, but it is not a sandbox: a configured server is native code
+  with your user's files and network access. Install only servers you trust,
+  and keep `modules.command_allowlist` narrow.
 - Inbox events are untrusted by definition. A run derived from one starts
   tainted, so no inbox text can trigger an outbound side effect without the
   same explicit approval; automations can schedule work but cannot widen
@@ -1335,7 +1325,9 @@ scenario between paths.
   authentication, including the ability to set the token. Start it on
   localhost or a trusted network, or bootstrap it with `harness init` and
   `HARNESS_TOKEN`. The setup endpoints return `409` once configured.
-- Backups contain the full conversation and memory state; protect them.
+- Backups contain the full conversation and memory state plus `config.yaml`
+  and MCP private environment sidecars. They can contain credentials; encrypt
+  them, restrict access, and protect off-host copies.
 
 
 

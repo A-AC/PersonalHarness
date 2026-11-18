@@ -70,8 +70,35 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         _add_report(bucket, report)
     for bucket in models.values():
         _finalize_model(bucket)
+    sources = [report.get("source") or {} for report in reports]
+    code_versions = sorted({
+        str(source.get("code_fingerprint") or "")
+        for source in sources if source.get("code_fingerprint")
+    })
+    scenario_versions = sorted({
+        str(source.get("scenario_fingerprint") or "")
+        for source in sources if source.get("scenario_fingerprint")
+    })
+    code_missing = any(
+        not source.get("code_fingerprint") for source in sources
+    )
+    scenario_missing = any(
+        not source.get("scenario_fingerprint") for source in sources
+    )
     return {
         "models": models,
+        "source": {
+            "code_fingerprints": code_versions,
+            "scenario_fingerprints": scenario_versions,
+            "mixed_code": (
+                len(code_versions) > 1 if not code_missing else None
+            ),
+            "mixed_scenarios": (
+                len(scenario_versions) > 1 if not scenario_missing else None
+            ),
+            "code_complete": not code_missing,
+            "scenarios_complete": not scenario_missing,
+        },
         "reports": [
             {
                 "tag": report.get("tag"),
@@ -79,6 +106,7 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
                 "model": (report.get("model") or {}).get("name"),
                 "mode": report.get("mode"),
                 "started_at": report.get("started_at"),
+                "source": report.get("source") or {},
             }
             for report in reports
         ],
@@ -257,6 +285,10 @@ def _scenario_model_fallback(scenario: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compatibility(value: bool | None) -> str:
+    return "unknown" if value is None else str(value)
+
+
 def render_aggregate(aggregation: dict[str, Any]) -> str:
     models = aggregation["models"]
     names = sorted(models)
@@ -265,6 +297,13 @@ def render_aggregate(aggregation: dict[str, Any]) -> str:
         "",
         f"- Reports: {len(aggregation['reports'])}",
         f"- Models: {', '.join(f'`{name}`' for name in names)}",
+        "",
+        "## Source identity",
+        "",
+        f"- Code fingerprints: {', '.join(aggregation['source']['code_fingerprints']) or 'unavailable'}",
+        f"- Scenario fingerprints: {', '.join(aggregation['source']['scenario_fingerprints']) or 'unavailable'}",
+        f"- Mixed code versions: {_compatibility(aggregation['source']['mixed_code'])}",
+        f"- Mixed scenario versions: {_compatibility(aggregation['source']['mixed_scenarios'])}",
         "",
         "## Overall",
         "",

@@ -6,6 +6,7 @@
       "args": ["examples/mcp/echo_server.py"],
       "autoapprove": true,
       "read_only": true,
+      "external_egress": false,
       "tools_allow": ["echo", "add"]
     },
     "web": {

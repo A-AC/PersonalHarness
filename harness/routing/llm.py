@@ -40,8 +40,10 @@ def _prompt(request: RoutingRequest, cards: list[dict[str, Any]]) -> str:
         lines.append("Previous user turns (context only):")
         for turn in request.recent_user_turns[-2:]:
             lines.append("- " + util.clip(turn, 300))
-    lines.extend(["", "Message to classify:", util.clip(request.text, 4000)])
-    return util.clip("\n".join(lines), 5000)
+    message = "\n\nMessage to classify:\n" + util.clip(request.text, 4000)
+    # Never clip away the object of classification when domain cards are large.
+    prefix = util.clip("\n".join(lines), max(200, 5000 - len(message)))
+    return prefix + message
 
 
 def _parse(raw: str, allowed: set[str]) -> tuple[str, str, str | None]:

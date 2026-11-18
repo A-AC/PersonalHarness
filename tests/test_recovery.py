@@ -249,6 +249,44 @@ def test_backup_and_restore_round_trip(make_app, tmp_path):
                    for t in app2.tasks.list_recent())
 
 
+def test_restore_rejects_unsafe_archive_before_deleting_state(
+    make_app, tmp_path
+):
+    app = make_app.build(scripts=[{"content": "done"}])
+    app.runtime.submit_user_message("hello")
+    archive = app.backup(tmp_path / "backup.zip")
+    marker = app.artifacts_dir / "keep.md"
+    marker.write_text("keep me", encoding="utf-8")
+
+    # A hostile archive: traversal, drive-qualified, and absolute entries.
+    with zipfile.ZipFile(archive, "a") as zf:
+        zf.writestr("artifacts/../escaped.txt", "escaped")
+        zf.writestr("artifacts/C:/escaped.txt", "escaped")
+        zf.writestr("modules/../../escaped.txt", "escaped")
+        zf.writestr("/absolute.txt", "escaped")
+
+    with pytest.raises(ValueError):
+        app.restore(archive)
+
+    # Validation happened first: live state and the open database survive.
+    assert marker.read_text(encoding="utf-8") == "keep me"
+    assert not (app.data_dir / "escaped.txt").exists()
+    assert not (tmp_path / "escaped.txt").exists()
+    assert app.db.query_one("SELECT COUNT(*) AS n FROM tasks")["n"] >= 1
+
+
+def test_restore_accepts_safe_backslash_archive_member_names(make_app, tmp_path):
+    app = make_app.build(default="ok")
+    archive = app.backup(tmp_path / "backup.zip")
+    with zipfile.ZipFile(archive, "a") as zf:
+        zf.writestr("artifacts\\notes\\fact.md", "backslash member")
+
+    outcome = app.restore(archive)
+    assert outcome["restored"] is True
+    restored = app.artifacts_dir / "notes" / "fact.md"
+    assert restored.read_text(encoding="utf-8") == "backslash member"
+
+
 def test_second_writer_process_refuses_to_start(make_app):
     from harness.app import ProcessLock
 

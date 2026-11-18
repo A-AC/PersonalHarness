@@ -442,6 +442,52 @@ def test_quality_rubric_matchers() -> None:
     assert failed == {"no_beta", "short"}
 
 
+def test_required_quality_threshold_gates_scenario(tmp_path: Path) -> None:
+    def scenario(required: bool) -> dict:
+        return {"scenarios": [{
+            "id": f"quality_required_{required}",
+            "name": "Required behavior is asserted",
+            "category": "unit",
+            "modes": ["deterministic"],
+            "steps": [{
+                "kind": "turn", "input": "answer",
+                "script": [{"content": "wrong answer"}],
+                "expect": {
+                    "status": "completed",
+                    "quality": {
+                        "required": required,
+                        "min_score": 0.75,
+                        "rubric": [{"id": "right", "any": ["right answer"]}],
+                    },
+                },
+            }],
+        }]}
+
+    optional = load_scenarios(_write_scenarios(
+        tmp_path / "optional.yaml", scenario(False)
+    ))
+    optional_run = run_evaluation(
+        optional, mode="deterministic", sandbox=tmp_path / "optional-sandbox",
+        results_dir=tmp_path / "optional-results", tag="optional", environ={},
+    )
+    assert optional_run.scenarios[0].status == "passed"
+
+    required = load_scenarios(_write_scenarios(
+        tmp_path / "required.yaml", scenario(True)
+    ))
+    required_run = run_evaluation(
+        required, mode="deterministic", sandbox=tmp_path / "required-sandbox",
+        results_dir=tmp_path / "required-results", tag="required", environ={},
+    )
+    assert required_run.scenarios[0].status == "failed"
+    failure = next(
+        item for item in required_run.scenarios[0].assertions
+        if item.id == "s1.quality.required"
+    )
+    assert failure.status == "failed"
+    assert failure.expected == {"min_score": 0.75, "required": True}
+
+
 def test_quality_regex_count_matchers() -> None:
     step = ScenarioStep(kind="turn", expect={"quality": {"rubric": [{
         "id": "bullets",
@@ -548,9 +594,13 @@ def test_model_metrics_are_recorded(tmp_path: Path) -> None:
     assert report["metrics"]["model"]["calls"] >= 1
     assert report["scenarios"][0]["model"]["calls"] >= 1
     assert report["scenarios"][0]["steps"][0]["model"]["calls"] >= 1
-    assert "Model latency (mean)" in Path(run.report_path).read_text(
-        encoding="utf-8"
-    )
+    report_text = Path(run.report_path).read_text(encoding="utf-8")
+    assert "Model latency (mean)" in report_text
+    assert "Source identity" in report_text
+    source = report["source"]
+    assert len(source["code_fingerprint"]) == 64
+    assert len(source["scenario_fingerprint"]) == 64
+    assert source["version"]
 
 
 def test_resumed_step_model_metrics_are_per_step(tmp_path: Path) -> None:
@@ -590,6 +640,10 @@ def _synthetic_report(
         "run_id": f"run_{tag}",
         "mode": "live",
         "model": {"name": model},
+        "source": {
+            "version": "test", "code_fingerprint": "code-v1",
+            "scenario_fingerprint": "scenarios-v1",
+        },
         "scenarios": [{
             "scenario_id": "quiet_task",
             "category": "unit",
@@ -658,12 +712,43 @@ def test_aggregate_reports_distributions(tmp_path: Path) -> None:
     beta = aggregation["models"]["beta"]
     assert beta["scenario_pass_rate"]["value"] == 0.0
     assert beta["criterion_failures"] == {"brief": 1}
+    assert aggregation["source"] == {
+        "code_fingerprints": ["code-v1"],
+        "scenario_fingerprints": ["scenarios-v1"],
+        "mixed_code": False,
+        "mixed_scenarios": False,
+        "code_complete": True,
+        "scenarios_complete": True,
+    }
+    assert aggregation["reports"][0]["source"]["code_fingerprint"] == "code-v1"
 
     text = render_aggregate(aggregation)
+    assert "Source identity" in text
+    assert "Mixed code versions: False" in text
     assert "Aggregate model comparison" in text
     assert "Per scenario" in text
     assert "`quiet_task`" in text
     assert "Rubric criterion failures" in text
+
+
+def test_aggregate_marks_legacy_source_compatibility_unknown() -> None:
+    current = _synthetic_report(
+        "alpha", "current", status="passed", score=1.0,
+        latency=100, wall=120,
+    )
+    legacy = _synthetic_report(
+        "alpha", "legacy", status="passed", score=1.0,
+        latency=100, wall=120,
+    )
+    legacy.pop("source")
+    aggregation = aggregate_reports([current, legacy])
+    assert aggregation["source"]["mixed_code"] is None
+    assert aggregation["source"]["mixed_scenarios"] is None
+    assert aggregation["source"]["code_complete"] is False
+    assert aggregation["source"]["scenarios_complete"] is False
+    text = render_aggregate(aggregation)
+    assert "Mixed code versions: unknown" in text
+    assert "Mixed scenario versions: unknown" in text
 
 
 def test_cli_aggregate_writes_report(

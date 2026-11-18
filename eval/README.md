@@ -198,11 +198,15 @@ Step options are the YAML keys outside `kind`, `name`, `input`, `script`, and
 
 ## Quality rubrics
 
-A step may include `quality:` next to its state assertions. Rubric criteria are
-local and deterministic (substring, regex, and word counts). They produce a
-weighted score and criterion results, reported separately from assertion
-pass/fail. A low score does **not** change the scenario status; that keeps
-harness correctness and reply quality on separate axes.
+A step may include `quality:` next to its state assertions. Criteria are local
+and deterministic: substring, regex, and word counts. They produce a weighted
+score and per-criterion results. By default this is an optional quality axis
+and does not change scenario status.
+
+Set `required: true` with `min_score` to turn the threshold into an ordinary
+assertion. A low score then fails the scenario and gates the eval command. Use
+required thresholds for safety-critical behavior and optional rubrics for
+subjective polish.
 
 ```yaml
 - kind: turn
@@ -211,6 +215,7 @@ harness correctness and reply quality on separate axes.
     status: completed
     response: {contains: "07:00"}
     quality:
+      required: true       # optional; defaults to false
       min_score: 0.75
       rubric:
         - id: states_time
@@ -226,22 +231,21 @@ harness correctness and reply quality on separate axes.
 
 Criterion keys: `any`, `all`, `none`, `regex`, `min_words`, `max_words`.
 `weight` defaults to 1. `regex` is a presence match by default; add
-`min_matches` and/or `max_matches` to count matches instead. That expresses
-"exactly three bullets" without a second assertion language:
+`min_matches` and/or `max_matches` to count matches instead:
 
 ```yaml
 - id: exactly_three_bullets
   weight: 2
-  regex: "(?m)^\\s*[-*]\\s+\\S"
+  regex: "(?m)^\s*[-*]\s+\S"
   min_matches: 3
   max_matches: 3
 ```
 
-`min_score` records whether the weighted score crossed the threshold; the report
-shows scores, criterion pass rate, and any steps below their minimum.
-
-This is a rubric, not an LLM judge. Use a judge when subjective judgment is the
-thing being measured; the shipped suite stays offline and repeatable.
+The report shows scores, criterion pass rate, and steps below their minimum.
+With `required: true`, a `quality.required` assertion records the same outcome
+in assertion totals and critical-failure counts. This is a deterministic
+rubric, not an LLM judge; use a judge when subjective judgment is the thing
+being measured.
 
 ## Assertions
 

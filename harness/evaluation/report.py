@@ -56,6 +56,18 @@ def render_markdown(run: EvaluationRun) -> str:
         f"- Thinking: {model.get('thinking')}",
         f"- Max tokens: {model.get('max_tokens')}",
         "",
+    ]
+    source = data.get("source") or {}
+    if source:
+        lines.extend([
+            "## Source identity",
+            "",
+            f"- Harness: `{source.get('version')}` / `{source.get('git_sha')}`",
+            f"- Code fingerprint: `{source.get('code_fingerprint')}`",
+            f"- Scenario fingerprint: `{source.get('scenario_fingerprint')}`",
+            "",
+        ])
+    lines.extend([
         "## Summary",
         "",
         "| Metric | Value |",
@@ -80,7 +92,7 @@ def render_markdown(run: EvaluationRun) -> str:
         )),
         _row("Statuses", counts["scenarios_by_status"]),
         "",
-    ]
+    ])
     if data.get("endpoint"):
         endpoint = data["endpoint"]
         lines.extend([
@@ -177,8 +189,8 @@ def render_markdown(run: EvaluationRun) -> str:
         "not language quality or model judgment.",
         "- Live mode measures the named model through the real runtime; it is "
         "not a general capability benchmark.",
-        "- Rubric scores are reported separately from assertion pass rates and "
-        "do not change scenario status.",
+        "- Optional rubric scores stay separate from assertions; required "
+        "quality thresholds are assertions and can change scenario status.",
         "",
         "## Configuration",
         "",

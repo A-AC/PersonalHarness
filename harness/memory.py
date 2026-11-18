@@ -463,7 +463,7 @@ class MemoryManager:
         # Duplicate: identical active content in the same scope.
         existing = self.db.query_one(
             "SELECT * FROM memories WHERE scope=? AND status='active'"
-            " AND content=?",
+            " AND archived_at IS NULL AND content=?",
             (scope_value, content),
         )
         if existing:
@@ -474,9 +474,10 @@ class MemoryManager:
                 "superseded": None,
             }
 
-        # Conflict: same subject (kind + strong keyword overlap) in scope —
-        # the newer statement supersedes the older one.
-        superseded = self._find_conflict(content, scope_value, kind)
+        # Similar text is only an advisory possible conflict. Lexical overlap
+        # cannot prove a correction, so never supersede another row implicitly.
+        possible_conflict = self._find_conflict(content, scope_value, kind)
+        superseded = None
 
         ts = util.iso()
         memory_id = util.new_id("mem")
@@ -498,46 +499,39 @@ class MemoryManager:
                     util.dumps(tags or []),
                 ),
             )
-            if superseded:
-                conn.execute(
-                    "UPDATE memories SET status='superseded', superseded_by=?,"
-                    " updated_at=? WHERE id=?",
-                    (memory_id, ts, superseded["id"]),
-                )
         row = self._row(memory_id)
-        if superseded:
-            superseded_after = dict(superseded)
-            superseded_after["status"] = "superseded"
-            superseded_after["superseded_by"] = memory_id
-            superseded_after["revision"] = int(superseded["revision"]) + 1
-            superseded_after["updated_at"] = ts
-            self._record_revision(
-                superseded, superseded_after, changed_by=origin,
-                reason="superseded by a newer statement",
-            )
         self.events.record(
             "memory.created", task_id=task_id, run_id=run_id,
             data={
                 "memory_id": memory_id, "kind": kind, "scope": scope_value,
-                "superseded": superseded["id"] if superseded else None,
+                "superseded": None,
+                "possible_conflict_id": (
+                    possible_conflict["id"] if possible_conflict else None
+                ),
                 "origin": origin,
             },
         )
-        return {"memory": self._to_public(row), "duplicate": False,
-                "superseded": superseded}
+        return {
+            "memory": self._to_public(row), "duplicate": False,
+            "superseded": None, "possible_conflict": possible_conflict,
+        }
 
     def _find_conflict(
         self, content: str, scope: str, kind: str
     ) -> dict[str, Any] | None:
-        """Same scope+kind with >= 60% keyword overlap looks like a
-        correction of the same subject; the newest statement wins."""
+        """Return one possible lexical conflict for review, never a verdict.
+
+        Archived rows are not candidates. Callers may surface this hint, but
+        only an explicit update/merge may change or supersede existing memory.
+        """
         words = set(util.keywords(content))
         if len(words) < 2:
             return None
         for row in rows_to_dicts(
             self.db.query(
                 "SELECT * FROM memories WHERE scope=? AND kind=? AND"
-                " status='active'",
+                " status='active' AND archived_at IS NULL"
+                " ORDER BY updated_at DESC",
                 (scope, kind),
             )
         ):
@@ -579,6 +573,7 @@ class MemoryManager:
         tags: list[str] | None = None,
         changed_by: str = "user",
         reason: str | None = None,
+        tainted_origin: str | None = None,
     ) -> dict[str, Any]:
         row = self._row(memory_id)
         if row is None:
@@ -596,16 +591,23 @@ class MemoryManager:
             after["expires_at"] = expires_at or None
         if tags is not None:
             after["tags"] = util.dumps(tags)
+        if tainted_origin:
+            provenance = util.loads(row.get("provenance") or "{}", {})
+            provenance.update({
+                "tainted": True,
+                "tainted_origin": util.clip(tainted_origin, 300),
+            })
+            after["provenance"] = util.dumps(provenance)
         after["revision"] = int(row["revision"]) + 1
         after["updated_at"] = util.iso()
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE memories SET content=?, kind=?, expires_at=?, tags=?,"
-                " revision=?, updated_at=? WHERE id=?",
+                " provenance=?, revision=?, updated_at=? WHERE id=?",
                 (
                     after["content"], after["kind"], after["expires_at"],
-                    after["tags"], after["revision"], after["updated_at"],
-                    memory_id,
+                    after["tags"], after["provenance"], after["revision"],
+                    after["updated_at"], memory_id,
                 ),
             )
         self._record_revision(row, after, changed_by, reason)
@@ -616,19 +618,31 @@ class MemoryManager:
         return self._to_public(self._row(memory_id))  # type: ignore[arg-type]
 
     def retract(
-        self, memory_id: str, *, changed_by: str = "user", reason: str | None = None
+        self, memory_id: str, *, changed_by: str = "user",
+        reason: str | None = None, tainted_origin: str | None = None,
     ) -> dict[str, Any]:
         row = self._row(memory_id)
         if row is None:
             raise MemoryError(f"no such memory: {memory_id}")
         after = dict(row)
         after["status"] = "retracted"
+        if tainted_origin:
+            provenance = util.loads(row.get("provenance") or "{}", {})
+            provenance.update({
+                "tainted": True,
+                "tainted_origin": util.clip(tainted_origin, 300),
+            })
+            after["provenance"] = util.dumps(provenance)
         after["revision"] = int(row["revision"]) + 1
         after["updated_at"] = util.iso()
         with self.db.transaction() as conn:
             conn.execute(
-                "UPDATE memories SET status=?, revision=?, updated_at=? WHERE id=?",
-                ("retracted", after["revision"], after["updated_at"], memory_id),
+                "UPDATE memories SET status=?, provenance=?, revision=?,"
+                " updated_at=? WHERE id=?",
+                (
+                    "retracted", after["provenance"], after["revision"],
+                    after["updated_at"], memory_id,
+                ),
             )
         self._record_revision(row, after, changed_by, reason)
         self.events.record(
@@ -790,6 +804,7 @@ class MemoryManager:
         limit: int | None = None,
         include_expired: bool = False,
         include_archived: bool = False,
+        restore_archived: bool = False,
         cross_domain: bool = False,
     ) -> list[dict[str, Any]]:
         """Explainable retrieval: FTS relevance + scope priority + recency.
@@ -803,9 +818,9 @@ class MemoryManager:
 
         Superseded, retracted, and expired rows never enter results. Archived
         rows are excluded by default; with ``include_archived`` they return
-        with a score penalty and an ``archived`` label, and the returned rows
-        are restored (explicit retrieval) with an audit revision. Every result
-        carries ``score_parts`` and a human-readable ``reason``.
+        with a score penalty and an ``archived`` label without changing state.
+        ``restore_archived=True`` additionally restores returned archived rows
+        with an audit revision. Every result carries score parts and a reason.
         """
         limit = limit or int(self.config.get("memory.max_results", 8))
         terms = [t for t in util.keywords(query)][:10]
@@ -917,7 +932,7 @@ class MemoryManager:
                 if not item.get("cross_domain") or item["id"] in allowed_cross
             ]
         final = results[:limit]
-        if include_archived:
+        if include_archived and restore_archived:
             for item in final:
                 if not item.get("archived") or not item.get("archived_at"):
                     continue
@@ -926,6 +941,9 @@ class MemoryManager:
                     reason="explicit retrieval with include_archived",
                 )
                 item["restored"] = True
+                item["reason"] = str(item.get("reason") or "") + (
+                    "; restored by explicit request"
+                )
                 item["restored_from_archive_at"] = item["archived_at"]
                 item["archived_at"] = None
         return final
@@ -957,8 +975,7 @@ class MemoryManager:
             reason += "; legacy domain:general treated as global"
         if archived:
             reason += (
-                "; archived: included because archived memories were "
-                "requested, and restored by this explicit retrieval"
+                "; archived: included because archived memories were requested"
             )
         out["reason"] = reason
         out["archived"] = archived
@@ -1070,6 +1087,17 @@ class MemoryManager:
         )
         return [self._to_public(r) for r in rows_to_dicts(rows)]
 
+    def list_trusted(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Live, unarchived rows without tainted provenance, newest first."""
+        rows = self.db.query(
+            "SELECT * FROM memories WHERE status='active'"
+            " AND archived_at IS NULL"
+            " AND COALESCE(json_extract(provenance, '$.tainted'), 0)=0"
+            " ORDER BY updated_at DESC LIMIT ?",
+            (max(0, int(limit)),),
+        )
+        return [self._to_public(row) for row in rows_to_dicts(rows)]
+
     def revisions(self, memory_id: str) -> list[dict[str, Any]]:
         rows = rows_to_dicts(
             self.db.query(
@@ -1085,11 +1113,20 @@ class MemoryManager:
 
     def read_artifact(self, rel_path: str, limit: int = 8000) -> str:
         """Bounded read of a memory artifact (path must be inside the
-        artifacts directory; no traversal)."""
+        artifacts directory; no traversal).
+
+        Containment is checked with a path-relative test, not a string
+        prefix: a sibling such as ``artifacts_evil/`` shares the prefix but is
+        outside the directory.
+        """
         base = self.artifacts_dir.resolve()
         candidate = (base / rel_path).resolve()
-        if not str(candidate).startswith(str(base)):
-            raise MemoryError("artifact path escapes the artifacts directory")
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            raise MemoryError(
+                "artifact path escapes the artifacts directory"
+            ) from None
         if not candidate.is_file():
             raise MemoryError(f"missing artifact: {rel_path}")
         return util.clip(candidate.read_text(encoding="utf-8", errors="replace"), limit)

@@ -313,6 +313,63 @@ def _configure_web(app, tmp_path: Path, url: str) -> None:
     app.modules.reload()
 
 
+def test_second_external_read_requires_approval_after_taint(make_app, tmp_path):
+    app = make_app.build(scripts=[
+        {"tool_calls": [{"name": "web_search",
+                         "arguments": {"query": "first"}}]},
+        {"tool_calls": [{"name": "web_search",
+                         "arguments": {"query": "second"}}]},
+        {"content": "done"},
+    ])
+    results = [{
+        "title": "Example", "url": "http://example.test/page",
+        "content": "Untrusted snippet.",
+    }]
+    with _searx_stub(results) as stub:
+        _configure_web(app, tmp_path, f"http://127.0.0.1:{stub.server_port}")
+        result = app.runtime.submit_user_message("search twice")
+
+        assert result.status == "waiting_approval"
+        approval = app.approvals.pending()[0]
+        assert approval["tool"] == "web_search"
+        assert approval["arguments"]["query"] == "second"
+        assert "transmit data" in approval["reason"]
+        assert app.runtime.approval_tool_spec(approval).external_egress is True
+        # The second request has not happened before the user approves it.
+        assert stub.queries == ["first"]
+
+        result = app.runtime.decide_approval(approval["id"], "approve")
+        assert result.status == "completed"
+        assert stub.queries == ["first", "second"]
+
+
+def test_local_read_only_tool_does_not_get_egress_escalation(make_app, tmp_path):
+    from harness.tools import ToolSpec
+
+    app = make_app.build(scripts=[
+        {"tool_calls": [{"name": "web_search",
+                         "arguments": {"query": "first"}}]},
+        {"tool_calls": [{"name": "local_read", "arguments": {}}]},
+        {"content": "done"},
+    ])
+    app.tools.register(ToolSpec(
+        name="local_read", description="local read",
+        parameters={"type": "object", "properties": {}}, risk="low",
+        handler=lambda ctx, args: {"content": "local"},
+        read_only=True, external_egress=False,
+    ))
+    results = [{
+        "title": "Example", "url": "http://example.test/page",
+        "content": "Untrusted snippet.",
+    }]
+    with _searx_stub(results) as stub:
+        _configure_web(app, tmp_path, f"http://127.0.0.1:{stub.server_port}")
+        result = app.runtime.submit_user_message("search then read locally")
+
+    assert result.status == "completed"
+    assert app.approvals.pending() == []
+
+
 def test_harness_envelopes_untrusted_results_with_distinct_nonces(
     make_app, tmp_path
 ):
@@ -337,8 +394,16 @@ def test_harness_envelopes_untrusted_results_with_distinct_nonces(
             app, tmp_path, f"http://127.0.0.1:{stub.server_port}"
         )
         result = app.runtime.submit_user_message("search twice, then act")
+        approvals = 0
+        while result.status == "waiting_approval":
+            approvals += 1
+            assert approvals <= 3
+            result = app.runtime.decide_approval(
+                result.approval_id, "approve"
+            )
 
-    assert result.status == "waiting_approval"
+    assert result.status == "completed"
+    assert approvals == 3  # notes, second external request, durable memory
     run = app.db.query_one(
         "SELECT transcript FROM runs WHERE id=?", (result.run_id,)
     )

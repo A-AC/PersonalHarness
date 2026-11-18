@@ -663,15 +663,66 @@ class App:
         self.events.record("backup.created", data={"path": str(target)})
         return target
 
+    @staticmethod
+    def _archive_entries(
+        names: list[str],
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Validate archive entry names before any existing state is touched.
+
+        Returns ``{area: [(archive_name, relative_path), ...]}`` for the
+        artifacts and modules trees. Unsafe names (absolute paths, drive
+        prefixes, ``..`` segments, or NTFS alternate-data-stream colons) raise
+        ``ValueError`` so a hostile archive is rejected while the live data is
+        still intact. Unknown top-level entries are ignored, as before.
+        """
+        entries: dict[str, list[tuple[str, str]]] = {
+            "artifacts": [], "modules": [],
+        }
+        for raw in names:
+            text = str(raw or "").replace("\\", "/")
+            if not text or text.endswith("/"):
+                continue  # directory entry
+            if text in ("harness.db", "config.yaml"):
+                continue
+            if text.startswith("/"):
+                raise ValueError(
+                    f"unsafe archive entry (absolute path): {raw}"
+                )
+            parts = [part for part in text.split("/") if part not in ("", ".")]
+            if not parts or any(part == ".." for part in parts):
+                raise ValueError(
+                    f"unsafe archive entry (traversal): {raw}"
+                )
+            if any(":" in part for part in parts):
+                raise ValueError(
+                    f"unsafe archive entry (drive or stream): {raw}"
+                )
+            area = parts[0]
+            if area not in entries:
+                continue
+            relative = parts[1:]
+            if not relative:
+                raise ValueError(
+                    f"unsafe archive entry (no path inside {area}/): {raw}"
+                )
+            entries[area].append((str(raw), "/".join(relative)))
+        return entries
+
     def restore(self, archive: Path) -> dict[str, Any]:
         """Replace state from a backup. Requires exclusive access; the
-        process must restart afterwards so all handles reopen cleanly."""
+        process must restart afterwards so all handles reopen cleanly.
+
+        Every entry is validated before the database is closed or any live
+        tree is deleted, so a hostile archive cannot discard current state and
+        then write outside ``artifacts/`` or ``modules/``.
+        """
         if not archive.is_file():
             raise FileNotFoundError(str(archive))
         with zipfile.ZipFile(archive) as zf:
             names = zf.namelist()
             if "harness.db" not in names:
                 raise ValueError("not a harness backup (missing harness.db)")
+            entries = self._archive_entries(names)
             db_path = self.db.path
             self.db.close()
             db_path.unlink(missing_ok=True)
@@ -680,30 +731,26 @@ class App:
             zf.extract("harness.db", self.data_dir)
             if "config.yaml" in names:
                 zf.extract("config.yaml", self.data_dir)
-            if any(n.startswith("artifacts/") for n in names):
+            if entries["artifacts"]:
                 shutil.rmtree(self.artifacts_dir, ignore_errors=True)
                 self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-                for name in names:
-                    if name.startswith("artifacts/") and not name.endswith("/"):
-                        rel = name[len("artifacts/"):]
-                        dest = self.artifacts_dir / rel
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        with zf.open(name) as src, open(dest, "wb") as out:
-                            shutil.copyfileobj(src, out)
-            if any(n.startswith("modules/") for n in names):
+                for name, relative in entries["artifacts"]:
+                    dest = self.artifacts_dir.joinpath(*relative.split("/"))
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+            if entries["modules"]:
                 modules_dir = (
                     self.data_dir
                     / str(self.config.get("modules.dir", "modules"))
                 )
                 shutil.rmtree(modules_dir, ignore_errors=True)
                 modules_dir.mkdir(parents=True, exist_ok=True)
-                for name in names:
-                    if name.startswith("modules/") and not name.endswith("/"):
-                        rel = name[len("modules/"):]
-                        dest = modules_dir / rel
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        with zf.open(name) as src, open(dest, "wb") as out:
-                            shutil.copyfileobj(src, out)
+                for name, relative in entries["modules"]:
+                    dest = modules_dir.joinpath(*relative.split("/"))
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
         log.info("state restored from %s", archive)
         return {"restored": True, "restart_required": True}
 

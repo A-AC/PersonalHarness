@@ -240,3 +240,27 @@ def test_hybrid_asks_llm_when_margin_is_narrow(make_app):
     result = app.runtime.submit_user_message("alpha task")
     assert app.tasks.get(result.task_id)["domain_id"] == "dom_beta"
     assert llm.calls == 1
+
+
+
+def test_llm_prompt_preserves_message_with_many_domain_cards():
+    from harness.routing.base import RoutingRequest
+    from harness.routing.cards import domain_card
+    from harness.routing.llm import _prompt
+
+    cards = [
+        domain_card({
+            "id": f"dom_{index}", "name": f"Domain {index}",
+            "description": "long description " * 30,
+            "examples": ["example phrase " * 20],
+            "summary": "summary " * 30, "status": "active",
+        })
+        for index in range(40)
+    ]
+    request = RoutingRequest(
+        text="THE_ACTUAL_MESSAGE_MUST_SURVIVE", recent_user_turns=[],
+        domains=[], trusted=True, source="web", trigger=None, task_meta=None,
+    )
+    prompt = _prompt(request, cards)
+    assert len(prompt) <= 5000
+    assert prompt.endswith("THE_ACTUAL_MESSAGE_MUST_SURVIVE")

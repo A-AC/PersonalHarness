@@ -62,6 +62,7 @@ def _register_module_tool(app, module_id, tool_name, *, scope, domain_id=None):
 
 def test_boost_recalls_cross_domain_fact_with_origin_label(make_app):
     app = make_app.build(default="ok")
+    app.config.set("memory.cross_domain", "boost")
     health = _domain(app, "dom_health", "Health", "health and exercise")
     clothing = _domain(app, "dom_clothing", "Clothing", "wardrobe choices")
     fact = app.memory.remember(
@@ -96,6 +97,7 @@ def test_boost_recalls_cross_domain_fact_with_origin_label(make_app):
 
 def test_boost_never_uses_sibling_fact_as_no_hit_filler(make_app):
     app = make_app.build(default="ok")
+    app.config.set("memory.cross_domain", "boost")
     health = _domain(app, "dom_health", "Health", "health and exercise")
     app.memory.remember(
         "The user trains for marathons at dawn.",
@@ -113,6 +115,7 @@ def test_boost_never_uses_sibling_fact_as_no_hit_filler(make_app):
 
 def test_scope_tiers_and_cross_domain_cap_keep_highest_siblings(make_app):
     app = make_app.build(default="ok")
+    app.config.set("memory.cross_domain", "boost")
     current = _domain(app, "dom_current", "Current", "current work")
     sibling_a = _domain(app, "dom_sibling_a", "Sibling A", "sibling work")
     sibling_b = _domain(app, "dom_sibling_b", "Sibling B", "sibling work")
@@ -159,6 +162,7 @@ def test_scope_tiers_and_cross_domain_cap_keep_highest_siblings(make_app):
 
 def test_archived_and_retracted_sibling_rows_never_cross_over(make_app):
     app = make_app.build(default="ok")
+    app.config.set("memory.cross_domain", "boost")
     health = _domain(app, "dom_health", "Health", "health and exercise")
     archived = app.memory.remember(
         "The archived sibling uses a cobalt kayak.",
@@ -284,6 +288,7 @@ def test_legacy_general_rows_read_global_and_new_general_writes_are_global(make_
 
 def test_composite_clothing_memory_and_global_weather_tool_compose(make_app):
     app = make_app.build(default="ok")
+    app.config.set("memory.cross_domain", "boost")
     clothing = _domain(app, "dom_clothing", "Clothing", "wardrobe choices")
     app.memory.remember(
         "The user wears a slate raincoat in drizzle.",

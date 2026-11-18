@@ -163,6 +163,7 @@ class SubAgentManager:
             "child_task_id": child["id"],
             "reason": util.clip(reason, 1000),
             "result": util.clip(result.message or reason, self._max_result_chars()),
+            "untrusted_sources": self.runtime._taint_sources(result.run_id),
         }
 
     # ------------------------------------------------------------------
@@ -187,6 +188,8 @@ class SubAgentManager:
         meta["result_path"] = rel_path
         meta["result_run_id"] = result.run_id
         meta["goal_hash"] = goal_hash
+        untrusted_sources = self.runtime._taint_sources(result.run_id)
+        meta["untrusted_sources"] = untrusted_sources
         self.tasks.set_meta(child["id"], meta)
 
         self.events.record(
@@ -208,6 +211,7 @@ class SubAgentManager:
             "child_run_id": result.run_id,
             "result": clipped,
             "artifact_path": rel_path,
+            "untrusted_sources": untrusted_sources,
             "reused": False,
         }
 
@@ -235,6 +239,7 @@ class SubAgentManager:
                     str(meta.get("result") or ""), self._max_result_chars()
                 ),
                 "artifact_path": meta.get("result_path"),
+                "untrusted_sources": list(meta.get("untrusted_sources") or []),
                 "reused": True,
             }
         reason = meta.get("blocked_reason") or (

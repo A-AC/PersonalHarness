@@ -33,6 +33,7 @@ scenarios:
             iterations_max: 4
             tool_calls_max: 3
           quality:
+            required: true
             min_score: 0.75
             rubric:
               - id: admits_unknown
@@ -82,6 +83,7 @@ scenarios:
             iterations_max: 4
             tool_calls_max: 2
           quality:
+            required: true
             min_score: 0.75
             rubric:
               - id: flags_conflict
@@ -227,6 +229,7 @@ scenarios:
             iterations_max: 3
             tool_calls_max: 1
           quality:
+            required: true
             min_score: 0.8
             rubric:
               - id: refuses

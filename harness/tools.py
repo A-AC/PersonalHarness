@@ -13,6 +13,7 @@ permissions.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
 import subprocess
@@ -32,6 +33,56 @@ from .store import Domains, Events, Messages, Tasks
 
 RISK_LOW = "low"
 RISK_CONFIRM = "confirm"
+
+# Fields persisted with a run's capability snapshot. The prompt schema and
+# every permission decision made for that run read these frozen values, so a
+# module reload or registry replacement cannot change an existing run.
+FROZEN_SPEC_FIELDS = (
+    "name", "description", "parameters", "risk", "module", "side_effects",
+    "external_egress", "read_only", "untrusted_output", "scope",
+    "summary_template",
+)
+
+# Only these inherited variables reach an MCP subprocess. They are OS/runtime
+# essentials: locating an absolute interpreter, temp files, locale, and the
+# Windows system directories. Harness/model secrets and every unrelated
+# variable stay in the parent process. Configured servers add explicit values
+# through their manifest ``env`` (stored in the private sidecar), and only the
+# names they declare are inherited from the harness environment.
+MCP_ENV_ALLOWLIST = frozenset({
+    "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC",
+    "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "USER", "USERNAME", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+    "LC_MESSAGES", "TZ", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+    "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+})
+
+
+def mcp_process_env(
+    declared: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build one MCP child's environment from an allowlist + declared values.
+
+    Nothing else from ``os.environ`` is forwarded. Process lifetime is not a
+    security boundary: a configured server is native code and can read its own
+    files and the network, which is why the module surface is small and the
+    command allowlist exists. This function only prevents accidental secret
+    inheritance.
+    """
+    env = {
+        name: os.environ[name]
+        for name in MCP_ENV_ALLOWLIST
+        if name in os.environ
+    }
+    for name, value in (declared or {}).items():
+        if value is None:
+            continue
+        text = str(name)
+        if not text:
+            continue
+        env[text] = str(value)
+    return env
 
 # Sub-agents may only use low-risk tools and may never delegate again or create
 # domains. Progress is reported to the parent as a normal tool result.
@@ -69,6 +120,9 @@ class ToolSpec:
     # and taints the run for later steps. Unknown provenance is treated as
     # side-effecting: only builtins and modules that opt in are exempt.
     side_effects: bool = False
+    # Can transmit prompt-derived arguments to an external system. This is
+    # independent of mutation: a read-only web request can still exfiltrate.
+    external_egress: bool = False
     read_only: bool = False
     untrusted_output: bool = False
     # Eligibility scope of the owning module (global | domain | adaptive).
@@ -183,11 +237,16 @@ class ToolRegistry:
         self._tools: dict[str, ToolSpec] = {}
         # Declared risk before any persistent per-tool override.
         self._base_risks: dict[str, str] = {}
+        # Guards every read and mutation of the tool map. It is deliberately
+        # never held while a handler runs or while an MCP subprocess starts:
+        # callers resolve a spec under the lock and then act on the copy.
+        self._lock = threading.RLock()
         self._register_builtins()
 
     # -- registration -----------------------------------------------------
 
-    def register(self, spec: ToolSpec) -> None:
+    def _prepare(self, spec: ToolSpec) -> ToolSpec:
+        """Validate one spec and apply persistent risk overrides."""
         if _BANNED.match(spec.name):
             raise ToolDenied(
                 f"refusing to register tool '{spec.name}': shell/command "
@@ -203,11 +262,11 @@ class ToolRegistry:
             effective = RISK_CONFIRM
         if effective not in (RISK_LOW, RISK_CONFIRM):
             raise ToolError(f"invalid risk override for {spec.name}")
-        self._base_risks[spec.name] = spec.risk
-        self._tools[spec.name] = ToolSpec(
+        return ToolSpec(
             name=spec.name, description=spec.description,
             parameters=spec.parameters, risk=effective, handler=spec.handler,
             module=spec.module, side_effects=bool(spec.side_effects),
+            external_egress=bool(spec.external_egress),
             read_only=bool(spec.read_only),
             untrusted_output=bool(spec.untrusted_output),
             scope=spec.scope,
@@ -215,6 +274,58 @@ class ToolRegistry:
                 spec.summary_template
             ),
         )
+
+    def register(self, spec: ToolSpec) -> None:
+        prepared = self._prepare(spec)
+        with self._lock:
+            self._base_risks[prepared.name] = spec.risk
+            self._tools[prepared.name] = prepared
+
+    def replace_module_tools(
+        self, module_id: str, specs: list[ToolSpec]
+    ) -> list[tuple[str, str]]:
+        """Atomically replace every tool owned by one module.
+
+        Discovery (including the heartbeat) uses this so a tool the server no
+        longer advertises disappears instead of lingering forever. The swap
+        happens under the registry lock, so a concurrent iteration sees the
+        whole old set or the whole new set, never a partial mutation.
+
+        Returns the refused ``(name, reason)`` pairs so the caller can record
+        them; a name owned by another module is never taken over. Every
+        prepared name is checked against other owners before anything is
+        removed, so a collision leaves the module's previous surface untouched
+        instead of dropping tools the replacement cannot install.
+        """
+        prepared: list[tuple[ToolSpec, str]] = []
+        refused: list[tuple[str, str]] = []
+        for spec in specs:
+            try:
+                prepared.append((self._prepare(spec), spec.risk))
+            except (ToolDenied, ToolError) as exc:
+                refused.append((spec.name, str(exc)))
+        with self._lock:
+            collisions = [
+                (spec.name, "name already registered")
+                for spec, _ in prepared
+                if (existing := self._tools.get(spec.name)) is not None
+                and existing.module != module_id
+            ]
+            if collisions:
+                # Refuse the whole replacement: keeping the old surface is
+                # strictly better than deleting it for a swap that cannot be
+                # applied in full.
+                return refused + collisions
+            for name in [
+                name for name, spec in self._tools.items()
+                if spec.module == module_id
+            ]:
+                self._tools.pop(name, None)
+                self._base_risks.pop(name, None)
+            for spec, base_risk in prepared:
+                self._tools[spec.name] = spec
+                self._base_risks[spec.name] = base_risk
+        return refused
 
     @staticmethod
     def _sanitize_summary_template(value: Any) -> str:
@@ -236,17 +347,34 @@ class ToolRegistry:
 
     def set_risk_override(self, name: str, risk: str | None) -> None:
         """Set or clear a persistent per-tool risk override."""
-        spec = self.resolve_optional(name)
-        if spec is None:
-            raise ToolError(f"unknown tool: {name}")
-        if risk not in (RISK_LOW, RISK_CONFIRM, None):
-            raise ToolError(
-                f"invalid risk override for {name}: {risk}; expected "
-                "'low', 'confirm', or null"
-            )
-        if risk == RISK_LOW and spec.side_effects:
-            raise ToolError(
-                f"cannot lower risk for side-effecting tool {name} to 'low'"
+        with self._lock:
+            spec = self._tools.get(name)
+            if spec is None:
+                raise ToolError(f"unknown tool: {name}")
+            if risk not in (RISK_LOW, RISK_CONFIRM, None):
+                raise ToolError(
+                    f"invalid risk override for {name}: {risk}; expected "
+                    "'low', 'confirm', or null"
+                )
+            if risk == RISK_LOW and spec.side_effects:
+                raise ToolError(
+                    f"cannot lower risk for side-effecting tool {name} to 'low'"
+                )
+            effective = risk or self._base_risks.get(name, spec.risk)
+            if effective not in (RISK_LOW, RISK_CONFIRM):
+                raise ToolError(
+                    f"invalid effective risk for {name}: {effective}"
+                )
+            self._tools[name] = ToolSpec(
+                name=spec.name, description=spec.description,
+                parameters=spec.parameters, risk=effective,
+                handler=spec.handler, module=spec.module,
+                side_effects=bool(spec.side_effects),
+                external_egress=bool(spec.external_egress),
+                read_only=bool(spec.read_only),
+                untrusted_output=bool(spec.untrusted_output),
+                scope=spec.scope,
+                summary_template=spec.summary_template,
             )
         raw = self.config.get("tools.risk_overrides", {}) or {}
         overrides = dict(raw) if isinstance(raw, dict) else {}
@@ -256,18 +384,6 @@ class ToolRegistry:
             overrides[name] = risk
         self.config.set("tools.risk_overrides", overrides)
         save_config(self.config)
-        effective = risk or self._base_risks.get(name, spec.risk)
-        if effective not in (RISK_LOW, RISK_CONFIRM):
-            raise ToolError(f"invalid effective risk for {name}: {effective}")
-        self._tools[name] = ToolSpec(
-            name=spec.name, description=spec.description,
-            parameters=spec.parameters, risk=effective, handler=spec.handler,
-            module=spec.module, side_effects=bool(spec.side_effects),
-            read_only=bool(spec.read_only),
-            untrusted_output=bool(spec.untrusted_output),
-            scope=spec.scope,
-            summary_template=spec.summary_template,
-        )
         self.events.record(
             "tools.risk_override",
             data={"tool": name, "risk": effective, "cleared": risk is None},
@@ -280,12 +396,14 @@ class ToolRegistry:
         here makes a disabled module immediately uncallable while a run
         snapshot simply stops disclosing names that no longer exist.
         """
-        names = [
-            name for name, spec in self._tools.items()
-            if spec.module == module_id
-        ]
-        for name in names:
-            self._tools.pop(name, None)
+        with self._lock:
+            names = [
+                name for name, spec in self._tools.items()
+                if spec.module == module_id
+            ]
+            for name in names:
+                self._tools.pop(name, None)
+                self._base_risks.pop(name, None)
         return names
 
     @staticmethod
@@ -311,17 +429,21 @@ class ToolRegistry:
         self, name: str, *, allowed: set[str] | frozenset[str] | None = None,
         role: str | None = None,
     ) -> ToolSpec:
-        spec = self._tools.get(name)
+        with self._lock:
+            spec = self._tools.get(name)
+            available = ", ".join(sorted(self._tools))
+            outside_snapshot = (
+                allowed is not None and name not in allowed
+            )
         if spec is None:
             raise ToolError(
-                f"unknown tool: {name} (available: "
-                f"{', '.join(sorted(self._tools))})"
+                f"unknown tool: {name} (available: {available})"
             )
         # Visibility is enforced twice: the schema is filtered per run, and a
         # call by name is refused when the tool is not in the run snapshot.
         # Hiding a schema while still accepting the call is a permission
         # bypass, so this check is deliberately independent of risk class.
-        if allowed is not None and name not in allowed:
+        if outside_snapshot:
             raise ToolDenied(
                 f"tool '{name}' is not available in this run"
             )
@@ -330,16 +452,55 @@ class ToolRegistry:
             raise ToolDenied(restriction)
         return spec
 
+    def resolve_frozen(
+        self, name: str, *, snapshot: dict[str, Any] | None,
+        role: str | None = None,
+    ) -> ToolSpec:
+        """Resolve a call against a run's frozen capability snapshot.
+
+        The handler always comes from the live registry, but the description,
+        parameters, risk, and trust flags come from the snapshot taken when
+        the run started. A tool that has since been removed or disabled fails
+        closed instead of being resurrected from the snapshot.
+        """
+        names = snapshot.get("names") if isinstance(snapshot, dict) else None
+        in_snapshot = not isinstance(names, list) or name in names
+        with self._lock:
+            current = self._tools.get(name)
+        if current is None:
+            # A name that never existed is an unknown tool; a name the run
+            # froze but the registry lost was removed after the run started.
+            if not in_snapshot:
+                raise ToolError(f"unknown tool: {name}")
+            raise ToolError(
+                f"tool '{name}' is no longer available in this run"
+            )
+        if not in_snapshot:
+            raise ToolDenied(f"tool '{name}' is not available in this run")
+        frozen = self.frozen_specs(snapshot)
+        entry = frozen.get(name) if frozen is not None else None
+        spec = (
+            self._frozen_tool_spec(name, entry, current)
+            if entry is not None else current
+        )
+        restriction = self.role_restriction(spec, role)
+        if restriction is not None:
+            raise ToolDenied(restriction)
+        return spec
+
     def names(self) -> list[str]:
-        return sorted(self._tools)
+        with self._lock:
+            return sorted(self._tools)
 
     def resolve_optional(self, name: str) -> ToolSpec | None:
         """Look up a tool without raising (used by module registration)."""
-        return self._tools.get(name)
+        with self._lock:
+            return self._tools.get(name)
 
     def specs(self) -> list[ToolSpec]:
         """Every registered tool in deterministic declaration order."""
-        return list(self._tools.values())
+        with self._lock:
+            return list(self._tools.values())
 
     @staticmethod
     def _schema(spec: ToolSpec) -> dict[str, Any]:
@@ -354,7 +515,96 @@ class ToolRegistry:
 
     def schemas(self) -> list[dict[str, Any]]:
         """OpenAI function schemas for every registered tool."""
-        return [self._schema(spec) for spec in self._tools.values()]
+        with self._lock:
+            specs = list(self._tools.values())
+        return [self._schema(spec) for spec in specs]
+
+    @classmethod
+    def freeze_spec(cls, spec: ToolSpec) -> dict[str, Any]:
+        """The durable definition of one selected tool for a run snapshot."""
+        frozen: dict[str, Any] = {}
+        for field in FROZEN_SPEC_FIELDS:
+            value = getattr(spec, field)
+            if field == "parameters":
+                value = util.loads(util.dumps(value), {})
+            frozen[field] = value
+        return frozen
+
+    @staticmethod
+    def frozen_specs(
+        snapshot: dict[str, Any] | None,
+    ) -> dict[str, dict[str, Any]] | None:
+        """Return the snapshot's frozen per-tool definitions, if it has them.
+
+        Old snapshots persisted only names; those return ``None`` and the
+        registry's live definitions are used, exactly as before.
+        """
+        if not isinstance(snapshot, dict):
+            return None
+        entries = snapshot.get("specs")
+        if not isinstance(entries, list):
+            return None
+        frozen: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                frozen[entry["name"]] = entry
+        return frozen
+
+    @staticmethod
+    def _schema_from_frozen(entry: dict[str, Any]) -> dict[str, Any]:
+        parameters = entry.get("parameters")
+        return {
+            "type": "function",
+            "function": {
+                "name": str(entry.get("name") or ""),
+                "description": str(entry.get("description") or ""),
+                "parameters": (
+                    parameters if isinstance(parameters, dict)
+                    else {"type": "object", "properties": {}}
+                ),
+            },
+        }
+
+    @staticmethod
+    def _frozen_tool_spec(
+        name: str, entry: dict[str, Any], current: ToolSpec
+    ) -> ToolSpec:
+        """A live handler wearing the frozen definition from a run snapshot."""
+        risk = entry.get("risk")
+        parameters = entry.get("parameters")
+        return ToolSpec(
+            name=name,
+            description=str(
+                entry.get("description")
+                if entry.get("description") is not None
+                else current.description
+            ),
+            parameters=(
+                parameters if isinstance(parameters, dict)
+                else current.parameters
+            ),
+            risk=risk if risk in (RISK_LOW, RISK_CONFIRM) else current.risk,
+            handler=current.handler,
+            module=str(entry.get("module") or current.module),
+            side_effects=(
+                bool(entry.get("side_effects"))
+                if "side_effects" in entry else current.side_effects
+            ),
+            external_egress=(
+                bool(entry.get("external_egress"))
+                if "external_egress" in entry else current.external_egress
+            ),
+            read_only=(
+                bool(entry.get("read_only"))
+                if "read_only" in entry else current.read_only
+            ),
+            untrusted_output=(
+                bool(entry.get("untrusted_output"))
+                if "untrusted_output" in entry else current.untrusted_output
+            ),
+            scope=str(entry.get("scope") or current.scope),
+            summary_template=str(entry.get("summary_template") or ""),
+        )
 
     def schemas_for(
         self,
@@ -380,7 +630,9 @@ class ToolRegistry:
         entries = []
         exclusions: list[dict[str, Any]] = []
         excluded = set(exclude_names or ())
-        for index, spec in enumerate(self._tools.values()):
+        with self._lock:
+            live_specs = list(self._tools.values())
+        for index, spec in enumerate(live_specs):
             if spec.name in excluded:
                 exclusions.append({
                     "tool": spec.name,
@@ -465,6 +717,9 @@ class ToolRegistry:
             "role": role,
             "schemas": [entry["schema"] for entry in kept],
             "names": [entry["spec"].name for entry in kept],
+            # Frozen policy travels with the schemas so the run never has to
+            # read a later reload's risk/trust metadata.
+            "specs": [self.freeze_spec(entry["spec"]) for entry in kept],
             "modules": sorted({entry["spec"].module for entry in kept}),
             "exclusions": exclusions,
             "tokens": total,
@@ -488,14 +743,45 @@ class ToolRegistry:
         """Rebuild the schemas for a persisted run snapshot.
 
         Unknown names are ignored: a module may have been disabled since the
-        run began, and a snapshot must not resurrect it.
+        run began, and a snapshot must not resurrect it. Kept for old name-only
+        snapshots; new snapshots use :meth:`schemas_for_snapshot`.
         """
         wanted = set(names)
         return [
             self._schema(spec)
-            for spec in self._tools.values()
+            for spec in self.specs()
             if spec.name in wanted
         ]
+
+    def schemas_for_snapshot(
+        self, snapshot: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Rebuild a run's schemas from its frozen definitions.
+
+        A tool that has since been removed is dropped (the same behaviour the
+        name-only form always had); every surviving tool keeps the exact
+        description and parameters it had when the run started. An old
+        snapshot without frozen specs falls back to the live definitions.
+        """
+        names = snapshot.get("names") if isinstance(snapshot, dict) else None
+        if not isinstance(names, list):
+            return []
+        frozen = self.frozen_specs(snapshot)
+        if frozen is None:
+            return self.schemas_for_names(names)
+        live = set(self.names())
+        schemas: list[dict[str, Any]] = []
+        for name in names:
+            if name not in live:
+                continue
+            entry = frozen.get(name)
+            if entry is not None:
+                schemas.append(self._schema_from_frozen(entry))
+                continue
+            spec = self.resolve_optional(name)
+            if spec is not None:
+                schemas.append(self._schema(spec))
+        return schemas
 
     # -- execution --------------------------------------------------------
 
@@ -503,9 +789,18 @@ class ToolRegistry:
         self, call: ToolCall, *,
         allowed: set[str] | frozenset[str] | None = None,
         role: str | None = None,
+        snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Public validation used by the runtime before creating approvals."""
-        spec = self.resolve(call.name, allowed=allowed, role=role)
+        """Public validation used by the runtime before creating approvals.
+
+        With ``snapshot`` the arguments are validated against that run's frozen
+        parameters, never a later reload's definition.
+        """
+        spec = (
+            self.resolve_frozen(call.name, snapshot=snapshot, role=role)
+            if snapshot is not None
+            else self.resolve(call.name, allowed=allowed, role=role)
+        )
         validated = validate_arguments(spec, call.arguments)
         if spec.name == "create_domain":
             validate_create_domain_arguments(validated)
@@ -540,21 +835,28 @@ class ToolRegistry:
         approval_id: str | None = None,
         allowed_names: set[str] | frozenset[str] | None = None,
         role: str | None = None,
+        snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate + dispatch + record. Never raises for tool-level problems;
         those are captured as status='failed'/'denied'. When ``execution_id``
         is given (an approval resumed), the existing record is completed in
         place instead of creating a duplicate row. ``allowed_names`` is the
-        run's capability snapshot; a name outside it is denied, not run."""
+        run's capability snapshot; a name outside it is denied, not run.
+        ``snapshot`` additionally freezes the schema and policy used here."""
         started = util.iso()
         started_monotonic = time.monotonic()
         execution_id = execution_id or util.new_id("ex")
         try:
-            spec = self.resolve(
-                call.name, allowed=allowed_names, role=role
-            )
+            if snapshot is not None:
+                spec = self.resolve_frozen(
+                    call.name, snapshot=snapshot, role=role
+                )
+            else:
+                spec = self.resolve(
+                    call.name, allowed=allowed_names, role=role
+                )
             arguments = self.validate(
-                call, allowed=allowed_names, role=role
+                call, allowed=allowed_names, role=role, snapshot=snapshot
             )
         except (ToolError, ToolDenied) as exc:
             self._record(
@@ -778,8 +1080,13 @@ class ToolRegistry:
                     },
                     "include_archived": {
                         "type": "boolean",
-                        "description": "Also search archived memories. An "
-                            "archived hit is restored and labelled.",
+                        "description": "Also search archived memories without "
+                            "restoring them; archived hits are labelled.",
+                    },
+                    "restore_archived": {
+                        "type": "boolean",
+                        "description": "Restore archived hits. Requires "
+                            "include_archived=true; otherwise hits are read-only.",
                     },
                 },
                 "required": ["query"],
@@ -800,6 +1107,8 @@ class ToolRegistry:
                 "required": ["path"],
             },
             risk=RISK_LOW,
+            # Artifacts can contain delegated or externally derived text.
+            untrusted_output=True,
             handler=self._tool_read_artifact,
         ))
         self.register(ToolSpec(
@@ -817,6 +1126,9 @@ class ToolRegistry:
                 "required": ["notes"],
             },
             risk=RISK_LOW,
+            # Notes are durable prompt state. Untrusted-derived notes require
+            # the same explicit approval as other persistent writes.
+            side_effects=True,
             handler=self._tool_update_task_notes,
         ))
         self.register(ToolSpec(
@@ -1142,8 +1454,9 @@ class ToolRegistry:
             "scope": mem["scope"],
             "saved": util.clip(mem["content"], 400),
             "duplicate": out["duplicate"],
-            "superseded_id": (
-                out["superseded"]["id"] if out.get("superseded") else None
+            "superseded_id": None,
+            "possible_conflict_id": (
+                (out.get("possible_conflict") or {}).get("id")
             ),
         }
 
@@ -1178,6 +1491,7 @@ class ToolRegistry:
         mem = ctx.memory.update(
             args["memory_id"], content=args["content"],
             changed_by="agent", reason=reason,
+            tainted_origin=ctx.tainted_origin or None,
         )
         if ctx.tainted_origin:
             self._record_tainted_write(ctx, "update_memory", mem["id"])
@@ -1189,7 +1503,8 @@ class ToolRegistry:
         if ctx.tainted_origin:
             reason = self._tainted_reason(ctx, reason)
         mem = ctx.memory.retract(
-            args["memory_id"], changed_by="agent", reason=reason
+            args["memory_id"], changed_by="agent", reason=reason,
+            tainted_origin=ctx.tainted_origin or None,
         )
         if ctx.tainted_origin:
             self._record_tainted_write(ctx, "retract_memory", mem["id"])
@@ -1205,9 +1520,16 @@ class ToolRegistry:
         mode = str(self.config.get("memory.cross_domain", "off") or "off")
         # Search mode changes only this explicit tool: context remains scoped.
         # Off and boost retain the current-domain-then-global tool surface.
+        include_archived = bool(args.get("include_archived"))
+        restore_archived = bool(args.get("restore_archived"))
+        if restore_archived and not include_archived:
+            raise ToolError(
+                "restore_archived requires include_archived=true"
+            )
         memories = ctx.memory.search(
             query, scope_priority=priority,
-            include_archived=bool(args.get("include_archived")),
+            include_archived=include_archived,
+            restore_archived=restore_archived,
             cross_domain=(mode == "search"),
         )
         # Explicitly returned memories count as used; this is the one bump
@@ -1228,7 +1550,41 @@ class ToolRegistry:
         history = ctx.messages.search(query, limit=int(
             self.config.get("context.history_results", 4)
         ), exclude_task=ctx.task_id)
+        untrusted_sources: list[dict[str, str]] = []
+        seen_sources: set[tuple[str, str]] = set()
+
+        def add_source(
+            tool: str, module: str, origin: Any, *, derived: bool = False
+        ) -> None:
+            text = util.clip(str(origin or "untrusted provenance"), 300)
+            key = (tool, text)
+            if key in seen_sources:
+                return
+            seen_sources.add(key)
+            untrusted_sources.append({
+                "tool": tool, "module": module, "origin": text,
+                "at": util.iso(), "derived": derived,
+            })
+
+        for memory in memories:
+            provenance = memory.get("provenance") or {}
+            if isinstance(provenance, dict) and provenance.get("tainted"):
+                add_source(
+                    f"memory:{memory['id']}", "memory",
+                    provenance.get("tainted_origin"),
+                )
+        for message in history:
+            meta = util.loads(message.get("meta") or "{}", {})
+            if isinstance(meta, dict) and (
+                meta.get("tainted") or meta.get("derived_untrusted")
+            ):
+                add_source(
+                    f"message:{message['id']}", "history",
+                    meta.get("tainted_origin"),
+                    derived=bool(meta.get("derived_untrusted")),
+                )
         return {
+            "untrusted_sources": untrusted_sources,
             "memories": [
                 {
                     "id": m["id"], "kind": m["kind"], "scope": m["scope"],
@@ -1264,6 +1620,23 @@ class ToolRegistry:
         meta = ctx.tasks.meta(ctx.task_id)
         meta["notes"] = util.clip(args["notes"], 2000)
         meta["notes_run_id"] = ctx.run_id
+        if ctx.tainted_origin:
+            origin = util.clip(ctx.tainted_origin, 300)
+            meta["notes_tainted"] = True
+            meta["notes_tainted_origin"] = origin
+            source = {
+                "tool": "update_task_notes", "module": "builtin",
+                "origin": origin, "at": util.iso(),
+            }
+            existing = [
+                item for item in (meta.get("tainted_sources") or [])
+                if isinstance(item, dict)
+                and not (
+                    item.get("tool") == source["tool"]
+                    and item.get("origin") == source["origin"]
+                )
+            ]
+            meta["tainted_sources"] = [*existing, source][-20:]
         ctx.tasks.set_meta(ctx.task_id, meta)
         ctx.tasks.touch(ctx.task_id)
         return {"task_id": ctx.task_id, "notes_saved": True}
@@ -1556,7 +1929,7 @@ class McpServer:
                 [self.command, *self.args],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=stderr,
-                env={**dict(__import__("os").environ), **(self.env or {})},
+                env=mcp_process_env(self.env),
             )
         except OSError as exc:
             stderr.close()

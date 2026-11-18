@@ -35,9 +35,13 @@
 #   tools_deny    never expose these discovered tool names
 #   tool_prefix   prefix for registered tool names. Omit for the default
 #                 mcp_<server>_<tool>; set "" to keep the server's own names.
-#   read_only     true -> output cannot change the world; stays low-risk in a
-#                 tainted run. Default false: unknown provenance is
-#                 side-effecting.
+#   read_only     true -> does not mutate external state. External-egress
+#                 calls still need approval after taint because they can leak.
+#                 Default false: unknown provenance is side-effecting.
+#   external_egress
+#                 true (default) -> may transmit arguments externally; after
+#                 taint, requires approval even when read_only/low risk.
+#                 Set false only for genuinely local-only servers.
 #   trust_annotations
 #                 true -> honour the server's MCP annotations.readOnlyHint
 #                 claims for individual tools. These are claims, so they are
@@ -51,8 +55,8 @@
 #
 # MCP annotations are claims, not facts. They are honoured only for servers
 # with trust_annotations: true. Annotated reads remain untrusted output: after
-# a read enters a run, a side-effecting non-read-only tool needs approval even
-# when it is auto-approved or configured low-risk.
+# a read enters a run, a state-changing non-read-only or external-egress tool
+# needs approval even when it is auto-approved or configured low-risk.
 
 servers:
   - name: example_echo
@@ -61,6 +65,7 @@ servers:
       - examples/mcp/echo_server.py
     autoapprove: true
     read_only: true
+    external_egress: false
     startup: lazy
     timeout_s: 30
     tools_allow:

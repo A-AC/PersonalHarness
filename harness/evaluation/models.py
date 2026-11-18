@@ -224,6 +224,7 @@ class EvaluationRun:
     config: dict[str, Any] = field(default_factory=dict)
     scenarios: list[ScenarioResult] = field(default_factory=list)
     endpoint: dict[str, Any] = field(default_factory=dict)
+    source: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     results_path: str = ""
     report_path: str = ""
@@ -239,6 +240,7 @@ class EvaluationRun:
             "model": self.model,
             "config": self.config,
             "endpoint": self.endpoint,
+            "source": self.source,
             "notes": list(self.notes),
             "results_path": self.results_path,
             "report_path": self.report_path,

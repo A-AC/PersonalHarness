@@ -79,13 +79,28 @@ class Consolidation:
         report: dict[str, Any] = {
             "run_id": run_id, "trigger": trigger, "status": "failed",
             "applied": [], "rejected": [], "log_path": None,
+            "skipped_untrusted": 0,
         }
         max_memories = int(self.config.get("consolidation.max_memories", 60))
         max_messages = int(self.config.get("consolidation.max_messages", 60))
         max_changes = int(self.config.get("consolidation.max_changes", 20))
 
-        memories = self.memory.list(limit=max_memories)
-        recent = self.messages.recent(limit=max_messages, include_hidden=False)
+        memories = self.memory.list_trusted(limit=max_memories)
+        recent = self.messages.recent(
+            limit=max_messages, include_hidden=False, trusted_only=True
+        )
+        row = self.db.query_one(
+            "SELECT ("
+            " SELECT COUNT(*) FROM memories"
+            " WHERE status='active' AND archived_at IS NULL"
+            " AND COALESCE(json_extract(provenance, '$.tainted'), 0)=1"
+            ") + ("
+            " SELECT COUNT(*) FROM messages WHERE visible=1 AND ("
+            " COALESCE(json_extract(meta, '$.tainted'), 0)=1"
+            " OR COALESCE(json_extract(meta, '$.derived_untrusted'), 0)=1"
+            ")) AS skipped"
+        )
+        report["skipped_untrusted"] = int(row["skipped"] if row else 0)
         if not memories and not recent:
             report["status"] = "nothing_to_do"
             self._finish(run_id, report)
@@ -153,6 +168,8 @@ class Consolidation:
                 content = str(change.get("content", "")).strip()
                 return self._apply_create(change, content, changed_by)
             if op == "update":
+                if self._memory_is_tainted(str(change.get("memory_id") or "")):
+                    return {"ok": False, "detail": "refused untrusted memory provenance"}
                 bad = self._stitched_content(change.get("content"))
                 if bad:
                     return {"ok": False, "detail": bad}
@@ -162,6 +179,9 @@ class Consolidation:
                 )
                 return {"ok": True, "detail": f"updated {change['memory_id']}"}
             if op == "merge":
+                if any(self._memory_is_tainted(str(change.get(key) or ""))
+                       for key in ("source_id", "target_id")):
+                    return {"ok": False, "detail": "refused untrusted memory provenance"}
                 bad = self._stitched_content(change.get("content"))
                 if bad:
                     return {"ok": False, "detail": bad}
@@ -172,6 +192,8 @@ class Consolidation:
                 return {"ok": True,
                         "detail": f"merged {change['source_id']} into {change['target_id']}"}
             if op == "retract":
+                if self._memory_is_tainted(str(change.get("memory_id") or "")):
+                    return {"ok": False, "detail": "refused untrusted memory provenance"}
                 self.memory.retract(
                     str(change["memory_id"]), changed_by=changed_by,
                     reason=change.get("reason"),
@@ -180,6 +202,13 @@ class Consolidation:
         except Exception as exc:
             return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
         return {"ok": False, "detail": f"unknown op {op}"}
+
+    def _memory_is_tainted(self, memory_id: str) -> bool:
+        memory = self.memory.get(memory_id)
+        if memory is None:
+            return False
+        provenance = memory.get("provenance") or {}
+        return bool(isinstance(provenance, dict) and provenance.get("tainted"))
 
     def _apply_create(
         self, change: dict[str, Any], content: str, changed_by: str
@@ -222,6 +251,7 @@ class Consolidation:
             f"- status: {report['status']}",
             f"- applied: {len(report['applied'])}",
             f"- rejected: {len(report['rejected'])}",
+            f"- skipped untrusted inputs: {report['skipped_untrusted']}",
             "",
             "## Applied changes",
         ]
@@ -242,6 +272,7 @@ class Consolidation:
                 "status": report["status"],
                 "applied": len(report["applied"]),
                 "rejected": len(report["rejected"]),
+                "skipped_untrusted": report["skipped_untrusted"],
                 "log_path": report.get("log_path"),
                 "error": report.get("error"),
             },

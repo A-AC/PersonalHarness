@@ -31,6 +31,7 @@ from harness import util  # noqa: E402
 from harness.app import build_app  # noqa: E402
 from harness.evaluation.fixtures import apply_fixtures  # noqa: E402
 from harness.model import ScriptedModel  # noqa: E402
+from harness.evaluation.provenance import source_metadata  # noqa: E402
 
 DEFAULT_CORPUS = ROOT / "eval" / "scenarios" / "k_memory_recall.yaml"
 DEFAULT_OUT = ROOT / "eval" / "results"
@@ -204,7 +205,7 @@ def measure(
     if "boost" in summary:
         boost = summary["boost"]
         decision = {
-            "mode": "boost",
+            "mode": "search",
             "recall_at_5": boost["recall_at_5"],
             "mean_context_budget_share": boost["mean_context_budget_share"],
             "sibling_leaks": boost["sibling_leaks"],
@@ -212,8 +213,9 @@ def measure(
                 boost["recall_at_5"] == 1.0 and boost["sibling_leaks"] == 0
             ),
             "rationale": (
-                "highest recall with no sibling leakage and a bounded "
-                "context-budget share"
+                "search is the conservative production default; boost has the "
+                "same upper-bound recall in this fixture and remains opt-in "
+                "pending answer-level, real-use evidence"
             ),
         }
     return {
@@ -223,6 +225,7 @@ def measure(
         "top_k": TOP_K,
         "clip_chars": CLIP_CHARS,
         "default_decision": decision,
+        "source": source_metadata(scenarios),
         "scenarios": rows,
         "summary": summary,
     }

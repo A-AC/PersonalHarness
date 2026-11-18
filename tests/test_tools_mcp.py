@@ -272,6 +272,116 @@ def test_reload_changes_the_registered_toolset_without_restart(
     assert "mcp_test_echo_echo" not in app.tools.names()
 
 
+def test_mcp_child_env_is_allowlisted(make_app, tmp_path, monkeypatch):
+    """Only OS essentials plus declared values reach an MCP subprocess."""
+    monkeypatch.setenv("HARNESS_MODEL_SECRET", "sk-do-not-leak")
+    # Declared but with no explicit value: inherited from the process env.
+    monkeypatch.setenv("MCP_DECLARED_INHERITED", "from-process")
+    app = make_app.build(default="ok")
+
+    server_file = tmp_path / "env_server.py"
+    server_file.write_text(
+        (REPO / "examples" / "mcp" / "env_server.py").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    import yaml
+
+    config_path = tmp_path / "mcp_env.yaml"
+    config_path.write_text(yaml.safe_dump({"servers": [{
+        "name": "env_probe",
+        "command": sys.executable,
+        "args": [str(server_file)],
+        "autoapprove": True,
+        "env": {
+            "MCP_DECLARED_INHERITED": "",
+            "MCP_EXPLICIT_VALUE": "from-manifest",
+        },
+    }]}), encoding="utf-8")
+    app.config.set("tools.mcp_servers_file", str(config_path))
+    app.modules.reload()
+    assert "mcp_env_probe_env_report" in app.tools.names()
+
+    ctx = app.tool_context("run_x", "tsk_x", None)
+    outcome = app.tools.execute(
+        _call("mcp_env_probe_env_report", {"names": [
+            "HARNESS_MODEL_SECRET",
+            "MCP_DECLARED_INHERITED",
+            "MCP_EXPLICIT_VALUE",
+            "PATH",
+        ]}),
+        ctx, run_id="run_x", task_id="tsk_x",
+    )
+    assert outcome["status"] == "succeeded"
+    report = outcome["result"]
+    assert report["HARNESS_MODEL_SECRET"] is None
+    assert report["MCP_DECLARED_INHERITED"] == "from-process"
+    assert report["MCP_EXPLICIT_VALUE"] == "from-manifest"
+    assert report["PATH"]
+
+
+def test_health_rediscovery_removes_tools_the_server_stopped_advertising(
+    make_app, tmp_path
+):
+    app = make_app.build(default="ok")
+    _configure_mcp(app, tmp_path, autoapprove=True)
+    assert {"mcp_test_echo_echo", "mcp_test_echo_add"} <= set(
+        app.tools.names()
+    )
+
+    module = app.modules.get("mcp:test_echo")
+    module.manifest["tools_allow"] = ["echo"]
+    app.modules.save(module)
+    app.config.set("modules.health_interval_s", 0)
+    report = app.modules.health_tick()
+    assert "mcp:test_echo" in report["module_ids"]
+
+    assert "mcp_test_echo_echo" in app.tools.names()
+    assert "mcp_test_echo_add" not in app.tools.names()
+
+
+def test_registry_iteration_is_safe_during_module_replacement(make_app):
+    from harness.tools import ToolSpec
+
+    app = make_app.build(default="ok")
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def read_loop() -> None:
+        try:
+            while not stop.is_set():
+                app.tools.names()
+                app.tools.specs()
+                app.tools.schemas()
+                app.tools.schemas_for(None, budget_tokens=100000)
+                app.tools.resolve_optional("remember")
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    readers = [
+        threading.Thread(target=read_loop, daemon=True) for _ in range(4)
+    ]
+    for thread in readers:
+        thread.start()
+    try:
+        for index in range(50):
+            app.tools.replace_module_tools("test:swap", [ToolSpec(
+                name=f"swap_{index}",
+                description="swap probe",
+                parameters={"type": "object", "properties": {}},
+                risk="low",
+                handler=lambda ctx, args: {},
+                module="test:swap",
+            )])
+            app.tools.unregister_module("test:swap")
+    finally:
+        stop.set()
+        for thread in readers:
+            thread.join(timeout=5)
+    assert not errors
+
+
 def test_schema_budget_excludes_low_priority_module_and_records_why(
     make_app, tmp_path
 ):

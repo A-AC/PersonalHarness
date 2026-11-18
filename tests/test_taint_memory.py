@@ -4,8 +4,8 @@ Web search results are untrusted content. Once a run has consumed them,
 ``remember``, ``update_memory``, and ``retract_memory`` are escalated to
 confirm-risk by the one existing taint rule, and an approved write is
 executed with the taint visible in the memory's provenance or revision
-reason. Per-task notes stay low-risk so tainted runs do not spam
-approvals.
+reason. Durable task notes follow the same approval rule and retain their
+provenance when they are later rendered as prompt state.
 
 The SearXNG stub helpers are copied from ``tests/test_tools_mcp.py`` so
 this file stays self-contained; the stub is local and the suite never
@@ -257,24 +257,64 @@ def test_tainted_retract_memory_escalates_and_marks_the_revision(
 # (d) tainted update_task_notes stays low-risk: no approval spam
 # ---------------------------------------------------------------------------
 
-def test_tainted_update_task_notes_stays_low_risk(make_app, tmp_path):
+def test_tainted_update_task_notes_requires_approval_and_keeps_provenance(
+    make_app, tmp_path
+):
     app = make_app.build(scripts=[
         _search_script(),
         {"tool_calls": [{"name": "update_task_notes",
                          "arguments": {"notes": "plan: first step done"}}]},
         {"content": "done"},
+        {"content": "later done"},
     ])
-    with _searx_stub() as url:
+    with _searx_stub(results=_advice_stub_results()) as url:
         _configure_web(app, tmp_path, url)
         result = app.runtime.submit_user_message(
             "search, then note the plan"
         )
 
-    assert result.status == "completed"
-    assert not app.approvals.pending()
+    assert result.status == "waiting_approval"
     task = app.tasks.get(result.task_id)
-    meta = util.loads(task.get("meta") or "{}", {})
+    assert app.tasks.meta(task["id"]).get("notes", "") == ""
+    approval = app.approvals.pending()[0]
+    assert approval["tool"] == "update_task_notes"
+    assert ADVICE_URL in approval["reason"]
+
+    result = app.runtime.decide_approval(approval["id"], "approve")
+    assert result.status == "completed"
+    meta = app.tasks.meta(task["id"])
     assert meta["notes"] == "plan: first step done"
+    assert meta["notes_tainted"] is True
+    assert meta["notes_tainted_origin"] == ADVICE_URL
+    assert meta["tainted_sources"][0]["origin"] == ADVICE_URL
+
+    # A later run inherits the provenance and presents the notes as data, not
+    # as a fresh trusted instruction block.
+    later = app.runtime.start_run(
+        app.tasks.get(task["id"]), {"kind": "user"}, trigger_text="later"
+    )
+    assert later.status == "completed"
+    run = app.db.query_one("SELECT * FROM runs WHERE id=?", (later.run_id,))
+    run_meta = util.loads(run["meta"], {})
+    assert run_meta["tainted_sources"][0]["origin"] == ADVICE_URL
+    system = util.loads(run["transcript"], [])[0]["content"]
+    assert "<untrusted_tool_output nonce=" in system
+    assert ADVICE_URL in system
+    assert "plan: first step done" in system
+
+
+def test_clean_update_task_notes_stays_low_risk(make_app):
+    app = make_app.build(scripts=[
+        {"tool_calls": [{"name": "update_task_notes",
+                         "arguments": {"notes": "trusted plan"}}]},
+        {"content": "done"},
+    ])
+    result = app.runtime.submit_user_message("note the plan")
+    assert result.status == "completed"
+    assert app.approvals.pending() == []
+    meta = app.tasks.meta(result.task_id)
+    assert meta["notes"] == "trusted plan"
+    assert "notes_tainted" not in meta
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +347,9 @@ def test_memory_tools_are_flagged_side_effecting(make_app):
         spec = app.tools.resolve(name)
         assert spec.side_effects is True, name
         assert spec.risk == "low", name
-    for name in ("search_knowledge", "read_artifact", "update_task_notes"):
+    for name in ("search_knowledge", "read_artifact"):
         spec = app.tools.resolve(name)
         assert spec.side_effects is False, name
+    notes = app.tools.resolve("update_task_notes")
+    assert notes.side_effects is True
+    assert notes.risk == "low"

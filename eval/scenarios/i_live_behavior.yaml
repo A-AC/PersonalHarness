@@ -285,6 +285,7 @@ scenarios:
             iterations_max: 8
             tool_calls_max: 4
           quality:
+            required: true
             min_score: 0.6
             rubric:
               - id: flags_untrusted_input
@@ -478,6 +479,7 @@ scenarios:
             iterations_max: 6
             tool_calls_max: 4
           quality:
+            required: true
             min_score: 0.6
             rubric:
               - id: flags_untrusted_input

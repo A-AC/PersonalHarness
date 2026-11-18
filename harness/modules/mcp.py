@@ -43,8 +43,6 @@ from ..tools import (
     RISK_CONFIRM,
     RISK_LOW,
     McpServer,
-    ToolDenied,
-    ToolError,
     ToolSpec,
     mcp_text,
 )
@@ -1525,6 +1523,9 @@ class McpModuleLoader:
             "tools_allow": _strings(entry.get("tools_allow")),
             "tools_deny": _strings(entry.get("tools_deny")),
             "read_only": bool(entry.get("read_only", False)),
+            # Unknown MCP servers may transmit arguments over the network.
+            # Only genuinely local modules should explicitly opt out.
+            "external_egress": bool(entry.get("external_egress", True)),
             "trust_annotations": trust_annotations,
             "tool_risk": _sanitize_tool_risk(entry.get("tool_risk")),
             "summary_templates": _sanitize_summary_templates(
@@ -1691,16 +1692,9 @@ class McpModuleLoader:
     ) -> None:
         if self.tools is None:
             return
+        specs: list[ToolSpec] = []
         for tool in tools:
             name = self._registered_name(module, tool.tool_name)
-            existing = self.tools.resolve_optional(name)
-            if existing is not None and existing.module != module.id:
-                self.events.record(
-                    "module.tool_refused", level="warn",
-                    data={"module_id": module.id, "tool": name,
-                          "error": "name already registered"},
-                )
-                continue
             description = str(
                 tool.schema.get("_harness_description") or tool.tool_name
             )
@@ -1708,28 +1702,34 @@ class McpModuleLoader:
                 key: value for key, value in tool.schema.items()
                 if not key.startswith("_harness_")
             }
-            try:
-                self.tools.register(ToolSpec(
-                    name=name,
-                    description=f"[{module.name}] {description}",
-                    parameters=parameters,
-                    risk=tool.risk,
-                    handler=self._make_handler(module, tool.tool_name),
-                    module=module.id,
-                    side_effects=tool.side_effects,
-                    read_only=tool.read_only,
-                    untrusted_output=True,
-                    scope=module.scope,
-                    summary_template=str(
-                        tool.schema.get("_harness_summary_template") or ""
-                    ),
-                ))
-            except (ToolDenied, ToolError) as exc:
-                self.events.record(
-                    "module.tool_refused", level="warn",
-                    data={"module_id": module.id, "tool": name,
-                          "error": str(exc)},
-                )
+            specs.append(ToolSpec(
+                name=name,
+                description=f"[{module.name}] {description}",
+                parameters=parameters,
+                risk=tool.risk,
+                handler=self._make_handler(module, tool.tool_name),
+                module=module.id,
+                side_effects=tool.side_effects,
+                external_egress=bool(
+                    module.manifest.get("external_egress", True)
+                ),
+                read_only=tool.read_only,
+                untrusted_output=True,
+                scope=module.scope,
+                summary_template=str(
+                    tool.schema.get("_harness_summary_template") or ""
+                ),
+            ))
+        # Replace the module's whole registry surface atomically: a tool the
+        # server stopped advertising (or a filter that now excludes it) must
+        # vanish, and a concurrent reader must never observe a half swap.
+        refused = self.tools.replace_module_tools(module.id, specs)
+        for name, error in refused:
+            self.events.record(
+                "module.tool_refused", level="warn",
+                data={"module_id": module.id, "tool": name,
+                      "error": error},
+            )
 
     def _make_handler(self, module: Module, tool_name: str):
         server = self._server(module)

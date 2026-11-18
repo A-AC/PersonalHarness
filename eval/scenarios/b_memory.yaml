@@ -1,4 +1,4 @@
-# B. Memory: scoped retrieval, correction/supersession, lifetime, search.
+# B. Memory: scoped retrieval, explicit correction, lifetime, and search.
 scenarios:
   - id: b_memory_scope
     name: Domain memory is retrieved in its domain and not elsewhere
@@ -46,12 +46,12 @@ scenarios:
             context_not_empty: true
 
   - id: b_memory_correction
-    name: A correction supersedes the old memory
+    name: Similar memories do not silently supersede each other
     category: memory
     severity: high
     description: >
-      The second statement of the same subject supersedes the first; the old
-      row stays inspectable with a revision.
+      Similar wording is only an advisory possible conflict. Both rows remain
+      active until an explicit update or merge resolves the correction.
     modes: [deterministic]
     tags: [memory]
     steps:
@@ -89,8 +89,9 @@ scenarios:
             exists:
               - content_contains: "hunter3"
                 status: active
-            superseded_contains: "hunter2"
-            revision_min: 1
+              - content_contains: "hunter2"
+                status: active
+            count: 2
 
   - id: b_memory_archive_restore
     name: Archived memory is retained and can be restored

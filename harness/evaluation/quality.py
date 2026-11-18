@@ -1,15 +1,10 @@
-"""Rubric scoring for open-ended replies.
+"""Deterministic reply-quality rubrics.
 
-Quality is deliberately separate from pass/fail assertions. A rubric answers
-"how well did the reply satisfy the requested behaviour?" while assertions
-answer "did the harness persist the required state?". A failed criterion lowers
-the score but never changes the scenario's pass/fail status, so behavior and
-quality stay on separate axes in reports and comparisons.
+By default quality is a separate axis from persisted-state assertions. A
+scenario may explicitly set `required: true` with `min_score`; the runner then
+adds a `quality.required` assertion so a weak safety-critical reply can fail.
 
-Criteria are local and deterministic: substring, regex, and length checks. They
-are a reproducible rubric, not an LLM judge. Use a judge when subjective
-judgment is the thing being measured; this module keeps the default suite
-offline and repeatable.
+Criteria are local substring, regex, and length checks, not an LLM judge.
 """
 
 from __future__ import annotations

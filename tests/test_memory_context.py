@@ -144,25 +144,31 @@ def test_context_budgets_prevent_unbounded_history(make_app):
     assert dropped or len(built["system"]) < 3000 * 4
 
 
-def test_correction_supersedes_and_records_revision(make_app):
+def test_similar_memory_is_an_advisory_conflict_not_implicit_supersession(make_app):
     app = make_app.build(default="ok")
     first = app.memory.remember("The rack is 40U high.", kind="fact",
                                 scope="global", origin="user")
     second = app.memory.remember("The rack is 42U high.", kind="fact",
                                   scope="global", origin="user")
-    assert second["superseded"] is not None
-    assert first["memory"]["id"] == second["superseded"]["id"]
-    active = [m for m in app.memory.list()]
-    assert len(active) == 1 and "42U" in active[0]["content"]
-    old = app.memory.revisions(first["memory"]["id"])
-    assert old[0]["before"]["content"] == "The rack is 40U high."
-    # Provenance preserved: the superseded row points at its replacement.
+    assert second["superseded"] is None
+    assert second["possible_conflict"]["id"] == first["memory"]["id"]
+    assert len(app.memory.list()) == 2
+    assert app.memory.revisions(first["memory"]["id"]) == []
     row = app.db.query_one(
         "SELECT superseded_by, status FROM memories WHERE id=?",
         (first["memory"]["id"],),
     )
-    assert row["superseded_by"] == second["memory"]["id"]
-    assert row["status"] == "superseded"
+    assert row["superseded_by"] is None
+    assert row["status"] == "active"
+
+    # A deliberate update remains the correction mechanism and is versioned.
+    app.memory.update(
+        first["memory"]["id"], content="The rack is 42U high.",
+        changed_by="user", reason="explicit correction",
+    )
+    revised = app.memory.revisions(first["memory"]["id"])
+    assert revised[0]["before"]["content"] == "The rack is 40U high."
+    assert revised[0]["reason"] == "explicit correction"
 
 
 def test_update_memory_creates_revision(make_app):
@@ -357,3 +363,19 @@ def test_artifact_read_bounded_and_traversal_blocked(make_app):
         app.memory.read_artifact("../../harness.db")
     with pytest.raises(ValueError):
         app.memory.read_artifact("missing/file.md")
+
+
+def test_artifact_read_rejects_sibling_prefix_and_absolute_paths(make_app):
+    import pytest
+
+    app = make_app.build(default="ok")
+    sibling = app.data_dir / "artifacts_evil"
+    sibling.mkdir(parents=True, exist_ok=True)
+    secret = sibling / "secret.md"
+    secret.write_text("classified", encoding="utf-8")
+
+    # A plain string-prefix check would accept this sibling directory.
+    with pytest.raises(ValueError):
+        app.memory.read_artifact("../artifacts_evil/secret.md")
+    with pytest.raises(ValueError):
+        app.memory.read_artifact(str(secret))
