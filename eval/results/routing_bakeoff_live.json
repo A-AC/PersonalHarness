@@ -1,0 +1,379 @@
+{
+  "experiment": "routing_bakeoff_live",
+  "mode": "live",
+  "results": [
+    {
+      "available": true,
+      "plumbing_only": false,
+      "records": [
+        {
+          "confidence": "high",
+          "domain_id": "dom_33a41d61cd03",
+          "expected": "Health",
+          "fallback": null,
+          "latency_ms": 0.47,
+          "predicted": "Health",
+          "scenario_id": "k_routing.health_calories",
+          "split": "base",
+          "step": 1,
+          "strategy": "lexical"
+        },
+        {
+          "confidence": "high",
+          "domain_id": "dom_9ef0eff27243",
+          "expected": "Health",
+          "fallback": null,
+          "latency_ms": 0.46,
+          "predicted": "Health",
+          "scenario_id": "k_routing.health_protein",
+          "split": "base",
+          "step": 1,
+          "strategy": "lexical"
+        },
+        {
+          "confidence": "high",
+          "domain_id": "dom_921547ee0e3e",
+          "expected": "Home automation",
+          "fallback": null,
+          "latency_ms": 0.46,
+          "predicted": "Home automation",
+          "scenario_id": "k_routing.home_lights",
+          "split": "base",
+          "step": 1,
+          "strategy": "lexical"
+        },
+        {
+          "confidence": "high",
+          "domain_id": "dom_f798c66efade",
+          "expected": "Language learning",
+          "fallback": null,
+          "latency_ms": 0.47,
+          "predicted": "Language learning",
+          "scenario_id": "k_routing.language_spanish",
+          "split": "base",
+          "step": 1,
+          "strategy": "lexical"
+        },
+        {
+          "confidence": "low",
+          "domain_id": "general",
+          "expected": "Health",
+          "fallback": null,
+          "latency_ms": 0.45,
+          "predicted": "General",
+          "scenario_id": "k_routing.spanish_calories",
+          "split": "heldout",
+          "step": 1,
+          "strategy": "lexical"
+        }
+      ],
+      "splits": {
+        "all": {
+          "accuracy": 0.8,
+          "confusion": {
+            "labels": [
+              "General",
+              "Health",
+              "Home automation",
+              "Language learning"
+            ],
+            "rows": {
+              "General": {
+                "General": 0,
+                "Health": 0,
+                "Home automation": 0,
+                "Language learning": 0
+              },
+              "Health": {
+                "General": 1,
+                "Health": 2,
+                "Home automation": 0,
+                "Language learning": 0
+              },
+              "Home automation": {
+                "General": 0,
+                "Health": 0,
+                "Home automation": 1,
+                "Language learning": 0
+              },
+              "Language learning": {
+                "General": 0,
+                "Health": 0,
+                "Home automation": 0,
+                "Language learning": 1
+              }
+            }
+          },
+          "correct": 4,
+          "errors": [],
+          "fallback_count": 0,
+          "false_positive_count": 0,
+          "false_positive_rate": 0.0,
+          "general_fallback_count": 1,
+          "general_fallback_rate": 0.2,
+          "latency_p50_ms": 0.46,
+          "latency_p95_ms": 0.47,
+          "misses": 1,
+          "total": 5
+        },
+        "base": {
+          "accuracy": 1.0,
+          "confusion": {
+            "labels": [
+              "Health",
+              "Home automation",
+              "Language learning"
+            ],
+            "rows": {
+              "Health": {
+                "Health": 2,
+                "Home automation": 0,
+                "Language learning": 0
+              },
+              "Home automation": {
+                "Health": 0,
+                "Home automation": 1,
+                "Language learning": 0
+              },
+              "Language learning": {
+                "Health": 0,
+                "Home automation": 0,
+                "Language learning": 1
+              }
+            }
+          },
+          "correct": 4,
+          "errors": [],
+          "fallback_count": 0,
+          "false_positive_count": 0,
+          "false_positive_rate": 0.0,
+          "general_fallback_count": 0,
+          "general_fallback_rate": 0.0,
+          "latency_p50_ms": 0.47,
+          "latency_p95_ms": 0.47,
+          "misses": 0,
+          "total": 4
+        },
+        "heldout": {
+          "accuracy": 0.0,
+          "confusion": {
+            "labels": [
+              "General",
+              "Health"
+            ],
+            "rows": {
+              "General": {
+                "General": 0,
+                "Health": 0
+              },
+              "Health": {
+                "General": 1,
+                "Health": 0
+              }
+            }
+          },
+          "correct": 0,
+          "errors": [],
+          "fallback_count": 0,
+          "false_positive_count": 0,
+          "false_positive_rate": 0.0,
+          "general_fallback_count": 1,
+          "general_fallback_rate": 1.0,
+          "latency_p50_ms": 0.45,
+          "latency_p95_ms": 0.45,
+          "misses": 1,
+          "total": 1
+        }
+      },
+      "strategy": "lexical"
+    },
+    {
+      "available": false,
+      "reason": "embedding endpoint unavailable: embeddings are disabled",
+      "splits": {},
+      "strategy": "embedding"
+    },
+    {
+      "available": true,
+      "plumbing_only": false,
+      "records": [
+        {
+          "confidence": "high",
+          "domain_id": "dom_908a98be2fce",
+          "expected": "Health",
+          "fallback": null,
+          "latency_ms": 1158.15,
+          "predicted": "Health",
+          "scenario_id": "k_routing.health_calories",
+          "split": "base",
+          "step": 1,
+          "strategy": "llm"
+        },
+        {
+          "confidence": "high",
+          "domain_id": "dom_8f6bd17b1f1b",
+          "expected": "Health",
+          "fallback": null,
+          "latency_ms": 1034.36,
+          "predicted": "Health",
+          "scenario_id": "k_routing.health_protein",
+          "split": "base",
+          "step": 1,
+          "strategy": "llm"
+        },
+        {
+          "confidence": "high",
+          "domain_id": "dom_f3de06e4d205",
+          "expected": "Home automation",
+          "fallback": null,
+          "latency_ms": 998.11,
+          "predicted": "Home automation",
+          "scenario_id": "k_routing.home_lights",
+          "split": "base",
+          "step": 1,
+          "strategy": "llm"
+        },
+        {
+          "confidence": "high",
+          "domain_id": "dom_29fd415eae37",
+          "expected": "Language learning",
+          "fallback": null,
+          "latency_ms": 1199.51,
+          "predicted": "Language learning",
+          "scenario_id": "k_routing.language_spanish",
+          "split": "base",
+          "step": 1,
+          "strategy": "llm"
+        },
+        {
+          "confidence": "high",
+          "domain_id": "dom_dbf1c23f45f4",
+          "expected": "Health",
+          "fallback": null,
+          "latency_ms": 1017.91,
+          "predicted": "Health",
+          "scenario_id": "k_routing.spanish_calories",
+          "split": "heldout",
+          "step": 1,
+          "strategy": "llm"
+        }
+      ],
+      "splits": {
+        "all": {
+          "accuracy": 1.0,
+          "confusion": {
+            "labels": [
+              "Health",
+              "Home automation",
+              "Language learning"
+            ],
+            "rows": {
+              "Health": {
+                "Health": 3,
+                "Home automation": 0,
+                "Language learning": 0
+              },
+              "Home automation": {
+                "Health": 0,
+                "Home automation": 1,
+                "Language learning": 0
+              },
+              "Language learning": {
+                "Health": 0,
+                "Home automation": 0,
+                "Language learning": 1
+              }
+            }
+          },
+          "correct": 5,
+          "errors": [],
+          "fallback_count": 0,
+          "false_positive_count": 0,
+          "false_positive_rate": 0.0,
+          "general_fallback_count": 0,
+          "general_fallback_rate": 0.0,
+          "latency_p50_ms": 1034.36,
+          "latency_p95_ms": 1199.51,
+          "misses": 0,
+          "total": 5
+        },
+        "base": {
+          "accuracy": 1.0,
+          "confusion": {
+            "labels": [
+              "Health",
+              "Home automation",
+              "Language learning"
+            ],
+            "rows": {
+              "Health": {
+                "Health": 2,
+                "Home automation": 0,
+                "Language learning": 0
+              },
+              "Home automation": {
+                "Health": 0,
+                "Home automation": 1,
+                "Language learning": 0
+              },
+              "Language learning": {
+                "Health": 0,
+                "Home automation": 0,
+                "Language learning": 1
+              }
+            }
+          },
+          "correct": 4,
+          "errors": [],
+          "fallback_count": 0,
+          "false_positive_count": 0,
+          "false_positive_rate": 0.0,
+          "general_fallback_count": 0,
+          "general_fallback_rate": 0.0,
+          "latency_p50_ms": 1158.15,
+          "latency_p95_ms": 1199.51,
+          "misses": 0,
+          "total": 4
+        },
+        "heldout": {
+          "accuracy": 1.0,
+          "confusion": {
+            "labels": [
+              "Health"
+            ],
+            "rows": {
+              "Health": {
+                "Health": 1
+              }
+            }
+          },
+          "correct": 1,
+          "errors": [],
+          "fallback_count": 0,
+          "false_positive_count": 0,
+          "false_positive_rate": 0.0,
+          "general_fallback_count": 0,
+          "general_fallback_rate": 0.0,
+          "latency_p50_ms": 1017.91,
+          "latency_p95_ms": 1017.91,
+          "misses": 0,
+          "total": 1
+        }
+      },
+      "strategy": "llm"
+    },
+    {
+      "available": false,
+      "reason": "embedding endpoint unavailable: embeddings are disabled",
+      "splits": {},
+      "strategy": "hybrid"
+    }
+  ],
+  "scenario_count": 5,
+  "strategies": [
+    "lexical",
+    "embedding",
+    "llm",
+    "hybrid"
+  ]
+}

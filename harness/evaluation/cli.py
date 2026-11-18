@@ -83,7 +83,7 @@ def cmd_eval(args: Any) -> None:
     scenarios = load_scenarios(args.scenario_dir or DEFAULT_SCENARIO_DIR)
     selected = select_scenarios(
         scenarios,
-        mode=args.mode,
+        mode=(None if getattr(args, "routing_bakeoff", False) else args.mode),
         ids=args.scenario,
         category=args.category,
         scenario_tag=args.scenario_tag,
@@ -96,6 +96,25 @@ def cmd_eval(args: Any) -> None:
                 f"{scenario.severity:<9} {', '.join(scenario.modes)}"
             )
         print(f"\n{len(selected)} scenario(s)")
+        return
+
+    if getattr(args, "routing_bakeoff", False):
+        from .bakeoff import run_bakeoff
+
+        strategies = [
+            item.strip()
+            for item in str(args.strategies or "").split(",")
+            if item.strip()
+        ]
+        payload = run_bakeoff(
+            selected, strategies, mode=args.mode,
+            config_from=args.config_from, results_dir=results_dir,
+            tag=args.tag or f"routing_bakeoff_{args.mode}",
+            model=args.model, base_url=args.base_url, api_key=args.api_key,
+        )
+        print(render_bakeoff_summary(payload))
+        print(f"\nresults: {payload['json_path']}")
+        print(f"report:  {payload['md_path']}")
         return
 
     try:
@@ -171,3 +190,9 @@ def _safe(text: str | None) -> str:
     return "".join(
         char if char.isalnum() or char in "-_." else "_" for char in str(text)
     )
+
+
+def render_bakeoff_summary(payload: dict[str, Any]) -> str:
+    from .bakeoff import render_bakeoff
+
+    return render_bakeoff(payload)

@@ -1133,6 +1133,7 @@ class ToolRegistry:
             artifact_body=args.get("detail"),
             task_id=ctx.task_id,
             run_id=ctx.run_id,
+            origin_domain_id=ctx.domain_id or "general",
         )
         mem = out["memory"]
         return {

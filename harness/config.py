@@ -113,6 +113,27 @@ DEFAULTS: dict[str, Any] = {
             "window_days": 30,
         },
     },
+    "routing": {
+        # Pluggable domain router. lexical is the unchanged control and the
+        # default; embedding/llm/hybrid are opt-in.
+        "strategy": "lexical",
+        "shadow_strategies": [],      # e.g. [embedding, llm]
+        "model": "",                  # empty = the selected main model
+        "model_timeout_s": 3.0,
+        "hybrid_margin": 0.15,
+        "recent_turns": 2,
+        "card_summary_chars": 800,
+    },
+    "embeddings": {
+        # OpenAI-compatible /v1/embeddings endpoint. Disabled by default.
+        "enabled": False,
+        "base_url": "",
+        "model": "text-embedding-3-small",
+        "path": "/v1/embeddings",
+        "timeout_s": 10.0,
+        "min_similarity": 0.2,
+        "card_examples": True,
+    },
     "memory": {
         "max_results": 8,
         "temp_expiry_days": 14,       # default expiry for kind=temp
@@ -281,7 +302,8 @@ ENV_OVERRIDES = {
 
 # Keys a user may edit through the UI/CLI without a restart hazard.
 EDITABLE_KEYS = {
-    "persona", "limits", "context", "domains", "memory", "tools",
+    "persona", "limits", "context", "domains", "routing", "embeddings",
+    "memory", "tools",
     "modules", "skills", "subagents", "scheduler", "consolidation",
     "approvals", "inbox", "automations", "timezone", "providers",
 }
@@ -295,6 +317,40 @@ RETIRED_GROUPS = frozenset({"web"})
 
 class ConfigError(RuntimeError):
     pass
+
+
+ROUTING_STRATEGIES = ("lexical", "embedding", "llm", "hybrid")
+
+
+def validate_routing_config(data: dict[str, Any]) -> None:
+    """Validate routing/embedding enums after defaults are merged."""
+    routing = data.get("routing") or {}
+    if not isinstance(routing, dict):
+        raise ConfigError("configuration key routing must be a mapping")
+    strategy = routing.get("strategy")
+    if strategy not in ROUTING_STRATEGIES:
+        raise ConfigError(
+            "configuration key routing.strategy must be one of "
+            + ", ".join(ROUTING_STRATEGIES)
+        )
+    shadows = routing.get("shadow_strategies") or []
+    if not isinstance(shadows, list):
+        raise ConfigError(
+            "configuration key routing.shadow_strategies must be a list"
+        )
+    for index, item in enumerate(shadows):
+        if item not in ROUTING_STRATEGIES or item == "lexical":
+            raise ConfigError(
+                f"routing.shadow_strategies[{index}] must be "
+                "embedding, llm, or hybrid"
+            )
+    embeddings = data.get("embeddings") or {}
+    if not isinstance(embeddings, dict):
+        raise ConfigError("configuration key embeddings must be a mapping")
+    if not isinstance(embeddings.get("path"), str) or not str(
+        embeddings.get("path") or ""
+    ).strip():
+        raise ConfigError("configuration key embeddings.path must be a string")
 
 
 def validate_allowed_models(value: Any) -> list[str]:
@@ -461,6 +517,7 @@ def _validate_routing_enums(config: dict[str, Any]) -> None:
             "configuration key memory.cross_domain must be "
             "off, boost, or search"
         )
+    validate_routing_config(config)
 
 
 def validate_group_update(

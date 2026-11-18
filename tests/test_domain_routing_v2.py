@@ -86,11 +86,18 @@ def _corpus_cases() -> tuple[list[dict[str, str]], list[dict[str, object]]]:
     for scenario in scenarios:
         if str(scenario.get("id") or "").startswith("k_routing.learned_"):
             continue
-        step = scenario["steps"][0]
+        steps = scenario.get("steps") or []
+        if len(steps) != 1:
+            continue
+        step = steps[0]
+        routing = (step.get("expect") or {}).get("routing") or {}
+        if not routing.get("domain"):
+            continue
         cases.append({
             "id": str(scenario["id"]),
             "text": str(step["input"]),
-            "expected": str(step["expect"]["routing"]["domain"]),
+            "expected": str(routing["domain"]),
+            "heldout": "heldout" in (scenario.get("tags") or []),
         })
     return cases, list(scenarios[0]["fixtures"]["domains"])
 
@@ -525,14 +532,17 @@ def test_domain_api_accepts_routing_fields_and_reports_validation_errors(
 def test_shipped_defaults_meet_routing_corpus_targets(make_app):
     app = make_app.build(default="ok")
     cases, domains = _corpus_cases()
-    # Keep the original 46-case corpus intact; learned scenarios are
-    # regression cases in addition to, not replacements for, the baseline.
-    assert len(cases) == 46
+    # One-turn scenarios across the shipped environment. Multi-turn
+    # follow-ups are measured by the semantic bake-off, which runs the
+    # preceding turns into conversation state.
+    assert len(cases) >= 55
     apply_fixtures(app, {"domains": domains})
 
     expected: list[str] = []
     predicted: list[str] = []
     for case in cases:
+        if case["heldout"]:
+            continue
         routing = app.domains.route(case["text"])
         record = app.domains.get(routing["domain_id"])
         expected.append(case["expected"])

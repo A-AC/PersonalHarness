@@ -32,7 +32,7 @@ suite partitions them:
 | `h_agent_loops.yaml` | deterministic | Sequential multi-tool loops, recovery, approval boundaries, budgets, deferred batches |
 | `i_live_behavior.yaml` | live | Multi-turn continuity, correction, skill following, delegation, hostile inbox, scheduling, live tool chaining |
 | `j_live_holdout.yaml` | live | Held-out judgment and instruction following: unknown facts, contradictions, exact tool arguments, grounding, secret refusal, strict format |
-| `k_routing.yaml` | deterministic | 50 labelled routing cases across placeholder domains and learned-evidence fixtures; the `routing` assertion reads the latest `domain.routed` event |
+| `k_routing.yaml` | deterministic | 65 labelled routing cases across placeholder domains, learned evidence, Spanish subset, near-domain confusions, and multi-turn follow-ups; the `routing` assertion reads the latest `domain.routed` event |
 | `k_memory_recall.yaml` | deterministic | Cross-domain memory recall and core-profile/global-scope behaviour, including paraphrases and sibling-domain leak checks |
 
 The `j_` suite is a holdout. It was written after the behavior prompts were
@@ -273,8 +273,11 @@ failures are counted separately in every report. Scenarios with
 `measurement: true` are benchmark cases: failures are reported and counted but
 do not make `harness eval` exit non-zero.
 
-Phase 10 routing experiments use two helper scripts that write deterministic
-reports: `python scripts/route_sweep.py --tag phase10b_routing` sweeps the
+Phase 10 routing experiments use the bake-off plus two helper scripts that
+write deterministic reports. `harness eval --routing-bakeoff` measures
+strategies over `k_routing.yaml` with per-split accuracy, wrong-domain,
+fallback, confusion, and latency; deterministic mode uses scripted fakes and
+is plumbing-only. `python scripts/route_sweep.py --tag phase10b_routing` sweeps the
 threshold/margin grid over `k_routing.yaml`, and
 `python scripts/memory_recall_report.py --tag phase10d_memory` compares the
 `off`, `search`, and `boost` memory modes over `k_memory_recall.yaml`. The

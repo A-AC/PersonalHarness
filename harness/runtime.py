@@ -43,6 +43,7 @@ from .model import (
 )
 from .providers import configured_provider_id
 from .store import Domains, Events, Messages, Tasks
+from .routing import RoutingService
 from .tools import ToolError, validate_arguments
 
 
@@ -101,6 +102,7 @@ class AgentRuntime:
         self.tools = app.tools
         self.approvals = app.approvals
         self.context = app.context
+        self.router = RoutingService(app)
         self._lock = threading.RLock()
         # One shared classifier worker bounds abandoned timed-out calls: a
         # hung endpoint can occupy at most this one thread, and later calls
@@ -701,6 +703,7 @@ class AgentRuntime:
                 trusted=not untrusted_source,
                 task_meta=task_meta,
                 trigger=trigger,
+                source=source,
             )
             domain_id = str(routing.get("domain_id") or "general")
         candidate = self.tasks.find_resume_candidate(text, domain_id=domain_id)
@@ -798,6 +801,18 @@ class AgentRuntime:
                 util.loads(util.dumps(hint))
                 if isinstance(hint, dict) else None
             ),
+            "strategy": str(routing.get("strategy") or "lexical"),
+            "confidence": str(routing.get("confidence") or "low"),
+            "latency_ms": routing.get("latency_ms"),
+            "inputs": (
+                util.loads(util.dumps(routing.get("inputs")))
+                if isinstance(routing.get("inputs"), dict) else {}
+            ),
+            "fallback": routing.get("fallback"),
+            "shadow": (
+                util.loads(util.dumps(routing.get("shadow")))
+                if isinstance(routing.get("shadow"), list) else []
+            ),
         }
 
     def _routing_learned(self, text: str) -> dict[str, list[str]]:
@@ -821,23 +836,30 @@ class AgentRuntime:
         trusted: bool = True,
         task_meta: dict[str, Any] | None = None,
         trigger: dict[str, Any] | None = None,
+        source: str = "web",
     ) -> dict[str, Any]:
-        """Route deterministically, then optionally use one model tie-break.
+        """Route through the configured strategy, then a lexical tie-break.
 
         The model path is deliberately narrow: it runs only for trusted input
         when deterministic evidence is weak, it receives no tools, and its
         output is treated only as a domain label.  A timeout or any classifier
         failure leaves the deterministic General fallback in place.
         """
-        routing = self.domains.route(
+        router_result = self.router.route(
             text,
-            open_tasks=self.tasks.list_open(),
-            recent_messages=self.messages.recent(limit=10),
-            learned=self._routing_learned(text),
+            source=source,
+            trigger=trigger,
+            task_meta=task_meta,
+            trusted=trusted,
         )
+        routing = router_result.as_routing()
         mode = str(
             self.config.get("domains.model_routing", "off") or "off"
         ).strip().lower()
+        # The legacy optional tie-break only applies to the lexical control.
+        # Semantic strategies return their own label/confidence.
+        if router_result.strategy != "lexical":
+            mode = "off"
         model_choice: str | None = None
         model_raw: str | None = None
         model_route = "off"
@@ -886,6 +908,14 @@ class AgentRuntime:
             "hint": routing.get("hint"),
             "model_choice": model_choice,
             "model_route": model_route,
+            "strategy": routing.get("strategy"),
+            "chosen_domain": routing.get("domain_id"),
+            "top3": (routing.get("candidates") or [])[:3],
+            "confidence": routing.get("confidence"),
+            "latency_ms": routing.get("latency_ms"),
+            "inputs": routing.get("inputs") or {},
+            "fallback": routing.get("fallback"),
+            "shadow": routing.get("shadow") or [],
         }
         if model_raw is not None:
             data["model_raw"] = util.clip(model_raw, 120)

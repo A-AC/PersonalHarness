@@ -222,6 +222,8 @@ def _to_public(row: dict[str, Any] | None) -> dict[str, Any] | None:
         values = util.loads(out.get(field) or "[]", [])
         out[field] = [str(item) for item in values] if isinstance(values, list) else []
     out["instructions"] = out.get("instructions") or ""
+    out["summary"] = out.get("summary") or ""
+    out["summary_updated_at"] = out.get("summary_updated_at")
     return out
 
 
@@ -268,6 +270,22 @@ def _clean_instructions(value: Any, config=None) -> str:
     return util.clip(value, limit)
 
 
+def _clean_summary(value: Any, config=None) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("domain summary must be a string")
+    if "\x00" in value:
+        raise ValueError("domain summary must not contain NUL bytes")
+    limit = 800
+    if config is not None:
+        try:
+            limit = int(config.get("routing.card_summary_chars", limit))
+        except (TypeError, ValueError):
+            limit = 800
+    return util.clip(value, max(1, limit))
+
+
 class Domains:
     """Domain records and deterministic routing.
 
@@ -301,6 +319,7 @@ class Domains:
         keywords: list[str] | None = None,
         examples: list[str] | None = None,
         instructions: str | None = None,
+        summary: str | None = None,
     ) -> dict[str, Any]:
         keyword_list = _clean_terms(
             keywords, field="keywords", limit=DOMAIN_MAX_KEYWORDS,
@@ -311,17 +330,18 @@ class Domains:
             max_chars=DOMAIN_EXAMPLE_MAX_CHARS,
         )
         instruction_text = _clean_instructions(instructions, self.config)
+        summary_text = _clean_summary(summary, self.config)
         ts = util.iso()
         with self.db.transaction() as conn:
             conn.execute(
                 "INSERT INTO domains(id, name, description, status, created_at,"
-                " updated_at, meta, keywords, examples, instructions)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " updated_at, meta, keywords, examples, instructions, summary,"
+                " summary_updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     domain_id, name, description, "active", ts, ts,
                     util.dumps({"created_by": created_by}),
                     util.dumps(keyword_list), util.dumps(example_list),
-                    instruction_text,
+                    instruction_text, summary_text, ts if summary_text else None,
                 ),
             )
             if seed_note:
@@ -344,6 +364,7 @@ class Domains:
                 "keywords": len(keyword_list),
                 "examples": len(example_list),
                 "has_instructions": bool(instruction_text),
+                "has_summary": bool(summary_text),
             },
         )
         return self.get(domain_id)  # type: ignore[return-value]
@@ -743,6 +764,7 @@ class Domains:
         keywords: list[str] | None = None,
         examples: list[str] | None = None,
         instructions: str | None = None,
+        summary: str | None = None,
     ) -> dict[str, Any]:
         """Edit domain metadata. Never changes the id or routing rules.
 
@@ -781,6 +803,11 @@ class Domains:
             instruction_text = _clean_instructions(instructions, self.config)
             if instruction_text != current.get("instructions", ""):
                 fields["instructions"] = instruction_text
+        if summary is not None:
+            summary_text = _clean_summary(summary, self.config)
+            if summary_text != current.get("summary", ""):
+                fields["summary"] = summary_text
+                fields["summary_updated_at"] = util.iso()
         if not fields:
             return current
         fields["updated_at"] = util.iso()

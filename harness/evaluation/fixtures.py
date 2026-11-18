@@ -37,6 +37,8 @@ def apply_fixtures(app, fixtures: dict[str, Any] | None) -> dict[str, Any]:
                 updates["examples"] = list(spec.get("examples") or [])
             if "instructions" in spec:
                 updates["instructions"] = str(spec.get("instructions") or "")
+            if "summary" in spec:
+                updates["summary"] = str(spec.get("summary") or "")
             domain = (
                 app.domains.update(existing["id"], **updates)
                 if updates else existing
@@ -51,6 +53,7 @@ def apply_fixtures(app, fixtures: dict[str, Any] | None) -> dict[str, Any]:
                 keywords=spec.get("keywords") or [],
                 examples=spec.get("examples") or [],
                 instructions=str(spec.get("instructions") or ""),
+                summary=str(spec.get("summary") or ""),
             )
         domain_ids[name] = domain["id"]
         domain_ids[domain["id"]] = domain["id"]

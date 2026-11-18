@@ -1333,6 +1333,9 @@ class Server:
             instructions = body.get("instructions", "")
             if not isinstance(instructions, str):
                 raise ValueError("domain instructions must be a string")
+            summary = body.get("summary", "")
+            if not isinstance(summary, str):
+                raise ValueError("domain summary must be a string")
             domain_id = util.new_id("dom")
             domain = self.app.domains.create(
                 domain_id, name=name,
@@ -1341,6 +1344,7 @@ class Server:
                 keywords=keywords or [],
                 examples=examples or [],
                 instructions=instructions,
+                summary=summary,
             )
         except ValueError as exc:
             return _err(str(exc), 400)
@@ -1372,6 +1376,9 @@ class Server:
             instructions = body.get("instructions")
             if instructions is not None and not isinstance(instructions, str):
                 raise ValueError("domain instructions must be a string")
+            summary = body.get("summary")
+            if summary is not None and not isinstance(summary, str):
+                raise ValueError("domain summary must be a string")
             domain = self.app.domains.update(
                 domain_id,
                 name=name,
@@ -1383,6 +1390,7 @@ class Server:
                 keywords=keywords,
                 examples=examples,
                 instructions=instructions,
+                summary=summary,
             )
         except (KeyError, ValueError) as exc:
             return _err(str(exc), 400)

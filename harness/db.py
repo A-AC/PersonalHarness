@@ -25,7 +25,7 @@ from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Phase 3 memory lifetime: additive columns on ``memories`` plus a small
 # access table. ``archived_at`` marks an archived row without touching the
@@ -84,6 +84,26 @@ PHASE10_DOMAIN_COLUMNS = (
     ("examples", "TEXT NOT NULL DEFAULT '[]'"),
     ("instructions", "TEXT NOT NULL DEFAULT ''"),
 )
+
+# Phase 10 follow-up (schema v10): a short editable domain summary and the
+# semantic-router embedding cache. The cache stores packed float32 vectors;
+# no network-derived text is stored.
+PHASE10_SUMMARY_COLUMNS = (
+    ("summary", "TEXT NOT NULL DEFAULT ''"),
+    ("summary_updated_at", "TEXT"),
+)
+
+EMBEDDING_CACHE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS embedding_cache (
+  key TEXT PRIMARY KEY,
+  model TEXT NOT NULL,
+  dimension INTEGER NOT NULL,
+  vector BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_cache_created
+  ON embedding_cache(created_at);
+"""
 
 # Phase 13 prep rides along in the same v9 migration: a per-row owner id with
 # no behaviour change until identity ships.
@@ -293,6 +313,8 @@ CREATE TABLE IF NOT EXISTS domains (
   keywords TEXT NOT NULL DEFAULT '[]',
   examples TEXT NOT NULL DEFAULT '[]',
   instructions TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  summary_updated_at TEXT,
   user_id TEXT NOT NULL DEFAULT 'owner'
 );
 
@@ -471,7 +493,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_toolx_run ON tool_executions(run_id);
 CREATE INDEX IF NOT EXISTS idx_toolx_status ON tool_executions(status);
-""" + MODULE_SCHEMA + INBOX_SCHEMA + DOMAIN_EVIDENCE_SCHEMA
+""" + MODULE_SCHEMA + INBOX_SCHEMA + DOMAIN_EVIDENCE_SCHEMA + EMBEDDING_CACHE_SCHEMA
 
 
 class Database:
@@ -677,6 +699,20 @@ ALTER TABLE modules_v7 RENAME TO modules;
                             f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
                         )
             self._conn.executescript(DOMAIN_EVIDENCE_SCHEMA)
+        if version < 10:
+            # Phase 10 follow-up: editable domain summary plus the semantic
+            # router's embedding cache. Additive only.
+            existing = {
+                row["name"] for row in self._conn.execute(
+                    "PRAGMA table_info(domains)"
+                )
+            }
+            for name, ddl in PHASE10_SUMMARY_COLUMNS:
+                if name not in existing:
+                    self._conn.execute(
+                        f"ALTER TABLE domains ADD COLUMN {name} {ddl}"
+                    )
+            self._conn.executescript(EMBEDDING_CACHE_SCHEMA)
         if version < SCHEMA_VERSION:
             self._conn.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",

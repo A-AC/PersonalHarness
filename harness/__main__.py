@@ -512,6 +512,17 @@ def cmd_domains(args: argparse.Namespace) -> None:
         if not out.get("suggestions"):
             print("(no domain suggestions)")
         return
+    if getattr(args, "update", None):
+        domain_id, raw = args.update
+        try:
+            body = json.loads(raw)
+        except ValueError as exc:
+            raise SystemExit(f"invalid domain update JSON: {exc}")
+        out = client.call(
+            "PATCH", f"/api/domains/{domain_id}", body
+        )
+        print(json.dumps(out, indent=2, default=str))
+        return
     if args.create:
         out = client.call("POST", "/api/domains", {
             "name": args.create[0], "description": args.create[1] or "",
@@ -526,9 +537,11 @@ def cmd_domains(args: argparse.Namespace) -> None:
         keywords = domain.get("keywords") or []
         examples = domain.get("examples") or []
         instructions = domain.get("instructions") or ""
+        summary = domain.get("summary") or ""
         print(
             f"    keywords={len(keywords)} examples={len(examples)} "
-            f"instructions={'yes' if instructions else 'no'}"
+            f"instructions={'yes' if instructions else 'no'} "
+            f"summary={'yes' if summary else 'no'}"
         )
         if keywords:
             print(f"    keyword terms: {', '.join(str(item) for item in keywords)}")
@@ -890,6 +903,11 @@ def build_parser() -> argparse.ArgumentParser:
     common(p)
     p.add_argument("--create", nargs=2, metavar=("NAME", "DESCRIPTION"))
     p.add_argument(
+        "--update", nargs=2, metavar=("ID", "JSON"),
+        help="update a domain (summary, keywords, examples, instructions, "
+             "description, or status) with a JSON object",
+    )
+    p.add_argument(
         "--suggestions",
         action="store_true",
         help="list open usage-based domain suggestions",
@@ -1001,6 +1019,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--aggregate", nargs="+", metavar="TAG",
                    help="aggregate stored reports (tags, paths, or globs) "
                         "into per-model distributions")
+    p.add_argument("--routing-bakeoff", action="store_true",
+                   help="measure routing strategies over the k_routing corpus")
+    p.add_argument("--strategies", default="lexical,embedding,llm,hybrid",
+                   help="comma-separated strategies for --routing-bakeoff")
     p.set_defaults(func=cmd_eval)
 
     return parser

@@ -22,7 +22,7 @@ from harness.db import SCHEMA_VERSION, Database
 # Schema v9 migration
 # ---------------------------------------------------------------------------
 
-def test_schema_v9_migration_adds_columns_tables_and_keeps_rows(tmp_path):
+def test_schema_migration_adds_columns_tables_and_keeps_rows(tmp_path):
     path = tmp_path / "harness.db"
     db = Database(path)
     try:
@@ -65,7 +65,7 @@ def test_schema_v9_migration_adds_columns_tables_and_keeps_rows(tmp_path):
         version = reopened.query_one(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         )["value"]
-        assert int(version) == SCHEMA_VERSION == 9
+        assert int(version) == SCHEMA_VERSION == 10
 
         for table in (
             "messages", "tasks", "memories", "domains", "schedules",
@@ -81,7 +81,10 @@ def test_schema_v9_migration_adds_columns_tables_and_keeps_rows(tmp_path):
         domain_columns = {
             row["name"] for row in reopened.query("PRAGMA table_info(domains)")
         }
-        assert {"keywords", "examples", "instructions"} <= domain_columns
+        assert {
+            "keywords", "examples", "instructions", "summary",
+            "summary_updated_at",
+        } <= domain_columns
 
         tables = {
             row["name"] for row in reopened.query(
@@ -115,6 +118,53 @@ def test_schema_v9_migration_adds_columns_tables_and_keeps_rows(tmp_path):
 # ---------------------------------------------------------------------------
 # Deterministic stemming
 # ---------------------------------------------------------------------------
+
+def test_v9_to_v10_adds_summary_and_embedding_cache(tmp_path):
+    path = tmp_path / "harness.db"
+    db = Database(path)
+    try:
+        db.execute("ALTER TABLE domains DROP COLUMN summary_updated_at")
+        db.execute("ALTER TABLE domains DROP COLUMN summary")
+        db.execute("DROP TABLE embedding_cache")
+        db.execute("UPDATE schema_meta SET value='9' WHERE key='schema_version'")
+    finally:
+        db.close()
+    reopened = Database(path)
+    try:
+        version = reopened.query_one(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        )["value"]
+        assert int(version) == SCHEMA_VERSION == 10
+        columns = {
+            row["name"] for row in reopened.query("PRAGMA table_info(domains)")
+        }
+        assert {"summary", "summary_updated_at"} <= columns
+        tables = {
+            row["name"] for row in reopened.query(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "embedding_cache" in tables
+    finally:
+        reopened.close()
+
+
+def test_domain_summary_is_bounded_and_editable(make_app):
+    app = make_app.build(default="ok")
+    domain = app.domains.create(
+        "dom_sum", name="Summary", summary="initial summary",
+        created_by="test",
+    )
+    assert domain["summary"] == "initial summary"
+    assert domain["summary_updated_at"]
+    updated = app.domains.update("dom_sum", summary="later summary")
+    assert updated["summary"] == "later summary"
+    long_text = "x" * 5000
+    clipped = app.domains.update("dom_sum", summary=long_text)
+    assert len(clipped["summary"]) <= int(
+        app.config.get("routing.card_summary_chars", 800)
+    )
+
 
 @pytest.mark.parametrize("word,expected", [
     ("nutritional", "nutrition"),
@@ -247,6 +297,24 @@ def test_phase10_config_defaults_present():
     assert config.get("domains.suggestions.min_tasks") == 6
     assert config.get("memory.cross_domain") == "boost"
     assert config.get("memory.cross_domain_max") == 3
+
+
+def test_semantic_routing_config_defaults_and_validation(tmp_path):
+    config = load_config(tmp_path)
+    assert config.get("routing.strategy") == "lexical"
+    assert config.get("routing.shadow_strategies") == []
+    assert config.get("embeddings.enabled") is False
+    assert config.get("embeddings.path") == "/v1/embeddings"
+
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "config.yaml").write_text(
+        "routing:\n  strategy: magic\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError):
+        load_config(bad)
+    with pytest.raises(ConfigError):
+        load_config(bad, create=False)
 
 
 def test_config_enum_validation_and_yaml_boolean_compat():
@@ -431,3 +499,24 @@ def test_legacy_settings_yaml_migration_still_works(tmp_path):
     assert (tmp_path / "config.yaml").is_file()
     assert not legacy.exists()
     assert legacy.with_name("settings.yaml.migrated").is_file()
+
+
+def test_domain_summary_api_round_trip(make_app, client):
+    app = make_app.build(default="ok")
+    http = client(app)
+    created = http.post("/api/domains", json={
+        "name": "Health",
+        "description": "nutrition",
+        "keywords": ["calorie"],
+        "examples": ["how many calories"],
+        "summary": "Diet and fitness notes.",
+    })
+    assert created.status_code == 200
+    domain = created.json()["domain"]
+    assert domain["summary"] == "Diet and fitness notes."
+    assert domain["summary_updated_at"]
+    updated = http.patch(f"/api/domains/{domain['id']}", json={
+        "summary": "Updated diet notes.",
+    })
+    assert updated.status_code == 200
+    assert updated.json()["domain"]["summary"] == "Updated diet notes."

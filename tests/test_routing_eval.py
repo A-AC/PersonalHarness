@@ -29,14 +29,18 @@ METRIC_DOMAINS = {
 
 def test_routing_corpus_loads_and_is_labelled() -> None:
     scenarios = load_scenarios(ROUTING)
-    assert len(scenarios) >= 40
+    assert len(scenarios) >= 60
     assert {scenario.category for scenario in scenarios} == {"routing"}
     for scenario in scenarios:
-        assert len(scenario.steps) == 1, scenario.id
-        step = scenario.steps[0]
-        assert step.kind == "turn", scenario.id
-        assert step.input.strip(), scenario.id
-        domain = (step.expect.get("routing") or {}).get("domain")
+        assert 1 <= len(scenario.steps) <= 2, scenario.id
+        routed = [
+            step for step in scenario.steps
+            if (step.expect.get("routing") or {}).get("domain")
+        ]
+        assert routed, scenario.id
+        assert routed[-1].kind == "turn", scenario.id
+        assert routed[-1].input.strip(), scenario.id
+        domain = routed[-1].expect["routing"]["domain"]
         assert domain in EXPECTED_DOMAINS, scenario.id
         assert scenario.settings.get("domains", {}).get(
             "model_routing"
@@ -45,7 +49,10 @@ def test_routing_corpus_loads_and_is_labelled() -> None:
         assert scenario.measurement is True, scenario.id
     assert sum(
         1 for scenario in scenarios
-        if (scenario.steps[0].expect["routing"]["domain"] == "General")
+        if any(
+            (step.expect.get("routing") or {}).get("domain") == "General"
+            for step in scenario.steps
+        )
     ) >= 12
 
 

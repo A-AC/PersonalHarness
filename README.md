@@ -420,7 +420,7 @@ value in `data/config.yaml`.
 | `consolidate` | Run one memory consolidation pass |
 | `events [-N]` | Recent event-log rows |
 | `tools` | Registered tools with their risk classes; MCP status |
-| `eval` | Run scenario evaluations in-process (deterministic or live); `--list`, `--list-models`, `--summary`, `--compare`, `--aggregate` |
+| `eval` | Run scenario evaluations in-process (deterministic or live); `--list`, `--list-models`, `--summary`, `--compare`, `--aggregate`, `--routing-bakeoff` |
 | `backup` / `restore ZIP --yes` | Snapshot / restore state |
 | `config` | Effective configuration (secrets redacted) |
 | `models [--set NAME] [--provider ID]` | List provider/model choices or switch the active model |
@@ -516,6 +516,64 @@ Domains are created only by the explicit API/CLI command or by the model's
 keywords, and examples become an approval, and nothing exists until the user
 approves it.
 
+### Semantic router (opt-in)
+
+`routing.strategy` selects a pluggable router. The default `lexical` is the
+unchanged control. The opt-in strategies are `embedding`, `llm`, and `hybrid`.
+The older `domains.model_routing` tie-break still applies only to the lexical
+control; semantic strategies return their own label and confidence.
+Only user-typed messages are routed; inbox, automation, and schedule text keep
+their configured domain. A router returns a label only: it never widens
+permissions and is never injected into the transcript as instructions.
+
+Every domain card contains its name, description, `examples`, and editable
+`summary` (`summary_updated_at` records the last edit). The embedding strategy
+sends the current message plus the last two user turns to an OpenAI-compatible
+`/v1/embeddings` endpoint (`embeddings:` config, disabled by default), caches
+packed float32 vectors in SQLite keyed by `sha256(model + text)`, and compares
+domain-card vectors with stdlib cosine. `embeddings.card_examples: true` uses
+the mean of the card text and its example vectors. The LLM strategy makes one
+constrained, no-thinking JSON call (`routing.model`, default main model); low
+confidence, invalid JSON, or an unknown id becomes General. Hybrid takes the
+embedding top three and asks the LLM only when the margin is below
+`routing.hybrid_margin`.
+
+Any timeout, error, or invalid strategy output falls back to the lexical
+decision and records `router.fallback`; a turn never fails because routing
+failed. `routing.shadow_strategies` runs extra strategies alongside and records
+their choices without acting. `domain.routed` and task metadata carry the
+strategy, chosen domain, top three scores, confidence, reason, latency, inputs,
+fallback, and shadow results.
+
+```bash
+# Plumbing-only deterministic bake-off (scripted fakes).
+python -m harness eval --mode deterministic --routing-bakeoff     --scenario "k_routing*" --tag routing_bakeoff_deterministic
+
+# Live LLM/lexical bake-off against the configured model endpoint.
+python -m harness eval --mode live --routing-bakeoff     --scenario "k_routing*" --strategies lexical,llm --tag routing_bakeoff_live
+```
+
+To measure embedding/hybrid live, start an OpenAI-compatible embeddings
+server and point `embeddings.base_url` at it from inside the harness container.
+For example, a vLLM server exposes `/v1/embeddings`:
+
+```bash
+docker run --rm --gpus all -p 8081:8000 vllm/vllm-openai:latest   --model BAAI/bge-small-en-v1.5 --task embed
+```
+
+On Docker Desktop use `http://host.docker.internal:8081`; on Linux use the
+host IP or a compose service name. `examples/config.routing.yaml` is a complete
+routing/embeddings sample.
+
+Current measurement state: the deterministic bake-off is a plumbing check
+only (`eval/results/routing_bakeoff_deterministic.*`). A live five-case sample
+(`routing_bakeoff_live.*`) measured lexical at 100% on its base case and 0% on
+the held-out case, while the constrained LLM strategy scored 100% on both at
+roughly 1.0?1.2 s per routed turn. The embedding endpoint was not running, so
+`embedding` and `hybrid` are reported unavailable. The full 65-case live sweep
+was not completed in this environment; the >=85% held-out hypothesis remains
+unverified until it is run against a reachable embeddings endpoint.
+
 ### Memory
 
 Kinds: fact, preference, decision, procedure, constraint, open_question,
@@ -569,6 +627,15 @@ context — bounded results from memories and older messages, with
 provenance; `include_archived` opts into archived rows, which are labelled
 and restored by that explicit retrieval. The `read_artifact` tool reads
 bounded artifacts by path, with traversal blocked.
+
+Model-authored `remember` writes default to the task's domain, except
+`preference` and `constraint` kinds, which default to `global` as facts about
+the user. The model may explicitly widen to `global` or name the current
+domain; a request for a different domain is narrowed back to the task domain. Provenance records `task_domain_id`, `task_domain`,
+`scope_requested`, `scope_effective`, and `scope_choice`, so a global memory
+still says which domain it came from. Consolidation and fixture writes are
+manager-level operations without a task origin and keep their proposed scope;
+General remains the unscoped interface and saves global memory.
 
 ### Consolidation
 
@@ -956,6 +1023,10 @@ Main groups:
 - `context.*`: token budgets, reserved output and tool-schema headroom,
   recent-message window, memory and history retrieval counts, per-section
   budgets
+- `routing.*`: strategy (`lexical|embedding|llm|hybrid`, default `lexical`),
+  shadow strategies, routing model, timeout, hybrid margin, recent-turn depth,
+  and the domain-summary character bound. `embeddings.*`: enabled, base_url,
+  model, path, timeout, minimum similarity, and the card-example variant
 - `domains.*`: routing threshold and ambiguity margin (both `1.0`),
   task-resume margin, evidence weights (name `1.5`, keyword `1.0`, example
   `0.75`, description `0.5`, learned term `0.5`, learned-vocabulary cap
@@ -1042,16 +1113,17 @@ scratch data directory. It never touches the deployed `data/` directory or the
 repository (the sandbox refuses both). See `eval/README.md` for the scenario
 and assertion reference.
 
-Phase 10 adds `eval/scenarios/k_routing.yaml` with 50 labelled routing cases
+Phase 10 adds `eval/scenarios/k_routing.yaml` with 65 labelled routing cases
 and `eval/scenarios/k_memory_recall.yaml` for cross-domain recall. The
 `routing` assertion reads the recorded `domain.routed` decision and can check
 the domain, candidates, reason, and score. `scripts/route_sweep.py` measures
 routing across threshold/margin grids, while
 `scripts/memory_recall_report.py` compares the memory modes. Committed
 reports under `eval/results/` include the Phase 10A baseline, the Phase 10B
-routing result (94.00% accuracy and 0% false positives; General-only control
-28.00%), and the Phase 10D memory result (`boost` and explicit `search`:
-100% recall@5). The memory result is from the deterministic corpus, not a
+one-turn sweep (85.25% accuracy on 61 cases and 0% false positives;
+General-only control 27.87%), the semantic bake-off (lexical base 92.73% /
+heldout 20.00%; LLM live sample 100% on both), and the Phase 10D memory result
+(`boost` and explicit `search`: 100% recall@5). The memory result is from the deterministic corpus, not a
 live-model or real-use measurement. Routing scenarios are marked
 `measurement: true`: misses are reported but do not gate the eval command.
 
@@ -1206,13 +1278,19 @@ scenario between paths.
 
 ## Known limitations
 
+- Semantic routing is opt-in and measured separately. When no OpenAI-compatible
+  embeddings endpoint is reachable, the `embedding`/`hybrid` bake-off rows are
+  reported as unavailable rather than approximated. The deterministic bake-off
+  uses scripted fakes and measures plumbing only. Domain summaries are editable
+  but the optional automatic summary-refresh pass is deferred.
+
 - Single user, single process per data directory; no accounts, no TLS.
   Put the token-protected UI behind a VPN or a TLS reverse proxy.
-- Domain routing and task resumption remain primarily deterministic lexical
-  matching, not general semantic understanding. Routing evidence is richer
-  than the original name/description score, and the optional model tie-break
-  is constrained and off by default, but paraphrases without shared evidence
-  may still misroute to General (recoverable through task correction).
+- The default domain router remains the deterministic lexical control;
+  embedding, LLM, and hybrid strategies are opt-in and not enabled until their
+  live bake-off is reviewed. Paraphrases without shared explicit or learned
+  evidence may still fall back to General under the default (recoverable
+  through task correction).
 - Retrieval is FTS5 keyword search; no embeddings or vector database.
   Deep paraphrase recall can miss.
 - Scheduling is process-bound: due work is noticed on a tick while

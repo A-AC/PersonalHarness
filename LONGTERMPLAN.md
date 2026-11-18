@@ -2054,6 +2054,11 @@ log before starting the next one.
 | 2026-11-16 | Reset is an authenticated server call that backs up before wiping and keeps backups/logs/import files | The live process owns the writer lock and SQLite handles; it exits and the container restarts |
 | 2026-11-16 | Doctor reads config and modules read-only and only fails on hard failures | It must be safe to run beside a live server; warnings stay visible without blocking a diagnosis |
 | 2026-11-17 | Rehearse deployment migrations by replaying the pre-migrate archive from the live volume, not by standing up staging | Same database, same migration code, and the real rows; staging would only add a second service identity, which the owner judged not worth another stack |
+| 2026-11-18 | Domain routing is pluggable; `lexical` stays the default control and semantic strategies are opt-in | The bake-off must compare against the unchanged baseline before changing behaviour |
+| 2026-11-18 | Semantic router output is a label only; timeouts/errors fall back to lexical and record `router.fallback` | Routing must never fail a turn or widen permissions |
+| 2026-11-18 | Only user-typed messages are routed; inbox/automation/schedule keep their configured domain | External text must not select which tools appear |
+| 2026-11-18 | Domain summaries are editable routing evidence; automatic summary refresh is deferred | Keeps the session bounded and the summary user-reviewable |
+| 2026-11-18 | Model-authored memory may narrow to the task domain or widen to global; the origin domain and choice stay in provenance | Keeps user facts global without losing where a memory came from |
 
 ---
 

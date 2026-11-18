@@ -75,9 +75,9 @@ def load_corpus(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
             continue
         steps = scenario.get("steps") or []
         if len(steps) != 1 or not isinstance(steps[0], dict):
-            raise SystemExit(
-                f"{scenario.get('id')}: routing cases need exactly one turn"
-            )
+            # Multi-turn follow-ups are measured by the routing bake-off,
+            # where the preceding turns are actually in conversation state.
+            continue
         routing = (steps[0].get("expect") or {}).get("routing") or {}
         expected = routing.get("domain")
         text = str(steps[0].get("input") or "")

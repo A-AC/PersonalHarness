@@ -95,6 +95,8 @@ class MemoryManager:
         scope: str | None,
         domain_id: str | None,
         domains,
+        *,
+        origin_domain_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Validate scope and keep General unscoped.
 
@@ -102,10 +104,29 @@ class MemoryManager:
         General are therefore stored as global rows with no domain id. Legacy
         ``domain:general`` rows are left untouched and are normalised at read
         time by :meth:`_effective_scope`.
+
+        ``origin_domain_id`` marks a model-authored write. In that path the
+        model may narrow to the current domain or widen to global; a request
+        for another domain is coerced to the originating task's domain. Direct
+        manager calls (fixtures, consolidation) keep the historical behaviour.
         """
-        # General owns no silo. Even an explicit domain scope requested from
-        # a General task remains unscoped, matching the owner decision.
-        if str(domain_id or "") == "general":
+        current = str(domain_id or "")
+        if current == "general":
+            current = ""
+        if origin_domain_id is not None:
+            origin = str(origin_domain_id or "")
+            if origin == "general":
+                origin = ""
+            requested = str(scope or "").strip()
+            if requested == "global":
+                return "global", None
+            if origin and domains is not None and domains.get(origin):
+                # Narrow to the current domain; another/unknown domain is
+                # coerced because the model may not widen across domains.
+                return f"domain:{origin}", origin
+            return "global", None
+        # Historical/direct path.
+        if not current and not scope:
             return "global", None
         if scope == "global":
             return "global", None
@@ -115,9 +136,11 @@ class MemoryManager:
                 return "global", None
             if domains is not None and domains.get(candidate):
                 return scope, candidate
-            raise MemoryError(f"unknown domain in scope: {candidate}")
-        if domain_id and domains is not None and domains.get(domain_id):
-            return f"domain:{domain_id}", domain_id
+            if current and domains is not None and domains.get(current):
+                return f"domain:{current}", current
+            return "global", None
+        if current and domains is not None and domains.get(current):
+            return f"domain:{current}", current
         return "global", None
 
     def _record_revision(
@@ -385,6 +408,7 @@ class MemoryManager:
         run_id: str | None = None,
         domains=None,
         artifact_body: str | None = None,
+        origin_domain_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a memory. Correction of an existing subject supersedes it."""
         content = (content or "").strip()
@@ -393,7 +417,45 @@ class MemoryManager:
         kind = self._default_kind(content, kind)
         if kind not in KINDS:
             raise MemoryError(f"unknown memory kind: {kind}")
-        scope_value, scope_domain = self._scope_for(scope, domain_id, domains)
+        requested_scope = str(scope or "").strip()
+        default_global = (
+            origin_domain_id is not None
+            and not requested_scope
+            and kind in ("preference", "constraint")
+        )
+        if default_global:
+            # Policy: facts about the user (preferences/constraints) default
+            # to global; domain-work facts stay with the task domain.
+            scope = "global"
+        scope_value, scope_domain = self._scope_for(
+            scope, domain_id, domains, origin_domain_id=origin_domain_id
+        )
+        provenance = dict(provenance or {})
+        origin_for_record = (
+            str(origin_domain_id) if origin_domain_id is not None else
+            (str(domain_id) if domain_id else "")
+        )
+        if origin_for_record:
+            provenance.setdefault("task_domain_id", origin_for_record)
+            if domains is not None and origin_for_record != "general":
+                origin_domain = domains.get(origin_for_record)
+                if origin_domain is not None:
+                    provenance.setdefault(
+                        "task_domain", str(origin_domain.get("name") or "")
+                    )
+        provenance.setdefault(
+            "scope_requested", requested_scope or "auto"
+        )
+        provenance.setdefault("scope_effective", scope_value)
+        if origin_domain_id is not None:
+            if default_global:
+                provenance["scope_choice"] = "default_global"
+            elif requested_scope == "global" and scope_value == "global":
+                provenance["scope_choice"] = "widen_global"
+            elif scope_value.startswith("domain:"):
+                provenance["scope_choice"] = "narrow_domain"
+            else:
+                provenance["scope_choice"] = "global"
         if kind == "temp" and not expires_at:
             days = int(self.config.get("memory.temp_expiry_days", 14))
             expires_at = util.iso(util.now_utc() + dt.timedelta(days=days))

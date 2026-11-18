@@ -1,0 +1,26 @@
+# Routing configuration sample (merge into data/config.yaml).
+#
+# The default is the unchanged lexical control. Switch routing.strategy only
+# after reading the bake-off report for your endpoint.
+routing:
+  strategy: lexical            # lexical | embedding | llm | hybrid
+  shadow_strategies: []        # e.g. [embedding, llm]; recorded, never acted on
+  model: ""                    # empty = the selected main model
+  model_timeout_s: 3.0
+  hybrid_margin: 0.15
+  recent_turns: 2              # user turns included in semantic context
+  card_summary_chars: 800      # bound for editable domain summaries
+
+# OpenAI-compatible /v1/embeddings. base_url must be reachable from inside
+# the harness container: use host.docker.internal on Docker Desktop, the host
+# IP on Linux, or a compose service name. Example model servers that expose
+# the OpenAI embeddings API: vLLM (`vllm serve MODEL --task embed`) or an
+# equivalent gateway. Start one before enabling embedding/hybrid.
+embeddings:
+  enabled: false
+  base_url: "http://host.docker.internal:8081"
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+  path: "/v1/embeddings"
+  timeout_s: 10.0
+  min_similarity: 0.2
+  card_examples: true

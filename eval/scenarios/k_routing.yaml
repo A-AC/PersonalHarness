@@ -1077,3 +1077,341 @@ scenarios:
         expect:
           routing:
             domain: General
+
+  # -- Spanish subset (held out) ---------------------------------------------
+  - id: k_routing.spanish_calories
+    name: Spanish calories question
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "?cu?ntas calor?as tiene una hamburguesa?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.spanish_lights
+    name: Spanish lights request
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "apaga las luces de la cocina"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.spanish_greeting
+    name: Spanish language-learning request
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "c?mo se dice buenos d?as en espa?ol"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  - id: k_routing.spanish_rain
+    name: Spanish clothing/weather question
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "qu? ropa debo usar si va a llover"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.spanish_protein
+    name: Spanish protein question
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "?cu?nta prote?na tiene el yogur griego?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  # -- Near-domain confusion -------------------------------------------------
+  - id: k_routing.confusion_jacket_run
+    name: Jacket for a run is Clothing, not Health
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "should I wear a jacket for my run in the cold"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.confusion_workout_cold
+    name: Workout plan for cold weather is Health
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "build a workout plan for cold weather"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.confusion_thermostat_workout
+    name: Thermostat before a workout is Home automation
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "set the thermostat before my workout"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  # -- Multi-turn follow-ups (held out) --------------------------------------
+  - id: k_routing.followup_health_dinner
+    name: Follow-up after nutrition context stays in Health
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "I am trying to eat better and track my nutrition"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+      - kind: turn
+        input: "and for dinner?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.followup_clothing_dinner
+    name: Follow-up after an outfit context stays in Clothing
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "I need outfit ideas for tomorrow"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+      - kind: turn
+        input: "and for dinner?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.followup_home_kitchen
+    name: Follow-up after a lights context stays in Home automation
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "turn on the porch lights"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+      - kind: turn
+        input: "and the kitchen?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.followup_language_again
+    name: Follow-up after Spanish practice stays in Language learning
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    tags: [heldout]
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "let us practice Spanish verbs"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+      - kind: turn
+        input: "quiz me again"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  # -- More General chatter --------------------------------------------------
+  - id: k_routing.general_photosynthesis
+    name: Science explanation is General
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "explain how photosynthesis works"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_sql
+    name: SQL help is General
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "write a SQL query to join two tables"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_cat_name
+    name: Naming a cat is General
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "what is a good name for a cat"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
