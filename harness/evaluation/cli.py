@@ -19,6 +19,22 @@ from .runner import (
 )
 
 
+def gating_failures(scenarios: list[Any]) -> list[Any]:
+    """Failed scenarios that must make the command exit non-zero."""
+    return [
+        item for item in scenarios
+        if item.status in ("failed", "error") and not item.measurement
+    ]
+
+
+def measurement_failures(scenarios: list[Any]) -> list[Any]:
+    """Failed measurement scenarios: reported, but never gating."""
+    return [
+        item for item in scenarios
+        if item.status in ("failed", "error") and item.measurement
+    ]
+
+
 def cmd_eval(args: Any) -> None:
     results_dir = Path(args.results_dir or Path("data") / "eval" / "results")
 
@@ -109,7 +125,16 @@ def cmd_eval(args: Any) -> None:
         scenario for scenario in run.scenarios
         if scenario.status in ("failed", "error")
     ]
-    raise SystemExit(1 if failed else 0)
+    measurement_failed = measurement_failures(run.scenarios)
+    gating_failed = gating_failures(run.scenarios)
+    if measurement_failed:
+        passed = len([item for item in run.scenarios
+                      if item.measurement and item.status == "passed"])
+        print(
+            f"\nmeasurement scenarios: {passed} passed / "
+            f"{len(measurement_failed)} failed (not gating)"
+        )
+    raise SystemExit(1 if gating_failed else 0)
 
 
 def _list_models(args: Any) -> None:

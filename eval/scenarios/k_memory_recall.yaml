@@ -1,0 +1,174 @@
+# K. Cross-domain memory recall corpus (Phase 10D).
+#
+# Facts live in one domain; the question comes from General or from a sibling
+# domain. Off/search context remains a hard partition, while boost may reveal
+# a lexically matched sibling fact. The corpus must pass under boost while
+# keeping unrelated sibling filler out.
+x-fixtures: &fixtures
+  domains:
+    - name: Health
+      description: "health, fitness, nutrition, calories, protein, diet, sleep, exercise, doctor, symptoms"
+      keywords: [nutrition, calories, protein, diet, exercise, sleep, fitness, healthy]
+      examples:
+        - "how many calories are in this"
+        - "is this healthy"
+        - "how much protein is in this"
+    - name: Clothing
+      description: "clothing, wardrobe, outfits, wear, weather, dress, shoes, jacket"
+      keywords: [outfit, wear, shirt, shoes, jacket, wardrobe, dress, coat]
+      examples:
+        - "what should I wear"
+        - "does this match my outfit"
+  memories:
+    - content: "The user avoids peanuts because of an allergy"
+      kind: constraint
+      domain: Health
+    - content: "The user's protein target is 120g per day"
+      kind: fact
+      domain: Health
+    - content: "The user prefers navy and charcoal"
+      kind: preference
+      domain: Clothing
+    - content: "The user wears size 42 shoes"
+      kind: fact
+      domain: Clothing
+    - content: "The user prefers metric units"
+      kind: preference
+      scope: global
+
+scenarios:
+  - id: k_memory_recall.general_allergy
+    name: Allergy fact asked from General
+    category: memory
+    severity: high
+    modes: [deterministic]
+    fixtures: *fixtures
+    steps:
+      - kind: turn
+        input: "What should I avoid eating because of my peanut allergy?"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+          context:
+            system_contains: "avoids peanuts"
+            system_not_contains: "navy and charcoal"
+
+  - id: k_memory_recall.general_protein
+    name: Protein target asked from General
+    category: memory
+    severity: high
+    modes: [deterministic]
+    fixtures: *fixtures
+    steps:
+      - kind: turn
+        input: "How much protein should I eat each day?"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+          context:
+            system_contains: "120g per day"
+            system_not_contains: "size 42"
+
+  - id: k_memory_recall.health_clothing_preference
+    name: Clothing preference asked from Health
+    category: memory
+    severity: high
+    modes: [deterministic]
+    fixtures: *fixtures
+    steps:
+      - kind: turn
+        input: "For my health routine, help me pick a navy or charcoal base for my capsule wardrobe"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+          context:
+            system_contains: "navy and charcoal"
+            system_not_contains: "avoids peanuts"
+
+  - id: k_memory_recall.clothing_health_allergy
+    name: Health allergy asked from Clothing
+    category: memory
+    severity: high
+    modes: [deterministic]
+    fixtures: *fixtures
+    steps:
+      - kind: turn
+        input: "My clothing wardrobe includes a scarf, is there any allergy risk with peanuts?"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+          context:
+            system_contains: "avoids peanuts"
+            system_not_contains: "120g per day"
+
+  - id: k_memory_recall.general_units
+    name: Global unit preference asked from General
+    category: memory
+    severity: high
+    modes: [deterministic]
+    fixtures: *fixtures
+    steps:
+      - kind: turn
+        input: "Do you use metric or imperial units for measurements?"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+          context:
+            system_contains: "metric units"
+            system_not_contains: "avoids peanuts"
+
+  - id: k_memory_recall.clothing_health_protein
+    name: Protein target asked from Clothing
+    category: memory
+    severity: high
+    modes: [deterministic]
+    fixtures: *fixtures
+    steps:
+      - kind: turn
+        input: "For my clothing wardrobe, how much protein should I eat daily?"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+          context:
+            system_contains: "120g per day"
+            system_not_contains: "avoids peanuts"
+
+  - id: k_memory_recall.general_shoe_size
+    name: Shoe size asked from General
+    category: memory
+    severity: high
+    modes: [deterministic]
+    fixtures: *fixtures
+    steps:
+      - kind: turn
+        input: "What shoe size do I wear again?"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+          context:
+            system_contains: "size 42"
+            system_not_contains: "120g per day"
+
+  - id: k_memory_recall.health_units
+    name: Global unit preference asked from Health
+    category: memory
+    severity: high
+    modes: [deterministic]
+    fixtures: *fixtures
+    steps:
+      - kind: turn
+        input: "For my health log, should measurements use the metric system or imperial?"
+        script:
+          - content: "ok"
+        expect:
+          status: completed
+          context:
+            system_contains: "metric units"
+            system_not_contains: "navy and charcoal"

@@ -16,6 +16,7 @@ from harness.evaluation.aggregate import (
     load_reports,
     render_aggregate,
 )
+from harness.evaluation.assertions import Observation, evaluate
 from harness.evaluation.compare import compare_reports, render_comparison
 from harness.evaluation.loader import (
     ScenarioError,
@@ -304,6 +305,60 @@ def test_batch_deferral_is_observable(tmp_path: Path) -> None:
         results_dir=tmp_path / "results", tag="deferred", environ={},
     )
     assert run.scenarios[0].status == "passed"
+
+
+def test_routing_assertion_reads_latest_routed_event(make_app) -> None:
+    app = make_app.build(default="ok")
+    step = ScenarioStep(
+        kind="inspect", expect={"routing": {"domain": "Health"}}
+    )
+    missing = evaluate(Observation(app=app, step=step))
+    assert len(missing) == 1
+    assert missing[0].status == "failed"
+    assert missing[0].observed is None
+
+    app.domains.create("dmhealth", name="Health", created_by="test")
+    app.events.record(
+        "domain.routed",
+        domain_id="dmhealth",
+        data={
+            "reason": "best domain evidence",
+            "candidates": [
+                {"domain_id": "dmhealth", "name": "Health", "score": 2.0},
+            ],
+        },
+    )
+    passed = evaluate(Observation(
+        app=app,
+        step=ScenarioStep(kind="inspect", expect={"routing": {
+            "domain": "Health",
+            "candidates_include": ["Health"],
+            "reason_contains": "best domain",
+            "score_min": 1.5,
+        }}),
+    ))
+    assert passed and all(item.status == "passed" for item in passed)
+
+    wrong = evaluate(Observation(
+        app=app,
+        step=ScenarioStep(kind="inspect", expect={"routing": {
+            "domain": "Clothing",
+        }}),
+    ))
+    assert wrong[0].status == "failed"
+    assert wrong[0].observed == {"id": "dmhealth", "name": "Health"}
+
+    app.events.record(
+        "domain.routed", domain_id="general",
+        data={"reason": "no domain evidence above threshold", "candidates": []},
+    )
+    general = evaluate(Observation(
+        app=app,
+        step=ScenarioStep(kind="inspect", expect={"routing": {
+            "domain": "General",
+        }}),
+    ))
+    assert general[0].status == "passed"
 
 
 def test_quality_is_scored_separately_from_assertions(tmp_path: Path) -> None:

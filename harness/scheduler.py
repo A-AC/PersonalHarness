@@ -616,7 +616,22 @@ class Scheduler:
             report["notified"] = self._notify_pending()
             # 8. Scheduled consolidation.
             self._maybe_consolidate(now)
-            # 8b. Bounded skill drafting from successful tool-using work.
+            # 8b. Usage-based domain suggestions. This pass is deterministic
+            #     and writes at most one proposal; it never creates a domain.
+            try:
+                report["suggestions"] = self.app.domain_suggestions.scan(now)
+            except Exception as exc:
+                report["suggestions"] = {
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                self.events.record(
+                    "domain.suggestion.error", level="error",
+                    data={"error": util.clip(
+                        f"{type(exc).__name__}: {exc}", 500
+                    )},
+                )
+            # 8c. Bounded skill drafting from successful tool-using work.
             #     One optional draft per batch; failures change no skill.
             try:
                 report["skills"] = self.app.skill_builder.maybe_draft(now)

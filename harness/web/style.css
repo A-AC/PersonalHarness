@@ -94,6 +94,40 @@
   .field input.mcp-env-name { flex:0 0 150px; max-width:150px; }
   .pill { display:inline-block; padding:1px 8px; border-radius:10px;
           font-size:11px; border:1px solid var(--line); color:var(--dim); }
+  .domainchip { display:inline-flex; align-items:center; gap:5px;
+    max-width:100%; padding:2px 8px; border-radius:10px;
+    border:1px solid #3b5368; background:#17232d; color:#a9c9df;
+    font-size:11px; line-height:1.3; overflow-wrap:anywhere; }
+  #chat > .domainchip { align-self:flex-start; }
+  .domainchip .src { color:var(--dim); font-size:10px; }
+  .domainchip .tasklink { background:none; border:0; color:var(--accent);
+    cursor:pointer; font:inherit; font-size:10px; padding:0 4px; }
+  .domainsuggestion { align-self:flex-start; width:min(680px, 100%);
+    max-width:100%; padding:9px 11px; border:1px solid #3b5368;
+    border-radius:7px; background:#17232d; overflow-wrap:anywhere; }
+  #side > .domainsuggestion { width:100%; margin-bottom:10px; }
+  .domainsuggestion-title { color:#a9c9df; font-size:13px;
+    font-weight:600; margin-bottom:3px; }
+  .domainsuggestion-terms { color:var(--text); font-size:12px;
+    margin-bottom:3px; }
+  .domainsuggestion-objectives { margin-top:6px; padding-top:5px;
+    border-top:1px dotted #31404f; }
+  .domainsuggestion button { background:#243041; color:var(--text);
+    border:1px solid var(--line); border-radius:4px; padding:3px 10px;
+    cursor:pointer; font-size:12px; }
+  .domainsuggestion button.ok { border-color:var(--ok); color:var(--ok); }
+  .domainsuggestion button.no { border-color:var(--bad); color:var(--bad); }
+  .domainsuggestion button:hover { border-color:var(--accent); }
+  details.why { display:inline-block; max-width:100%; vertical-align:top;
+    margin:0; padding:2px 6px; background:transparent; }
+  details.why > summary { font-size:11px; }
+  details.why[open] { display:block; }
+  details.why[open] > summary { margin-bottom:4px; }
+  .core-profile { border-color:#3b5368; }
+  .core-memory { align-items:flex-start; }
+  .core-memory .small { flex:1; min-width:160px; overflow-wrap:anywhere; }
+  .route-preview-result { margin-top:8px; padding-top:6px;
+    border-top:1px dotted var(--line); }
   .pill.active, .pill.completed, .pill.succeeded, .pill.approved,
   .pill.executed { color:var(--ok); border-color:var(--ok); }
   .pill.waiting_user, .pill.waiting_approval, .pill.paused,
@@ -223,4 +257,9 @@
     .approval-arg-key { margin-top:3px; }
     .approval-form { grid-template-columns:1fr; }
     .approval-field { display:grid; grid-template-columns:1fr; gap:3px; }
+    .domainchip { max-width:100%; }
+    .domainsuggestion { width:100%; }
+    details.why { display:block; width:100%; }
+    .core-memory { flex-direction:column; align-items:stretch; }
+    .core-memory button { align-self:flex-start; }
   }

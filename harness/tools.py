@@ -94,6 +94,9 @@ class ToolContext:
     # First untrusted origin this run consumed ('' when the run is clean).
     # Memory handlers use it to mark provenance and revision reasons.
     tainted_origin: str = ""
+    # Optional runtime callback used by ``use_domain`` to disclose the
+    # entered domain's environment in the tool result.
+    briefing: Callable[[str], dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +150,20 @@ def validate_arguments(
     return cleaned
 
 
+def validate_create_domain_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Require useful routing evidence in a model-proposed domain."""
+    for field in ("keywords", "examples"):
+        values = arguments.get(field)
+        if not isinstance(values, list) or not any(
+            isinstance(item, str) and item.strip() for item in values
+        ):
+            raise ToolError(
+                f"create_domain: argument {field} must contain at least one "
+                "non-empty value"
+            )
+    return arguments
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -180,6 +197,10 @@ class ToolRegistry:
             raise ToolError(f"invalid risk class for {spec.name}: {spec.risk}")
         overrides = self.config.get("tools.risk_overrides", {}) or {}
         effective = overrides.get(spec.name, spec.risk)
+        # Domain instructions are user-authored state.  Unlike ordinary
+        # side-effecting tools, this write always remains approval-gated.
+        if spec.name == "edit_domain":
+            effective = RISK_CONFIRM
         if effective not in (RISK_LOW, RISK_CONFIRM):
             raise ToolError(f"invalid risk override for {spec.name}")
         self._base_risks[spec.name] = spec.risk
@@ -485,7 +506,10 @@ class ToolRegistry:
     ) -> dict[str, Any]:
         """Public validation used by the runtime before creating approvals."""
         spec = self.resolve(call.name, allowed=allowed, role=role)
-        return validate_arguments(spec, call.arguments)
+        validated = validate_arguments(spec, call.arguments)
+        if spec.name == "create_domain":
+            validate_create_domain_arguments(validated)
+        return validated
 
     def record_rejected(
         self, call: ToolCall, *, run_id: str, task_id: str, error: str
@@ -529,7 +553,9 @@ class ToolRegistry:
             spec = self.resolve(
                 call.name, allowed=allowed_names, role=role
             )
-            arguments = validate_arguments(spec, call.arguments)
+            arguments = self.validate(
+                call, allowed=allowed_names, role=role
+            )
         except (ToolError, ToolDenied) as exc:
             self._record(
                 execution_id, run_id, task_id, call, "denied", started,
@@ -663,7 +689,11 @@ class ToolRegistry:
                 "Store durable information for later recall. Use for facts, "
                 "user preferences, decisions, procedures, constraints, and "
                 "open questions the user asks you to remember or that are "
-                "clearly worth keeping. Do not save transient chatter."
+                "clearly worth keeping. Durable facts about the user "
+                "(preferences, constraints, identity) default to global; "
+                "facts about the current domain use that domain's scope. Do "
+                "not save transient "
+                "chatter."
             ),
             parameters={
                 "type": "object",
@@ -680,7 +710,7 @@ class ToolRegistry:
                     "scope": {
                         "type": "string",
                         "description": "'global' or 'domain:<id>'. Defaults to "
-                            "the current domain.",
+                            "the current domain, or global from General.",
                     },
                     "detail": {
                         "type": "string",
@@ -804,8 +834,28 @@ class ToolRegistry:
                     "name": {"type": "string"},
                     "description": {"type": "string"},
                     "reason": {"type": "string"},
+                    "keywords": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                        "description": (
+                            "At least one short routing term that should select "
+                            "this domain."
+                        ),
+                    },
+                    "examples": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                        "description": (
+                            "At least one example user phrase that should "
+                            "select this domain."
+                        ),
+                    },
                 },
-                "required": ["name", "description", "reason"],
+                "required": [
+                    "name", "description", "reason", "keywords", "examples",
+                ],
             },
             risk=RISK_CONFIRM,  # the user must approve the exact creation
             handler=self._tool_create_domain,
@@ -830,6 +880,40 @@ class ToolRegistry:
             },
             risk=RISK_LOW,
             handler=self._tool_use_domain,
+        ))
+        self.register(ToolSpec(
+            name="edit_domain",
+            description=(
+                "Propose a change to user-authored domain instructions. The "
+                "full bounded text requires explicit approval before it is "
+                "written, and this tool is unavailable in a run that consumed "
+                "untrusted content."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Existing active domain id or exact name.",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": (
+                            "Full replacement domain instructions, bounded by "
+                            "domains.instructions_max_chars."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why the instruction change is needed.",
+                    },
+                },
+                "required": ["domain", "instructions", "reason"],
+            },
+            risk=RISK_CONFIRM,
+            # Durable user-authored state: approval is mandatory.
+            side_effects=True,
+            handler=self._tool_edit_domain,
         ))
         self.register(ToolSpec(
             name="schedule_task",
@@ -1111,20 +1195,35 @@ class ToolRegistry:
         return {"memory_id": mem["id"], "status": mem["status"]}
 
     def _tool_search_knowledge(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-        assert ctx.memory and ctx.messages
+        assert ctx.memory and ctx.messages and ctx.domains
         query = args["query"]
-        priority = ["global"]
-        if ctx.domain_id:
-            priority.insert(0, f"domain:{ctx.domain_id}")
+        priority: list[str] = []
+        if ctx.domain_id and ctx.domain_id != "general":
+            priority.append(f"domain:{ctx.domain_id}")
+        priority.append("global")
+        mode = str(self.config.get("memory.cross_domain", "off") or "off")
+        # Search mode changes only this explicit tool: context remains scoped.
+        # Off and boost retain the current-domain-then-global tool surface.
         memories = ctx.memory.search(
             query, scope_priority=priority,
             include_archived=bool(args.get("include_archived")),
+            cross_domain=(mode == "search"),
         )
         # Explicitly returned memories count as used; this is the one bump
-        # per run, deduped by the memory manager.
+        # per run, deduped by the memory manager. Candidate scans do not bump.
         ctx.memory.record_access(
             [m["id"] for m in memories], run_id=ctx.run_id
         )
+
+        def origin(memory: dict[str, Any]) -> str:
+            if memory.get("cross_domain"):
+                domain_id = str(memory.get("origin_domain_id") or "")
+                domain = ctx.domains.get(domain_id)
+                return str((domain or {}).get("name") or domain_id)
+            return str(
+                memory.get("effective_scope") or memory.get("scope") or "global"
+            )
+
         history = ctx.messages.search(query, limit=int(
             self.config.get("context.history_results", 4)
         ), exclude_task=ctx.task_id)
@@ -1138,6 +1237,8 @@ class ToolRegistry:
                     "restored": bool(m.get("restored")),
                     "access_count": m.get("access_count", 0),
                     "last_accessed_at": m.get("last_accessed_at"),
+                    "origin": origin(m),
+                    "from": origin(m),
                 }
                 for m in memories
             ],
@@ -1168,6 +1269,7 @@ class ToolRegistry:
 
     def _tool_create_domain(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         assert ctx.domains
+        validate_create_domain_arguments(args)
         name = args["name"].strip()
         existing = ctx.domains.by_name(name)
         if existing:
@@ -1181,6 +1283,8 @@ class ToolRegistry:
             domain_id, name=name,
             description=args.get("description", ""),
             created_by="model", seed_note=args.get("description") or None,
+            keywords=list(args.get("keywords") or []),
+            examples=list(args.get("examples") or []),
         )
         return {"domain_id": domain["id"], "name": domain["name"]}
 
@@ -1198,12 +1302,42 @@ class ToolRegistry:
         previous_domain = previous["domain_id"] if previous else None
         ctx.tasks.set_domain(ctx.task_id, domain["id"])
         ctx.domain_id = domain["id"]
+        briefing: dict[str, Any] = {}
+        if ctx.briefing is not None:
+            disclosed = ctx.briefing(domain["id"])
+            if isinstance(disclosed, dict):
+                briefing = disclosed
         return {
             "task_id": ctx.task_id,
             "domain_id": domain["id"],
             "name": domain["name"],
             "previous_domain_id": previous_domain,
             "reason": args.get("reason") or "",
+            "briefing": str(briefing.get("text") or ""),
+            "memories": list(briefing.get("memories") or []),
+            "skills": list(briefing.get("skills") or []),
+            "new_tools": list(briefing.get("new_tools") or []),
+        }
+
+    def _tool_edit_domain(
+        self, ctx: ToolContext, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        assert ctx.domains
+        wanted = str(args["domain"]).strip()
+        domain = ctx.domains.get(wanted) or ctx.domains.by_name(wanted)
+        if domain is None:
+            raise ToolError(
+                f"no such domain: {wanted}; use an existing domain id or name"
+            )
+        if domain["status"] != "active":
+            raise ToolError(f"domain {domain['name']} is archived")
+        updated = ctx.domains.update(
+            domain["id"], instructions=str(args["instructions"])
+        )
+        return {
+            "domain_id": updated["id"],
+            "name": updated["name"],
+            "instructions": updated["instructions"],
         }
 
     def _tool_schedule_task(

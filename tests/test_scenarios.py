@@ -76,7 +76,9 @@ def test_scenario_3_scheduled_approval_pause_resume(make_app):
     app = make_app.build(scripts=[
         {"tool_calls": [{"name": "create_domain", "arguments": {
             "name": "Invoices", "description": "invoice filing",
-            "reason": "recurring monthly work"}}]},
+            "reason": "recurring monthly work",
+            "keywords": ["invoice", "filing"],
+            "examples": ["file an invoice", "organize monthly invoices"]}}]},
         {"content": "Created the Invoices domain."},
     ])
     app.scheduler.create_schedule(

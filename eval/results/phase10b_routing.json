@@ -1,0 +1,1772 @@
+{
+  "best": {
+    "accuracy": 0.94,
+    "confusion": {
+      "labels": [
+        "Astronomy",
+        "Clothing",
+        "Fermentation",
+        "General",
+        "Health",
+        "Home automation",
+        "Language learning"
+      ],
+      "rows": {
+        "Astronomy": {
+          "Astronomy": 1,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 0,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Clothing": {
+          "Astronomy": 0,
+          "Clothing": 7,
+          "Fermentation": 0,
+          "General": 1,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Fermentation": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 1,
+          "General": 0,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "General": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 14,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Health": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 2,
+          "Health": 8,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Home automation": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 0,
+          "Health": 0,
+          "Home automation": 8,
+          "Language learning": 0
+        },
+        "Language learning": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 0,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 8
+        }
+      }
+    },
+    "correct": 47,
+    "false_positive_rate": 0.0,
+    "general_fallback_rate": 0.34,
+    "margin": 1.0,
+    "threshold": 1.0,
+    "total": 50
+  },
+  "case_count": 50,
+  "control": {
+    "accuracy": 0.28,
+    "confusion": {
+      "labels": [
+        "Astronomy",
+        "Clothing",
+        "Fermentation",
+        "General",
+        "Health",
+        "Home automation",
+        "Language learning"
+      ],
+      "rows": {
+        "Astronomy": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 1,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Clothing": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 8,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Fermentation": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 1,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "General": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 14,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Health": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 10,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Home automation": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 8,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Language learning": {
+          "Astronomy": 0,
+          "Clothing": 0,
+          "Fermentation": 0,
+          "General": 8,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        }
+      }
+    },
+    "correct": 14,
+    "false_positive_rate": 0.0,
+    "general_fallback_rate": 1.0,
+    "total": 50
+  },
+  "corpus": "eval/scenarios/k_routing.yaml",
+  "experiment": "phase10b_routing",
+  "grid": [
+    {
+      "accuracy": 0.9,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 1,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 7,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 1
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 8
+          }
+        }
+      },
+      "correct": 45,
+      "false_positive_count": 2,
+      "false_positive_rate": 0.04,
+      "general_fallback_count": 15,
+      "general_fallback_rate": 0.3,
+      "margin": 0.5,
+      "misses": 3,
+      "threshold": 0.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.92,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 1,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 7,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 13,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 8
+          }
+        }
+      },
+      "correct": 46,
+      "false_positive_count": 1,
+      "false_positive_rate": 0.02,
+      "general_fallback_count": 16,
+      "general_fallback_rate": 0.32,
+      "margin": 0.75,
+      "misses": 3,
+      "threshold": 0.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.94,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 1,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 7,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 8
+          }
+        }
+      },
+      "correct": 47,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 17,
+      "general_fallback_rate": 0.34,
+      "margin": 1.0,
+      "misses": 3,
+      "threshold": 0.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.9,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 1,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 7,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 1
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 8
+          }
+        }
+      },
+      "correct": 45,
+      "false_positive_count": 2,
+      "false_positive_rate": 0.04,
+      "general_fallback_count": 15,
+      "general_fallback_rate": 0.3,
+      "margin": 0.5,
+      "misses": 3,
+      "threshold": 1.0,
+      "total": 50
+    },
+    {
+      "accuracy": 0.92,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 1,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 7,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 13,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 8
+          }
+        }
+      },
+      "correct": 46,
+      "false_positive_count": 1,
+      "false_positive_rate": 0.02,
+      "general_fallback_count": 16,
+      "general_fallback_rate": 0.32,
+      "margin": 0.75,
+      "misses": 3,
+      "threshold": 1.0,
+      "total": 50
+    },
+    {
+      "accuracy": 0.94,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 1,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 7,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 8
+          }
+        }
+      },
+      "correct": 47,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 17,
+      "general_fallback_rate": 0.34,
+      "margin": 1.0,
+      "misses": 3,
+      "threshold": 1.0,
+      "total": 50
+    },
+    {
+      "accuracy": 0.84,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 6,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 1
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 42,
+      "false_positive_count": 2,
+      "false_positive_rate": 0.04,
+      "general_fallback_count": 18,
+      "general_fallback_rate": 0.36,
+      "margin": 0.5,
+      "misses": 6,
+      "threshold": 1.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.86,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 6,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 13,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 43,
+      "false_positive_count": 1,
+      "false_positive_rate": 0.02,
+      "general_fallback_count": 19,
+      "general_fallback_rate": 0.38,
+      "margin": 0.75,
+      "misses": 6,
+      "threshold": 1.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.88,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 6,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 1,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 8,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 0,
+            "Health": 0,
+            "Home automation": 8,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 44,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 20,
+      "general_fallback_rate": 0.4,
+      "margin": 1.0,
+      "misses": 6,
+      "threshold": 1.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.68,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 5,
+            "Fermentation": 0,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 1
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 7,
+            "Health": 3,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 7,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 34,
+      "false_positive_count": 2,
+      "false_positive_rate": 0.04,
+      "general_fallback_count": 26,
+      "general_fallback_rate": 0.52,
+      "margin": 0.5,
+      "misses": 14,
+      "threshold": 2.0,
+      "total": 50
+    },
+    {
+      "accuracy": 0.7,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 5,
+            "Fermentation": 0,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 13,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 7,
+            "Health": 3,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 7,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 35,
+      "false_positive_count": 1,
+      "false_positive_rate": 0.02,
+      "general_fallback_count": 27,
+      "general_fallback_rate": 0.54,
+      "margin": 0.75,
+      "misses": 14,
+      "threshold": 2.0,
+      "total": 50
+    },
+    {
+      "accuracy": 0.72,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 5,
+            "Fermentation": 0,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 7,
+            "Health": 3,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 7,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 36,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 28,
+      "general_fallback_rate": 0.56,
+      "margin": 1.0,
+      "misses": 14,
+      "threshold": 2.0,
+      "total": 50
+    },
+    {
+      "accuracy": 0.66,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 4,
+            "Fermentation": 0,
+            "General": 4,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 13,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 8,
+            "Health": 2,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 7,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 33,
+      "false_positive_count": 1,
+      "false_positive_rate": 0.02,
+      "general_fallback_count": 29,
+      "general_fallback_rate": 0.58,
+      "margin": 0.5,
+      "misses": 16,
+      "threshold": 2.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.68,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 4,
+            "Fermentation": 0,
+            "General": 4,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 8,
+            "Health": 2,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 7,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 34,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 30,
+      "general_fallback_rate": 0.6,
+      "margin": 0.75,
+      "misses": 16,
+      "threshold": 2.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.68,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 4,
+            "Fermentation": 0,
+            "General": 4,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 8,
+            "Health": 2,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 7,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 34,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 30,
+      "general_fallback_rate": 0.6,
+      "margin": 1.0,
+      "misses": 16,
+      "threshold": 2.5,
+      "total": 50
+    },
+    {
+      "accuracy": 0.58,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 3,
+            "Fermentation": 0,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 8,
+            "Health": 2,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 0,
+            "Home automation": 6,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 4,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 4
+          }
+        }
+      },
+      "correct": 29,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 35,
+      "general_fallback_rate": 0.7,
+      "margin": 0.5,
+      "misses": 21,
+      "threshold": 3.0,
+      "total": 50
+    },
+    {
+      "accuracy": 0.58,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 3,
+            "Fermentation": 0,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 8,
+            "Health": 2,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 0,
+            "Home automation": 6,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 4,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 4
+          }
+        }
+      },
+      "correct": 29,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 35,
+      "general_fallback_rate": 0.7,
+      "margin": 0.75,
+      "misses": 21,
+      "threshold": 3.0,
+      "total": 50
+    },
+    {
+      "accuracy": 0.58,
+      "confusion": {
+        "labels": [
+          "Astronomy",
+          "Clothing",
+          "Fermentation",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Astronomy": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Clothing": {
+            "Astronomy": 0,
+            "Clothing": 3,
+            "Fermentation": 0,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Fermentation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 14,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 8,
+            "Health": 2,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 2,
+            "Health": 0,
+            "Home automation": 6,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Astronomy": 0,
+            "Clothing": 0,
+            "Fermentation": 0,
+            "General": 4,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 4
+          }
+        }
+      },
+      "correct": 29,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 35,
+      "general_fallback_rate": 0.7,
+      "margin": 1.0,
+      "misses": 21,
+      "threshold": 3.0,
+      "total": 50
+    }
+  ],
+  "margins": [
+    0.5,
+    0.75,
+    1.0
+  ],
+  "thresholds": [
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    3.0
+  ]
+}

@@ -1,7 +1,7 @@
 # Personal Harness - Long-Term Plan
 
-Status: in progress (Phases 0-6 and 8 complete; 9A, 12A, and 12B implemented; Phase 7 waits on LaYa; 9B and Phases 10, 11, and 13 proposed)
-Last updated: 2026-11-16
+Status: in progress (Phases 0-6, 8, and 10 complete; 9A, 12A, and 12B implemented; Phase 7 waits on LaYa; 9B and Phases 11 and 13 proposed)
+Last updated: 2026-11-17
 Scope: capability modules (skills + MCP servers), memory lifetime, autonomy,
 sub-agents, prompt-injection defence, UI information architecture, approvals,
 model selection/routing, domains as work environments, install/setup, multi-user.
@@ -302,9 +302,10 @@ the navigation and information-architecture pass.
 | 12 | 13A-13D multi-user | Largest; the `user_id` prep migration lands in v9 |
 | 13 | Phase 7 guard | When LaYa is online |
 
-**Current position (2026-11-16):** steps 1-6 and 9 are complete (Phase 8 and
-its audit fixes, 9A, 12B, and 12A are committed and deployed to staging). The
-next session is step 7, 10A, with the capability-track server optional.
+**Current position (2026-11-17):** steps 1-9 are complete (Phase 8 and its
+audit fixes, 9A, Phase 10A-10G, 12B, and 12A are implemented). The Phase 10
+implementation is done; its real-use test/refine cycle on Ares remains
+pending, and the capability-track server is still optional.
 
 Ordering rationale (original):
 
@@ -1167,9 +1168,38 @@ after deployment, and their results are recorded before enabling the router:
 
 ### Phase 10 - Domains as work environments (routing, entry, memory, feedback)
 
-**Status:** proposed. Sub-phases 10A-10G, one commit each, in order. Every sub-phase
-is a hypothesis plus an experiment; quoted targets are initial and expected to be
-revised after each test/refine cycle.
+**Status:** implemented (2026-11-17). Sub-phases 10A-10G are implemented. The
+measurements below come from the deterministic corpora; the real-use test and
+refine cycle on Ares remains pending.
+
+**Implementation notes.**
+
+- Schema v9 adds domain routing-evidence columns, `routing_feedback` and
+  `domain_suggestions`, plus the Phase 13 `user_id` prep columns.
+- 10A adds the labelled routing and cross-domain recall corpora and records
+  the baseline reports under `eval/results/`.
+- 10B ships routing evidence v2 with the tuned threshold and ambiguity margin
+  at `1.0`/`1.0`; the 50-case corpus (including learned-evidence cases)
+  measured 94.00% accuracy and 0% false positives, against a 28.00%
+  General-only control. Learned terms are weighted below explicit evidence and
+  require two matches for a learned-only route.
+- 10C adds domain-entry briefings, below-threshold hints, cross-domain tool
+  discovery, and the visible entering-domain chip.
+- 10D selects `boost` as the default cross-domain memory mode; the
+  deterministic corpus measured 100% recall@5 for `boost` and explicit
+  `search`, versus 50% for `off`.
+- 10E adds the correction/feedback loop, domain environment cards, route
+  preview, feedback export, and approval-gated `edit_domain`.
+- 10F adds `shadow`/`on` model tie-breaking with a bounded 16-token,
+  trusted-only label call; invalid or unavailable output falls back to
+  General.
+- 10G adds deterministic usage-based domain suggestions; the heartbeat never
+  creates a domain and dismissed clusters are remembered.
+- A follow-up audit hardened context rebuild after `use_domain`, learned
+  evidence weighting, correction evidence, suggestion reload filtering,
+  evaluation gating/control reports, and the classifier prompt bounds.
+- The post-implementation test/refine cycle is still pending on real use and
+  Ares; the corpus results are not a substitute for that validation.
 
 **Owner decisions (2026-11-15):** real domains will arrive over time (Health,
 home automation, language learning, and others are examples, not commitments),
@@ -1252,7 +1282,7 @@ Two things must both be true:
 
 #### Schema (v9, additive, one migration)
 
-v8 is the current approvals version, so this phase is the next bump. The same
+v8 was the approvals version, so this phase used the v9 bump. The same
 v9 migration also carries the Phase 13 prep columns (`user_id TEXT NOT NULL
 DEFAULT 'owner'` on messages, tasks, memories, domains, schedules, approvals,
 and inbox_events) with no behaviour change; land both in one commit rather
@@ -1291,13 +1321,14 @@ only; do not interleave two migrations in one commit.
 
 ```yaml
 domains:
-  routing_threshold: 2.0          # retune from the 10A sweep
-  ambiguity_margin: 0.75
+  routing_threshold: 1.0          # tuned from the 10A sweep
+  ambiguity_margin: 1.0
   weights:
     name: 1.5
     keyword: 1.0
     example: 0.75
     description: 0.5
+    learned_term: 0.5             # one learned term; learned-only needs 2+
     learned_cap: 2.0              # cap on memory/skill/task vocabulary evidence
   stemming: true
   hint_min_score: 0.5             # below threshold but worth hinting to the model
@@ -1324,7 +1355,7 @@ memory:
 
 **Scope**
 - New eval suites `eval/scenarios/k_routing.yaml` and `k_memory_recall.yaml`.
-  - Routing corpus: about 40 labelled messages across 4-5 domains (Health,
+  - Routing corpus: 46 labelled messages across 4-5 domains (Health,
     Home automation, Language learning, Clothing, General). The eval fixture
     creates these domain rows for the run; the shipped harness has none.
     Include the nutrition cases, composite messages such as "what should I wear

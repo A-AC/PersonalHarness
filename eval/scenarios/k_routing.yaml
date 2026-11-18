@@ -1,0 +1,1079 @@
+# K. Routing corpus (Phase 10A baseline).
+#
+# Five placeholder domains stand in for the real ones users will create. The
+# anchor keeps every scenario on the same fixture; the loader ignores the
+# top-level ``x-domains`` key because the file has a ``scenarios:`` list.
+#
+# Expected domains are labels, not a promise about the current router: at the
+# Phase 10A baseline most messages without the literal domain name route to
+# General. 10B measures the improvement against this file.
+x-domains: &domains
+  - name: Health
+    description: "health, fitness, nutrition, calories, protein, diet, sleep, exercise, doctor, symptoms"
+    keywords: [nutrition, calories, protein, diet, exercise, sleep, fitness, healthy]
+    examples:
+      - "how many calories are in this"
+      - "is this healthy"
+      - "how much protein is in this"
+  - name: Home automation
+    description: "smart home, lights, thermostat, heating, scenes, sensors, automation"
+    keywords: [lights, thermostat, heating, scene, sensor, automation, porch, kitchen]
+    examples:
+      - "turn off the lights"
+      - "set the thermostat"
+  - name: Language learning
+    description: "language study, Spanish, French, vocabulary, grammar, flashcards, practice"
+    keywords: [spanish, french, german, italian, vocabulary, grammar, flashcards, pronunciation]
+    examples:
+      - "how do I say this in Spanish"
+      - "quiz me on French verbs"
+  - name: Clothing
+    description: "clothing, wardrobe, outfits, wear, weather, dress, shoes, jacket"
+    keywords: [outfit, wear, shirt, shoes, jacket, wardrobe, dress, coat]
+    examples:
+      - "what should I wear"
+      - "does this match my outfit"
+
+# Learned-evidence fixtures use domains whose explicit routing vocabulary does
+# not overlap the learned queries. This keeps the new cases focused on the
+# production memory, task, skill, and recent-message paths.
+x-fermentation-domain: &fermentation-domain
+  - name: Fermentation
+    description: "food preservation and microbial cultures"
+
+x-astronomy-domain: &astronomy-domain
+  - name: Astronomy
+    description: "observing equipment and the night sky"
+
+x-memory-only-fixtures: &memory-only-fixtures
+  domains: *fermentation-domain
+  memories:
+    - content: "sourdough starter feeding schedule"
+      domain: Fermentation
+    - content: "bread hydration ratios"
+      domain: Fermentation
+
+x-past-task-only-fixtures: &past-task-only-fixtures
+  domains: *astronomy-domain
+  tasks:
+    - objective: "telescope collimation and eyepiece cleaning"
+      domain: Astronomy
+
+x-single-term-fixtures: &single-term-fixtures
+  domains: *fermentation-domain
+  memories:
+    - content: "sourdough baking notes"
+      domain: Fermentation
+
+x-recent-message-fixtures: &recent-message-fixtures
+  domains:
+    - name: Astronomy
+      description: "observing equipment and the night sky"
+  messages:
+    - role: user
+      content: "telescope collimation tips"
+      domain: Astronomy
+
+scenarios:
+  # -- Health ---------------------------------------------------------------
+  - id: k_routing.health_name
+    name: Health named directly
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "How is my health this week?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_nutrition
+    name: Nutrition info without the domain name
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Give me nutritional info for chicken tikka masala"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_calories
+    name: Calories in a fast-food item
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "How many calories are in a big mac?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_protein
+    name: Protein in a food
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "How much protein is in greek yogurt?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_diet
+    name: Clean up diet
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "I want to clean up my diet and eat better"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_sleep
+    name: Sleep question
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Why do I wake up at 3am and how can I sleep better?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_exercise
+    name: Exercise plan
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Build me a weekly exercise plan"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_symptoms
+    name: Symptoms without the domain name
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "I have a headache and a sore throat, what should I do?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_healthy
+    name: Is this healthy
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Is a chicken wrap a healthy lunch choice?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  - id: k_routing.health_tired
+    name: Tired all the time paraphrase
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "How do I stop feeling tired all the time?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Health
+
+  # -- Home automation ------------------------------------------------------
+  - id: k_routing.home_name
+    name: Home automation named directly
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Check my home automation setup"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.home_lights
+    name: Turn off the lights
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Turn off the lights in the living room"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.home_thermostat
+    name: Set the thermostat
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Set the thermostat to 21 degrees"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.home_scene
+    name: Activate a scene
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Activate the movie scene"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.home_sensor
+    name: Porch sensor reporting
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "The porch sensor keeps reporting motion"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.home_kitchen_lights
+    name: Kitchen lights composite
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Make the kitchen lights dim when it gets late"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.home_heating
+    name: Heating left on
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "The heating is on even though nobody is home"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  - id: k_routing.home_automate_paraphrase
+    name: Automate the porch light paraphrase
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Automate the porch light so it turns on at dusk"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Home automation
+
+  # -- Language learning ----------------------------------------------------
+  - id: k_routing.language_name
+    name: Language learning named directly
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Help me with language learning today"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  - id: k_routing.language_spanish
+    name: Say this in Spanish
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "How do I say this in Spanish?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  - id: k_routing.language_french_quiz
+    name: Quiz on French verbs
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Quiz me on French verbs"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  - id: k_routing.language_flashcards
+    name: Flashcards without the domain name
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Make flashcards for Italian food words"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  - id: k_routing.language_vocabulary
+    name: Expand vocabulary
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Expand my German vocabulary"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  - id: k_routing.language_grammar
+    name: Spanish grammar question
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Explain Spanish grammar for the past tense"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  - id: k_routing.language_pronunciation
+    name: Improve pronunciation
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "How do I improve my pronunciation?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  - id: k_routing.language_practice_paraphrase
+    name: Practice conversational French
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "I want to practice conversational French before my trip"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Language learning
+
+  # -- Clothing -------------------------------------------------------------
+  - id: k_routing.clothing_name
+    name: Clothing named directly
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Update my clothing wardrobe"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.clothing_outfit_wedding
+    name: Wear to a wedding
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "What should I wear to a wedding?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.clothing_shoes_dress
+    name: Shoes with a dress
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Which shoes go with this dress?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.clothing_jacket
+    name: Jacket for today
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Do I need a jacket today?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.clothing_weather
+    name: Composite weather and wear
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "What should I wear given the weather?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.clothing_match
+    name: Does this match my outfit
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Does this match my outfit?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.clothing_coat
+    name: Pick a winter coat
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Help me pick a winter coat"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  - id: k_routing.clothing_dressy
+    name: Too dressy paraphrase
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Is this too dressy for a casual dinner?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Clothing
+
+  # -- General: ambiguous messages where General is acceptable ---------------
+  - id: k_routing.general_ambiguous_plan
+    name: Ambiguous weekly plan
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Refresh my wardrobe and get healthy before summer"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_ambiguous_update
+    name: Ambiguous status update
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "I need better sleep and want the lights dim at night"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_ambiguous_organize
+    name: Ambiguous organize request
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Quiz me on French while the lights are off"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_ambiguous_weekend
+    name: Ambiguous weekend ideas
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Practice French before I pick an outfit"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  # -- General: genuine chatter that must not be captured --------------------
+  - id: k_routing.general_capital
+    name: Capital of France
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "What is the capital of France?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_python
+    name: Python function request
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Write a python function to reverse a list"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_email
+    name: Draft an email
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Draft a polite email to my landlord about the leak"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_car_engine
+    name: Car engine noise
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Why is my car engine making a ticking noise?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_meetup_budget
+    name: Split a budget
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Split the meetup budget between six people"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_world_cup
+    name: World cup trivia
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Who won the world cup in 2022?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_tokyo_time
+    name: Time in Tokyo
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "What time is it in Tokyo right now?"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.general_meeting_notes
+    name: Summarize meeting notes
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures:
+      domains: *domains
+    steps:
+      - kind: turn
+        input: "Summarize these meeting notes into three bullets"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  # -- Learned evidence ------------------------------------------------------
+  - id: k_routing.learned_memory_only
+    name: Two learned memory terms route
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures: *memory-only-fixtures
+    steps:
+      - kind: turn
+        input: "feed my sourdough starter"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Fermentation
+
+  - id: k_routing.learned_past_task_only
+    name: Two learned task terms route
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures: *past-task-only-fixtures
+    steps:
+      - kind: turn
+        input: "telescope collimation steps"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: Astronomy
+
+  - id: k_routing.learned_single_term_control
+    name: One learned memory term stays in General
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures: *single-term-fixtures
+    steps:
+      - kind: turn
+        input: "feed my sourdough starter"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General
+
+  - id: k_routing.learned_recent_message_control
+    name: Recent message overlap stays in General
+    category: routing
+    severity: high
+    modes: [deterministic]
+    measurement: true
+    settings:
+      domains:
+        model_routing: "off"
+    fixtures: *recent-message-fixtures
+    steps:
+      - kind: turn
+        input: "telescope collimation tips"
+        script:
+          - content: "ok"
+        expect:
+          routing:
+            domain: General

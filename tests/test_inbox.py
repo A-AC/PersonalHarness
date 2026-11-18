@@ -462,7 +462,7 @@ def test_v5_database_migrates_to_v6_with_inbox_tables(tmp_path):
         version = reopened.query_one(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         )["value"]
-        assert int(version) == SCHEMA_VERSION == 8
+        assert int(version) == SCHEMA_VERSION == 9
         assert reopened.meta_get("sentinel") == "kept"
         tables = {
             row["name"] for row in reopened.query(

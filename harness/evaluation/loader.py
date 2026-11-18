@@ -146,6 +146,7 @@ def _coerce(raw: dict[str, Any], file: Path) -> Scenario:
         steps=steps,
         cleanup=str(raw.get("cleanup") or "reset"),
         source=str(file),
+        measurement=bool(raw.get("measurement", False)),
     )
 
 

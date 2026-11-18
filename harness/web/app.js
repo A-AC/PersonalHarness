@@ -3,9 +3,10 @@
  * keeps no authoritative state, only the last payload it was shown. */
 
 let state = {
-  summary: {}, counts: {}, config: { persona: {} }, domains: [], modelMeta: null,
+  summary: {}, counts: {}, config: { persona: {} }, domains: [],
+  domain_suggestions: [], modelMeta: null,
   messages: [], tasks: [], open_tasks: [], approvals: [], schedules: [],
-  memories_all: [], memory_counts: {}, memory_kinds: [],
+  memories_all: [], core_memories: [], memory_counts: {}, memory_kinds: [],
   artifact_problems: [],
   skills: [], modules: [], templates: [], command_allowlist: [],
   schema_budget: null, tools: [], events: [],
@@ -29,6 +30,10 @@ let configMeta = null;
 let toastTimer = null;
 let modelAttempted = false;
 let modelLoading = false;
+let pendingSuggestionId = null;
+let pendingDomainSuggestion = null;
+let openSuggestionIds = new Set();
+const resolvedSuggestionIds = new Set();
 const approvalCardStates = Object.create(null);
 
 const $ = (id) => document.getElementById(id);
@@ -99,6 +104,24 @@ function domainName(id) {
   if (!id) return 'General';
   const found = (state.domains || []).find(d => d.id === id);
   return found ? found.name : id;
+}
+
+function domainChip(label, title) {
+  const chip = el('span', 'domainchip', label || 'General');
+  if (title) chip.title = title;
+  return chip;
+}
+
+function messageMeta(message) {
+  const raw = message && message.meta;
+  if (raw && typeof raw === 'object') return raw;
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(String(raw));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (err) {
+    return {};
+  }
 }
 
 function activeDomains() {
@@ -186,7 +209,14 @@ const PANELS = {
   },
   domains: {
     url: () => '/api/domains',
-    apply: (d) => { state.domains = d.domains || []; },
+    apply: (d) => {
+      state.domains = d.domains || [];
+      state.domain_suggestions = d.suggestions || [];
+      // The Domains panel receives suggestions from /api/domains. The
+      // dedicated endpoint refresh remains authoritative for chat filtering.
+      openSuggestionIds = new Set(
+        state.domain_suggestions.map(item => String(item.id || '')).filter(Boolean));
+    },
   },
   skills: {
     url: () => '/api/skills',
@@ -248,9 +278,17 @@ async function refresh(force) {
   // Chat must always know about pending approvals. When the approvals panel
   // is active, reuse its response rather than requesting the same list twice.
   const approvalJob = tab === 'approvals' ? panelJob : api('/api/approvals');
-  const [summary, messages, data, approvalData] = await Promise.all([
-    api('/api/summary'), api('/api/messages?limit=300'), panelJob, approvalJob,
-  ]);
+  const coreJob = tab === 'memory'
+    ? api('/api/memories?scope=core&pinned=1') : Promise.resolve(null);
+  // Suggestion notes are persisted in chat, so the open suggestion ids must be
+  // refreshed even when the Domains panel is not visible. The server is the
+  // authority on whether a suggestion is still open.
+  const suggestionJob = api('/api/domain-suggestions');
+  const [summary, messages, data, approvalData, coreData, suggestionData] =
+    await Promise.all([
+      api('/api/summary'), api('/api/messages?limit=300'), panelJob, approvalJob,
+      coreJob, suggestionJob,
+    ]);
   if (summary) {
     state.summary = summary;
     state.counts = Object.assign({}, state.counts, summary.counts || {});
@@ -263,6 +301,14 @@ async function refresh(force) {
   }
   if (messages) state.messages = messages.messages || [];
   if (approvalData) applyApprovals(approvalData);
+  if (coreData) state.core_memories = coreData.memories || [];
+  if (suggestionData) {
+    // Dedicated server data is authoritative even when the Domains panel is
+    // inactive; otherwise a dismissed suggestion could reappear in chat.
+    state.domain_suggestions = suggestionData.suggestions || [];
+    openSuggestionIds = new Set(
+      state.domain_suggestions.map(item => String(item.id || '')).filter(Boolean));
+  }
   if (data && panel && panel.apply && tab !== 'approvals') panel.apply(data);
   renderHeader();
   renderChat();
@@ -475,6 +521,88 @@ function approvalSignature() {
   return parts.join('|').slice(0, 12000);
 }
 
+function domainSuggestionData(suggestion) {
+  const raw = suggestion || {};
+  const terms = Array.isArray(raw.terms) ? raw.terms.map(String) : [];
+  const taskIds = Array.isArray(raw.task_ids) ? raw.task_ids.map(String) : [];
+  const tasks = Array.isArray(raw.tasks) ? raw.tasks : [];
+  let objectives = Array.isArray(raw.objectives) ? raw.objectives :
+    (Array.isArray(raw.task_objectives) ? raw.task_objectives : []);
+  if (!objectives.length) {
+    objectives = tasks.map(task => String(task.objective || ''));
+  }
+  return {
+    id: String(raw.id || raw.suggestion_id || ''),
+    name: String(raw.name || 'Suggested domain'),
+    terms: terms,
+    task_ids: taskIds,
+    task_count: Number(raw.task_count || taskIds.length || 0),
+    objectives: objectives.map(String),
+    description: String(raw.description || ''),
+  };
+}
+
+async function dismissDomainSuggestion(suggestionId) {
+  if (!suggestionId) return null;
+  const out = await api('/api/domain-suggestions/' +
+    encodeURIComponent(suggestionId) + '/dismiss', {method: 'POST'});
+  if (out) {
+    resolvedSuggestionIds.add(suggestionId);
+    openSuggestionIds.delete(suggestionId);
+    document.querySelectorAll('.domainsuggestion').forEach((card) => {
+      if (card.dataset.suggestionId === suggestionId) card.remove();
+    });
+    if (pendingSuggestionId === suggestionId) {
+      pendingSuggestionId = null;
+      pendingDomainSuggestion = null;
+    }
+    lastChatKey = '';
+    toast('Domain suggestion dismissed.');
+    await refresh(true);
+  }
+  return out;
+}
+
+function openDomainSuggestion(suggestion) {
+  const data = domainSuggestionData(suggestion);
+  pendingSuggestionId = data.id;
+  pendingDomainSuggestion = data;
+  switchTab('domains');
+  setTimeout(() => {
+    const input = $('domain-suggestion-name');
+    if (input) {
+      input.focus();
+      input.scrollIntoView({behavior: 'smooth', block: 'center'});
+    }
+  }, 0);
+}
+
+function renderDomainSuggestionCard(suggestion, content, createLabel) {
+  const data = domainSuggestionData(suggestion);
+  const card = el('div', 'domainsuggestion');
+  card.dataset.suggestionId = data.id;
+  card.appendChild(el('div', 'domainsuggestion-title', data.name));
+  card.appendChild(el('div', 'domainsuggestion-terms',
+    'Terms: ' + (data.terms.length ? data.terms.join(', ') : '-')));
+  card.appendChild(el('div', 'small',
+    data.task_count + ' General task' + (data.task_count === 1 ? '' : 's')));
+  if (content) card.appendChild(el('div', 'small', content));
+  if (data.objectives.length) {
+    const objectives = el('div', 'domainsuggestion-objectives');
+    for (const objective of data.objectives.slice(0, 20)) {
+      objectives.appendChild(el('div', 'small', '- ' + objective));
+    }
+    card.appendChild(objectives);
+  }
+  const actions = el('div', 'btns');
+  actions.appendChild(btn(createLabel || 'Create', 'ok', () =>
+    openDomainSuggestion(data)));
+  actions.appendChild(btn('Dismiss', 'no', () =>
+    dismissDomainSuggestion(data.id)));
+  card.appendChild(actions);
+  return card;
+}
+
 function renderChat() {
   const msgs = state.messages || [];
   const messageKey = msgs.length + ':' +
@@ -488,7 +616,24 @@ function renderChat() {
   for (const m of msgs) {
     const cls = m.role === 'user' ? 'user' :
       (m.role === 'note' ? 'note' : 'assistant');
-    const node = el('div', 'msg ' + cls, m.content);
+    const meta = messageMeta(m);
+    if (meta.kind === 'domain.suggestion') {
+      const suggestionId = String(meta.suggestion_id || '');
+      if (openSuggestionIds.has(suggestionId) &&
+          !resolvedSuggestionIds.has(suggestionId)) {
+        chat.appendChild(renderDomainSuggestionCard({
+          id: suggestionId,
+          name: meta.name,
+          terms: meta.terms,
+          task_ids: meta.task_ids,
+          task_count: (meta.task_ids || []).length,
+        }, m.content, 'Create domain'));
+      }
+      continue;
+    }
+    const isDomainChip = meta.kind === 'domain.status' && !!meta.chip;
+    const node = el('div', isDomainChip ? 'domainchip' : 'msg ' + cls,
+      m.content);
     const src = el('span', 'src');
     if (m.task_id) {
       src.appendChild(btn('task ' + String(m.task_id).slice(-10), 'tasklink',
@@ -514,6 +659,10 @@ function renderWorking() {
   const text = $('workingtext');
   text.innerHTML = '';
   text.appendChild(pill(working.status));
+  const routing = working.routing || {};
+  text.appendChild(document.createTextNode('  '));
+  text.appendChild(domainChip(
+    domainName(working.domain_id), routing.reason || 'Working domain'));
   text.appendChild(document.createTextNode(
     '  ' + (working.objective || '') +
     (working.run_status ? '  |  run ' + working.run_status : '') +
@@ -654,9 +803,43 @@ function renderTasks(side) {
       }
       pick.onchange = async () => {
         if (!pick.value) return;
+        const destinationId = pick.value;
         const out = await api('/api/tasks/' + encodeURIComponent(t.id) +
-          '/domain', {method: 'POST', body: {domain_id: pick.value}});
-        if (out) toast('Task moved to ' + domainName(pick.value));
+          '/domain', {method: 'POST', body: {
+            domain_id: destinationId,
+            reason: 'moved from the task list',
+          }});
+        if (out) {
+          toast('Task moved to ' + domainName(destinationId));
+          const suggested = out.suggested_keywords || [];
+          if (suggested.length) {
+            const answer = prompt(
+              'Add routing keywords to ' + domainName(destinationId) + '?\n' +
+              'Comma separated (leave blank to keep the current vocabulary):',
+              suggested.join(', '));
+            if (answer !== null) {
+              const accepted = answer.split(',').map(s => s.trim()).filter(Boolean);
+              if (accepted.length) {
+                const domainPayload = await api('/api/domains');
+                const destination = ((domainPayload && domainPayload.domains) ||
+                  state.domains || []).find(d => d.id === destinationId) || {};
+                const existing = (destination.keywords || []).map(
+                  s => String(s).trim()).filter(Boolean);
+                const union = existing.slice();
+                for (const keyword of accepted) {
+                  if (!union.some(item => item.toLowerCase() === keyword.toLowerCase())) {
+                    union.push(keyword);
+                  }
+                }
+                const saved = await api('/api/domains/' +
+                  encodeURIComponent(destinationId), {
+                    method: 'PATCH', body: {keywords: union},
+                  });
+                if (saved) toast('Routing keywords updated.');
+              }
+            }
+          }
+        }
         refresh(true);
       };
       card.appendChild(pick);
@@ -852,6 +1035,92 @@ function childBlock(child, depth) {
   return det;
 }
 
+function routingModelValue(value) {
+  if (value == null || value === '') return 'none';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value); }
+    catch (err) { return String(value); }
+  }
+  return String(value);
+}
+
+function routingHintLabel(hint) {
+  if (!hint) return '';
+  if (typeof hint === 'string') return hint;
+  if (Array.isArray(hint)) {
+    return hint.map(item => routingHintLabel(item)).filter(Boolean).join(', ');
+  }
+  if (typeof hint !== 'object') return String(hint);
+  const name = hint.name || domainName(hint.domain_id);
+  const matched = Array.isArray(hint.matched) ? hint.matched : [];
+  return name + (matched.length ? ' (matched: ' + matched.join(', ') + ')' : '');
+}
+
+function renderRoutingWhy(detail, task) {
+  const routing = detail.routing || null;
+  const det = el('details', 'why');
+  det.appendChild(el('summary', null, 'Why this domain?'));
+  const chosen = task.domain_id
+    ? domainName(task.domain_id)
+    : (routing && routing.domain_id ? domainName(routing.domain_id) : 'General');
+  det.appendChild(el('div', 'small',
+    'Chosen domain: ' + chosen +
+    '  |  reason: ' + ((routing && routing.reason) || 'none') +
+    '  |  score: ' + ((routing && routing.score != null)
+      ? String(routing.score) : 'none')));
+  const corrected = !!(routing && routing.corrected_from);
+  const routingDisagrees = !!(routing && routing.domain_id &&
+    task.domain_id && routing.domain_id !== task.domain_id);
+  if (corrected || routingDisagrees) {
+    const oldId = (routing && routing.corrected_from) ||
+      (routing && routing.domain_id);
+    det.appendChild(el('div', 'small',
+      'Corrected from: ' + domainName(oldId)));
+  }
+  if (!routing) {
+    det.appendChild(el('div', 'small', 'No routing evidence recorded.'));
+  } else {
+    const candidates = Array.isArray(routing.candidates)
+      ? routing.candidates.slice(0, 3) : [];
+    det.appendChild(el('div', 'small',
+      'Candidates (' + candidates.length + ')'));
+    if (!candidates.length) {
+      det.appendChild(el('div', 'small', 'No candidate evidence recorded.'));
+    }
+    for (const candidate of candidates) {
+      const breakdown = candidate.breakdown || {};
+      const matched = Array.isArray(breakdown.matched)
+        ? breakdown.matched : (Array.isArray(candidate.matched)
+          ? candidate.matched : []);
+      det.appendChild(el('div', 'small',
+        (candidate.name || domainName(candidate.domain_id)) +
+        '  |  score: ' + (candidate.score != null
+          ? String(candidate.score) : 'none') +
+        '  |  matched: ' + (matched.length ? matched.join(', ') : 'none')));
+    }
+    if (!corrected && !routingDisagrees) {
+      det.appendChild(el('div', 'small',
+        'Possible domain(s): ' + (routingHintLabel(routing.hint) || 'none')));
+    }
+    det.appendChild(el('div', 'small',
+      'Model tie-break choice: ' + routingModelValue(routing.model_choice)));
+    det.appendChild(el('div', 'small',
+      'Model tie-break route: ' + routingModelValue(routing.model_route)));
+  }
+  const entered = detail.domain_entered;
+  const enteredData = (entered && entered.data) || {};
+  if (entered && enteredData.domain_id === task.domain_id) {
+    det.appendChild(el('div', 'small',
+      'Domain entered: ' + (enteredData.name || domainName(enteredData.domain_id)) +
+      '  |  reason: ' + (enteredData.reason || 'none') +
+      '  |  at: ' + short(entered.ts)));
+  } else if (corrected || routingDisagrees) {
+    det.appendChild(el('div', 'small',
+      'Current domain: ' + chosen + ' (the previous entry event is superseded)'));
+  }
+  return det;
+}
+
 function renderTaskDetail(detail, depth) {
   depth = depth || 0;
   const box = el('div', 'taskdetail');
@@ -863,10 +1132,14 @@ function renderTaskDetail(detail, depth) {
   }
   box.appendChild(el('div', 'small',
     'status ' + (task.status || '?') +
-    '  |  domain ' + domainName(task.domain_id) +
     '  |  origin ' + (task.origin || '?') +
     '  |  created ' + short(task.created_at) +
     '  |  updated ' + short(task.updated_at)));
+  const domainRow = el('div', 'row');
+  domainRow.appendChild(domainChip(domainName(task.domain_id),
+    (detail.routing && detail.routing.reason) || 'Current task domain'));
+  domainRow.appendChild(renderRoutingWhy(detail, task));
+  box.appendChild(domainRow);
   if (task.status_reason) {
     box.appendChild(el('div', 'small', 'reason: ' + task.status_reason));
   }
@@ -1629,15 +1902,55 @@ function renderAutomations(side) {
 
 /* ----------------------------------------------------------------- memory */
 
+function isCoreMemory(m) {
+  return !!m.pinned && !m.archived && m.status === 'active' &&
+    (m.scope === 'global' || m.scope === 'domain:general');
+}
+
 function memoryMatches(m, filter) {
   if (filter === 'active') return !m.archived && m.status === 'active';
   if (filter === 'archived') return !!m.archived;
   if (filter === 'superseded') return m.status === 'superseded';
+  if (filter === 'core') return isCoreMemory(m);
   return true;
 }
 
 function renderMemory(side) {
   const counts = state.memory_counts || state.counts || {};
+  const coreById = Object.create(null);
+  for (const m of (state.core_memories || []).concat(state.memories_all || [])) {
+    if (isCoreMemory(m)) coreById[m.id] = m;
+  }
+  const coreMemories = Object.values(coreById);
+  const coreCard = el('div', 'card core-profile');
+  coreCard.appendChild(el('h3', null, 'Core profile'));
+  coreCard.appendChild(el('div', 'small',
+    'Pinned global memories are candidates for the always-on core profile. ' +
+    'The profile is bounded by the memory.core_profile_chars setting; ' +
+    'pinned memories beyond that character budget are not injected. ' +
+    'General is included as the effective global scope.'));
+  if (!coreMemories.length) {
+    coreCard.appendChild(el('div', 'small',
+      'No pinned core memories. Open the Active filter and use Pin on an ' +
+      'active global or General memory to add one.'));
+  } else {
+    coreCard.appendChild(el('div', 'small',
+      'Pinned effective-global memories currently returned by the API: ' +
+      coreMemories.length + '. This count is limited by the API list limit, ' +
+      'not by the core-profile character budget.'));
+    for (const m of coreMemories) {
+      const row = el('div', 'row core-memory');
+      row.appendChild(el('span', 'tag', m.kind));
+      row.appendChild(el('span', 'small', m.content));
+      row.appendChild(btn('Edit core profile', null, () => {
+        memoryFilter = 'core';
+        renderSide(true);
+      }));
+      coreCard.appendChild(row);
+    }
+  }
+  side.appendChild(coreCard);
+
   const card0 = el('div', 'card');
   card0.appendChild(el('h3', null, 'Memory'));
   card0.appendChild(statGrid([
@@ -1653,7 +1966,7 @@ function renderMemory(side) {
 
   const filters = el('div', 'btns');
   for (const [label, value] of [
-    ['Active', 'active'], ['Archived', 'archived'],
+    ['Core profile', 'core'], ['Active', 'active'], ['Archived', 'archived'],
     ['Superseded', 'superseded'], ['All', 'all'],
   ]) {
     filters.appendChild(btn(label, memoryFilter === value ? 'ok' : null, () => {
@@ -1720,7 +2033,15 @@ function renderMemory(side) {
   }
 
   const all = state.memories_all || [];
-  const list = all.filter(m => memoryMatches(m, memoryFilter));
+  const source = memoryFilter === 'core'
+    ? (state.core_memories || []).concat(all) : all;
+  const seenMemoryIds = Object.create(null);
+  const list = source.filter(m => {
+    if (!memoryMatches(m, memoryFilter)) return false;
+    if (seenMemoryIds[m.id]) return false;
+    seenMemoryIds[m.id] = true;
+    return true;
+  });
   side.appendChild(el('h4', null,
     memoryFilter.replace(/^./, c => c.toUpperCase()) +
     ' memories (' + list.length + ')'));
@@ -1819,58 +2140,195 @@ function renderMemory(side) {
 
 /* ---------------------------------------------------------------- domains */
 
+function commaSeparated(value) {
+  return String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function lineSeparated(value) {
+  return String(value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+}
+
+function renderRoutePreviewResult(routing) {
+  const box = el('div', 'route-preview-result');
+  box.appendChild(el('div', 'small',
+    'Chosen domain: ' + domainName(routing.domain_id) +
+    '  |  score: ' + (routing.score != null ? String(routing.score) : 'none') +
+    '  |  reason: ' + (routing.reason || 'none')));
+  const candidates = Array.isArray(routing.candidates)
+    ? routing.candidates.slice(0, 3) : [];
+  box.appendChild(el('div', 'small', 'Candidates (' + candidates.length + ')'));
+  for (const candidate of candidates) {
+    const breakdown = candidate.breakdown || {};
+    const matched = Array.isArray(breakdown.matched)
+      ? breakdown.matched : (Array.isArray(candidate.matched)
+        ? candidate.matched : []);
+    box.appendChild(el('div', 'small',
+      (candidate.name || domainName(candidate.domain_id)) +
+      '  |  score: ' + (candidate.score != null
+        ? String(candidate.score) : 'none') +
+      '  |  matched: ' + (matched.length ? matched.join(', ') : 'none')));
+  }
+  box.appendChild(el('div', 'small',
+    'Possible domain(s): ' + (routingHintLabel(routing.hint) || 'none')));
+  box.appendChild(el('div', 'small',
+    'Model tie-break choice: ' + routingModelValue(routing.model_choice)));
+  box.appendChild(el('div', 'small',
+    'Model tie-break route: ' + routingModelValue(routing.model_route)));
+  return box;
+}
+
 function renderDomains(side) {
   const domains = state.domains || [];
-  const counts = {};
-  for (const t of state.tasks || []) {
-    counts[t.domain_id] = (counts[t.domain_id] || 0) + 1;
+  const suggestions = state.domain_suggestions || [];
+
+  side.appendChild(el('h4', null, 'Suggested domains'));
+  if (!suggestions.length) {
+    empty(side, 'No suggested domains. Suggestions appear only after ' +
+      'repeated subject vocabulary is found in General work.');
+  } else {
+    for (const suggestion of suggestions) {
+      side.appendChild(renderDomainSuggestionCard(suggestion));
+    }
   }
 
   const form = el('div', 'card');
+  form.id = 'new-domain-form';
   form.appendChild(el('h3', null, 'New domain'));
+  form.appendChild(el('div', 'small',
+    'Domains are work environments. Their name, description, keywords, and ' +
+    'examples are routing evidence; instructions are shown only after the ' +
+    'domain is entered.'));
   const name = el('input');
   name.placeholder = 'Name (e.g. Homelab)';
   const desc = el('textarea');
   desc.rows = 2;
-  desc.placeholder = 'What belongs here (routing evidence, not prose)';
+  desc.placeholder = 'What belongs here';
+  const keywords = el('input');
+  keywords.placeholder = 'calories, exercise, nutrition';
+  const examples = el('textarea');
+  examples.rows = 3;
+  examples.placeholder = 'How many calories are in this meal?\nPlan my workouts';
+  const instructions = el('textarea');
+  instructions.rows = 4;
+  instructions.placeholder = 'Instructions used while this domain is active';
+  name.id = 'domain-suggestion-name';
+  desc.id = 'domain-suggestion-description';
+  keywords.id = 'domain-suggestion-keywords';
+  if (pendingDomainSuggestion) {
+    const pending = domainSuggestionData(pendingDomainSuggestion);
+    name.value = pending.name;
+    keywords.value = pending.terms.join(', ');
+    desc.value = pending.description || (
+      'Suggested from ' + pending.task_count + ' General tasks about ' +
+      (pending.terms.join(', ') || pending.name) + '.');
+  }
   form.appendChild(field('name', name));
   form.appendChild(field('description', desc));
+  form.appendChild(field('keywords (comma separated)', keywords));
+  form.appendChild(field('examples (one per line)', examples));
+  form.appendChild(field('instructions', instructions));
   const add = btn('Create domain', 'ok', async () => {
     if (!name.value.trim()) { toast('A name is required.'); return; }
-    const out = await api('/api/domains', {method: 'POST', body: {
+    const body = {
       name: name.value.trim(), description: desc.value.trim(),
-    }});
-    if (out) { toast('Domain created.'); refresh(true); }
+      keywords: commaSeparated(keywords.value),
+      examples: lineSeparated(examples.value),
+      instructions: instructions.value.trim(),
+    };
+    if (pendingSuggestionId) body.suggestion_id = pendingSuggestionId;
+    const out = await api('/api/domains', {method: 'POST', body: body});
+    if (out) {
+      if (pendingSuggestionId) {
+        resolvedSuggestionIds.add(pendingSuggestionId);
+        openSuggestionIds.delete(pendingSuggestionId);
+      }
+      pendingSuggestionId = null;
+      pendingDomainSuggestion = null;
+      toast('Domain created.');
+      lastChatKey = '';
+      refresh(true);
+    }
   });
   const btns = el('div', 'btns'); btns.appendChild(add);
   form.appendChild(btns);
   side.appendChild(form);
+
+  const preview = el('div', 'card');
+  preview.appendChild(el('h3', null, 'Test routing'));
+  preview.appendChild(el('div', 'small',
+    'Preview a route without creating a task, message, memory, or event.'));
+  const previewText = el('textarea');
+  previewText.rows = 3;
+  previewText.placeholder = 'Enter a representative request';
+  preview.appendChild(previewText);
+  const previewResult = el('div');
+  const previewButton = btn('Preview route', null, async () => {
+    if (!previewText.value.trim()) {
+      toast('Enter text to test routing.'); return;
+    }
+    const out = await api('/api/domains/route-preview', {
+      method: 'POST', body: {text: previewText.value.trim()},
+    });
+    previewResult.innerHTML = '';
+    if (out && out.routing) {
+      previewResult.appendChild(renderRoutePreviewResult(out.routing));
+    }
+  });
+  const previewBtns = el('div', 'btns');
+  previewBtns.appendChild(previewButton);
+  preview.appendChild(previewBtns);
+  preview.appendChild(previewResult);
+  side.appendChild(preview);
 
   for (const group of [['Active', 'active'], ['Archived', 'archived']]) {
     const list = domains.filter(d => d.status === group[1]);
     if (!list.length) continue;
     side.appendChild(el('h4', null, group[0] + ' domains'));
     for (const d of list) {
-      const card = el('div', 'card');
+      const card = el('div', 'card domain-card');
       card.appendChild(el('h3', null, d.name));
+      const domainCounts = d.counts || {};
+      const routingStats = d.routing_stats || {};
+      card.appendChild(statGrid([
+        ['memories', domainCounts.memories || 0],
+        ['skills', domainCounts.skills || 0],
+        ['modules', domainCounts.modules || 0],
+        ['tasks', domainCounts.tasks || 0],
+      ]));
       card.appendChild(el('div', 'small',
-        (counts[d.id] || 0) + ' task(s)  |  created ' + short(d.created_at) +
-        '  |  ' + d.id));
+        'Last used: ' + short(domainCounts.last_used) +
+        '  |  routed here: ' + (routingStats.routed_here || 0) +
+        '  |  corrected away: ' + (routingStats.corrected_away || 0) +
+        '  |  corrected in: ' + (routingStats.corrected_in || 0)));
+      card.appendChild(el('div', 'small',
+        'created ' + short(d.created_at) + '  |  id ' + d.id));
       const nameInput = el('input');
       nameInput.value = d.name;
       const descInput = el('textarea');
       descInput.rows = 2;
       descInput.value = d.description || '';
-      card.appendChild(el('div', 'small', 'Name'));
-      card.appendChild(nameInput);
-      card.appendChild(el('div', 'small', 'Description'));
-      card.appendChild(descInput);
+      const keywordsInput = el('input');
+      keywordsInput.value = (d.keywords || []).join(', ');
+      const examplesInput = el('textarea');
+      examplesInput.rows = 3;
+      examplesInput.value = (d.examples || []).join('\n');
+      const instructionsInput = el('textarea');
+      instructionsInput.rows = 4;
+      instructionsInput.value = d.instructions || '';
+      card.appendChild(field('name', nameInput));
+      card.appendChild(field('description', descInput));
+      card.appendChild(field('keywords (comma separated)', keywordsInput));
+      card.appendChild(field('examples (one per line)', examplesInput));
+      card.appendChild(field('instructions', instructionsInput));
       const btns2 = el('div', 'btns');
       btns2.appendChild(btn('Save', 'ok', async () => {
         const out = await api('/api/domains/' + encodeURIComponent(d.id),
           {method: 'PATCH', body: {
             name: nameInput.value.trim(),
             description: descInput.value,
+            keywords: commaSeparated(keywordsInput.value),
+            examples: lineSeparated(examplesInput.value),
+            instructions: instructionsInput.value.trim(),
           }});
         if (out) { toast('Domain saved.'); refresh(true); }
       }));

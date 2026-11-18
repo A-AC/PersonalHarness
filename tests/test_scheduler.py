@@ -159,7 +159,9 @@ def test_scheduled_task_approval_pauses_and_resumes_same_run(make_app):
     scripts = [
         {"tool_calls": [{"name": "create_domain", "arguments": {
             "name": "Logs", "description": "log work",
-            "reason": "durable area"}}]},
+            "reason": "durable area",
+            "keywords": ["log", "logs"],
+            "examples": ["review server logs", "search log files"]}}]},
         {"content": "Domain created; scheduled work continues."},
     ]
     app = make_app.build(scripts=scripts)

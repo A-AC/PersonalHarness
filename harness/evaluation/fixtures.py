@@ -17,8 +17,9 @@ from .. import util
 
 def apply_fixtures(app, fixtures: dict[str, Any] | None) -> dict[str, Any]:
     fixtures = fixtures or {}
-    created: dict[str, Any] = {"domains": {}, "memories": [], "tasks": [],
-                               "skills": [], "schedules": [], "automations": []}
+    created: dict[str, Any] = {"domains": {}, "messages": [], "memories": [],
+                               "tasks": [], "skills": [], "schedules": [],
+                               "automations": []}
 
     domain_ids: dict[str, str] = {}
     for spec in fixtures.get("domains", []) or []:
@@ -27,7 +28,19 @@ def apply_fixtures(app, fixtures: dict[str, Any] | None) -> dict[str, Any]:
             continue
         existing = app.domains.by_name(name)
         if existing:
-            domain = existing
+            updates: dict[str, Any] = {}
+            if "description" in spec:
+                updates["description"] = str(spec.get("description") or "")
+            if "keywords" in spec:
+                updates["keywords"] = list(spec.get("keywords") or [])
+            if "examples" in spec:
+                updates["examples"] = list(spec.get("examples") or [])
+            if "instructions" in spec:
+                updates["instructions"] = str(spec.get("instructions") or "")
+            domain = (
+                app.domains.update(existing["id"], **updates)
+                if updates else existing
+            )
         else:
             domain = app.domains.create(
                 str(spec.get("id") or util.new_id("dom")),
@@ -35,10 +48,31 @@ def apply_fixtures(app, fixtures: dict[str, Any] | None) -> dict[str, Any]:
                 description=str(spec.get("description") or ""),
                 created_by="eval",
                 seed_note=spec.get("seed_note"),
+                keywords=spec.get("keywords") or [],
+                examples=spec.get("examples") or [],
+                instructions=str(spec.get("instructions") or ""),
             )
         domain_ids[name] = domain["id"]
         domain_ids[domain["id"]] = domain["id"]
         created["domains"][name] = domain["id"]
+
+    for spec in fixtures.get("messages", []) or []:
+        content = str(spec.get("content") or "").strip()
+        if not content:
+            continue
+        role = str(spec.get("role") or "user").strip().lower() or "user"
+        if role == "system":
+            # Fixture messages represent ordinary conversation, never a
+            # system/status message that could masquerade as learned routing.
+            role = "user"
+        message_id = app.messages.record(
+            role,
+            content,
+            source="eval_fixture",
+            domain_id=_domain_id(spec, domain_ids),
+            visible=True,
+        )
+        created["messages"].append(message_id)
 
     for spec in fixtures.get("memories", []) or []:
         content = str(spec.get("content") or "").strip()

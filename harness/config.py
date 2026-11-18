@@ -86,15 +86,41 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "domains": {
-        "routing_threshold": 2.0,     # evidence score needed to route
-        "ambiguity_margin": 0.75,     # top must beat runner-up by this
+        "routing_threshold": 1.0,     # evidence score needed to route
+        "ambiguity_margin": 1.0,      # top must beat runner-up by this
         "task_resume_margin": 0.5,    # same idea for choosing a task
         "high_threshold_words": 3,    # unused placeholder kept out (see docs)
+        # Phase 10 routing evidence weights. The threshold and ambiguity
+        # margin are the Phase 10B sweep's highest-accuracy compliant point.
+        "weights": {
+            "name": 1.5,
+            "keyword": 1.0,
+            "example": 0.75,
+            "description": 0.5,
+            "learned_term": 0.5,       # value of one learned vocabulary term
+            "learned_cap": 2.0,        # cap on memory/skill/task vocabulary
+        },
+        "stemming": True,
+        "hint_min_score": 0.5,        # below threshold but worth a hint
+        "briefing_chars": 1800,
+        "instructions_max_chars": 1200,
+        "model_routing": "off",       # off | shadow | on (10F)
+        "model_routing_timeout_s": 3.0,
+        "status_line": True,          # visible "Entering <domain>" chip
+        "suggestions": {
+            "enabled": True,
+            "min_tasks": 6,
+            "window_days": 30,
+        },
     },
     "memory": {
         "max_results": 8,
         "temp_expiry_days": 14,       # default expiry for kind=temp
         "search_limit": 10,
+        # Phase 10 soft memory: off (today's partition) | boost | search.
+        "cross_domain": "boost",
+        "cross_domain_max": 3,
+        "core_profile_chars": 1200,
         # Phase 3: usage-based lifetime. Deterministic; no model call is
         # spent on retention. Archived rows stay retrievable on request.
         "lifetime": {
@@ -226,6 +252,14 @@ DEFAULTS: dict[str, Any] = {
     # once, and reset clears it by removing the file (or keeping it).
     "setup": {"complete": False, "completed_at": ""},
 }
+
+# Shared fallbacks for code paths that run without a fully resolved config.
+# Keeping these tied to DEFAULTS prevents runtime defaults from drifting away
+# from the shipped configuration.
+ROUTING_THRESHOLD_FALLBACK = DEFAULTS["domains"]["routing_threshold"]
+ROUTING_MARGIN_FALLBACK = DEFAULTS["domains"]["ambiguity_margin"]
+ROUTING_HINT_MIN_FALLBACK = DEFAULTS["domains"]["hint_min_score"]
+ROUTING_STEMMING_FALLBACK = DEFAULTS["domains"]["stemming"]
 
 # Values that mean "use the machine's own timezone".
 SYSTEM_TZ_ALIASES = {"", "system", "local", "host", "auto"}
@@ -392,6 +426,12 @@ def _merge(defaults: dict, overlay: dict, path: str = "") -> dict:
         elif isinstance(base, int):
             out[key] = int(value)
         elif isinstance(base, str):
+            # YAML 1.1 parses bare ``off``/``on`` as booleans, so accept the
+            # documented enum spellings without forcing users to quote them.
+            if loc == "domains.model_routing" and isinstance(value, bool):
+                value = "on" if value else "off"
+            elif loc == "memory.cross_domain" and value is False:
+                value = "off"
             out[key] = str(value)
         elif isinstance(base, list):
             if loc == "providers":
@@ -403,6 +443,24 @@ def _merge(defaults: dict, overlay: dict, path: str = "") -> dict:
         else:  # pragma: no cover - defaults are fully typed
             out[key] = value
     return out
+
+
+def _validate_routing_enums(config: dict[str, Any]) -> None:
+    """Validate routing/memory enum values after defaults are merged."""
+    domains = config.get("domains") or {}
+    mode = domains.get("model_routing")
+    if mode not in ("off", "shadow", "on"):
+        raise ConfigError(
+            "configuration key domains.model_routing must be "
+            "off, shadow, or on"
+        )
+    memory = config.get("memory") or {}
+    mode = memory.get("cross_domain")
+    if mode not in ("off", "boost", "search"):
+        raise ConfigError(
+            "configuration key memory.cross_domain must be "
+            "off, boost, or search"
+        )
 
 
 def validate_group_update(
@@ -434,7 +492,11 @@ def validate_group_update(
     current = config.get(group)
     if not isinstance(current, dict):
         raise ConfigError(f"configuration key {group} is not a mapping")
-    return _merge(current, value, group)
+    merged = _merge(current, value, group)
+    candidate = config.as_dict()
+    candidate[group] = merged
+    _validate_routing_enums(candidate)
+    return merged
 
 
 def _legacy_settings_overlay(path: Path) -> dict[str, Any]:
@@ -564,6 +626,7 @@ def load_config(
     removed: dict[str, Any] = {}
     migrated = False
     timezone_migrated = False
+    routing_migrated = False
     file_existed = file.exists()
     has_setup_key = False
     if file_existed:
@@ -581,10 +644,23 @@ def load_config(
         if overlay.get("timezone") == LEGACY_DEFAULT_TIMEZONE:
             overlay["timezone"] = "system"
             timezone_migrated = True
+        domains = overlay.get("domains")
+        # Pre-Phase-10 files materialized these defaults. Only exact old
+        # values migrate, so explicit choices and Phase-10 files stay intact.
+        if (
+            isinstance(domains, dict)
+            and "weights" not in domains
+            and domains.get("routing_threshold") == 2.0
+            and domains.get("ambiguity_margin") == 0.75
+        ):
+            domains["routing_threshold"] = 1.0
+            domains["ambiguity_margin"] = 1.0
+            routing_migrated = True
     elif legacy.exists():
         overlay = _legacy_settings_overlay(legacy)
         migrated = True
     merged = _merge(DEFAULTS, overlay)
+    _validate_routing_enums(merged)
     if (file_existed and not has_setup_key) or migrated:
         # A config written before the first-run wizard existed belongs to an
         # install that is already configured; never send it back to setup.
@@ -604,8 +680,8 @@ def load_config(
         if migrated and legacy.exists():
             # Keep the old file inspectable but stop treating it as config.
             legacy.rename(legacy.with_name("settings.yaml.migrated"))
-    elif timezone_migrated:
-        # Persist the system-time migration so the file reflects reality.
+    elif timezone_migrated or routing_migrated:
+        # Persist config-file normalizations so they survive the next start.
         # Only the file's own values are written back; env stays runtime-only.
         # Retired groups stay on disk until the module loader completes its
         # one-time migration.

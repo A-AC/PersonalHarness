@@ -32,17 +32,18 @@ terminal CLI that are two views of the same runtime.
   completed, failed, cancelled). Tasks persist their run transcript, so an
   interrupted, paused, or waiting task resumes exactly where it stopped —
   completed actions are never repeated.
-- **Domains with a high creation threshold.** A domain is a durable area of
-  work with its own memory scope. New messages are routed automatically to
-  the domain the evidence points to; unmatched input lands in the default
-  General domain. Domains are created only by explicit user command or by a
-  model proposal that the user approves.
+- **Domains with a high creation threshold.** A domain is a durable work
+  environment with routing evidence, instructions, memories, skills, and
+  optional bound tools. New messages are routed automatically to the domain
+  the evidence points to; unmatched input lands in General. General is
+  unscoped rather than a memory silo. Domains are created only by explicit
+  user command or by a model proposal that the user approves.
 - **Memory with provenance.** The model saves durable facts, preferences,
   decisions, procedures, constraints, and questions through memory tools.
-  Retrieval is FTS5 keyword search with scope priority and recency,
-  explainable per result. Corrections supersede, updates create revisions,
-  consolidation merges duplicates and expires stale rows with a readable
-  change log.
+  Retrieval is FTS5 keyword search with scope priority, optional cross-domain
+  lexical boost, and recency, explainable per result. Corrections supersede,
+  updates create revisions, consolidation merges duplicates and expires stale
+  rows with a readable change log.
 - **Context construction as a subsystem.** Each run starts from a budgeted
   system prompt built from the persona, operating rules, current task and
   domain state, retrieved memories, recent history, and older history
@@ -142,6 +143,7 @@ web UI / CLI / schedule / heartbeat / approval decision
 | Context builder | `harness/context.py` |
 | Messages, events, domains, tasks | `harness/store.py` |
 | Memory + artifacts | `harness/memory.py` |
+| Usage-based domain suggestions | `harness/suggestions.py` |
 | Tools, permissions, MCP | `harness/tools.py` |
 | Approvals + quick confirm | `harness/approvals.py` |
 | Schedules + heartbeat | `harness/scheduler.py` |
@@ -414,7 +416,7 @@ value in `data/config.yaml`.
 | `inbox [--add JSON] [--status STATUS] [--ignore ID] [--triage]` | List, push, ignore, or triage durable inbox events |
 | `automations [--add JSON] [--update ID JSON] [--action ID enable/disable/delete]` | Manage declarative inbox rules |
 | `memories [--search Q] [--archived|--all] [--include-archived] [--archive ID] [--restore ID] [--pin ID] [--unpin ID]` | List, search, filter, or manage memory lifetime; reports usage counts and artifact problems |
-| `domains [--create NAME DESCRIPTION]` | List or explicitly create domains |
+| `domains [--create NAME DESCRIPTION] [--export-feedback [PATH]] [--suggestions]` | List or explicitly create domains, export routing feedback as `k_routing`-format scenarios, or list usage-based domain suggestions |
 | `consolidate` | Run one memory consolidation pass |
 | `events [-N]` | Recent event-log rows |
 | `tools` | Registered tools with their risk classes; MCP status |
@@ -432,6 +434,11 @@ Example schedule creation (single quotes on POSIX shells):
 ```bash
 python -m harness schedules --add '{"name":"morning-brief","prompt":"Summarize open work and anything due today.","kind":"daily","time_of_day":"08:30"}'
 ```
+
+`domains --export-feedback [PATH]` writes the durable `routing_feedback` rows
+as `k_routing`-format evaluation scenarios. The default output is
+`eval/scenarios/k_routing_feedback.yaml`; `domains --suggestions` lists open
+usage-based domain suggestions.
 
 ## Behavior model
 
@@ -457,12 +464,46 @@ user continues it or the heartbeat retries a model failure.
 
 ### Domains and routing
 
-Messages are routed deterministically: keyword evidence from the domain
-name and description, open task objectives, and recent mentions. The best
-scoring domain wins when it clears a threshold and beats the runner-up by
-a margin; otherwise the message goes to General. Routing decisions are
-recorded as `domain.routed` events with their evidence. A new topic never
-creates a domain by itself.
+Domains are work environments. Routing evidence v2 scores a domain's name,
+user-authored keywords, example phrases, and description, plus learned
+vocabulary from its active memories, bound skills, and past task objectives.
+Learned terms are deliberately weaker (0.5 each): explicit evidence wins, and
+a single learned term can never select a domain by itself; chat/status
+messages are not learned evidence.
+Message and domain terms use the small deterministic stemmer when
+`domains.stemming` is enabled. Each candidate keeps a per-term breakdown, and
+`domain.routed` events preserve that evidence. The shipped
+`domains.routing_threshold` and `domains.ambiguity_margin` are both `1.0`:
+a clear specific-domain winner is selected, while weak or ambiguous evidence
+falls back to General. Routing never creates a domain.
+
+When routing falls back to General but a candidate scores at least
+`domains.hint_min_score`, the context includes a bounded hint naming up to
+two possible domains and their matched terms. The `use_domain` result carries
+the entered domain's entry briefing: its description, user-authored
+instructions, top memories for the task, applicable skills, and newly
+available tools. The active domain's instructions are also included in
+normal context. When domain eligibility hides tools from another domain, a
+bounded discovery line names those tools without exposing their schemas.
+A domain change records `domain.entered` and displays an "Entering
+<domain>" chip in the chat; General does not display one.
+
+The task drawer shows the selected domain, candidates, scores, matched terms,
+hints, and any model tie-break. `POST /api/tasks/{id}/domain` corrects the
+task's domain and records a `routing_feedback` label. It may return up to
+three suggested keywords, but nothing is added to the domain automatically.
+`POST /api/domains/route-preview` returns deterministic scores and breakdown
+without creating a task, message, memory, or event.
+
+`domains.model_routing` selects the optional tie-break behavior: `off`
+(the default), `shadow`, or `on`. It runs only for weak evidence from trusted
+input, using one bounded, tool-free label call. Shadow mode records the
+choice without changing the route; invalid output, an unknown id, or a
+timeout falls back to General. Inbox, automation, schedule, and other
+untrusted text never reaches the classifier. A deterministic heartbeat also
+looks for repeated vocabulary in General work and proposes domain suggestions.
+Suggestions are never created automatically, and dismissed clusters are
+remembered.
 
 Resumption is preferred over new work: a message that plausibly continues
 an open task (keyword overlap, recency, and a bonus for tasks waiting on
@@ -471,8 +512,9 @@ harness creates a task whose context names the candidates so the assistant
 asks which to continue instead of guessing.
 
 Domains are created only by the explicit API/CLI command or by the model's
-`create_domain` tool, which is confirm-risk: the exact name and description
-become an approval, and nothing exists until the user approves it.
+`create_domain` tool, which is confirm-risk: the exact name, description,
+keywords, and examples become an approval, and nothing exists until the user
+approves it.
 
 ### Memory
 
@@ -486,6 +528,22 @@ strong keyword overlap) supersedes the older row, which keeps its full
 history in `memory_revisions`. Long notes live as markdown artifacts under
 `data/artifacts/memories/`, referenced from the row; the database is
 authoritative and missing artifacts are reported, not silently read.
+
+`memory.cross_domain` controls memory sharing: `off` keeps the current
+domain/global partition, `boost` (the default) also lets lexically matched
+sibling-domain memories into normal context, and `search` leaves context
+partitioned while making `search_knowledge` search every domain. Sibling
+memories are admitted only on a lexical hit, never as no-hit filler, are
+capped by `memory.cross_domain_max`, and are labelled `from: <domain>` with
+their origin. Archived, retracted, expired, and inactive-domain rows never
+cross over.
+
+General has no memory silo. Legacy `domain:general` rows read as global, and
+new memories saved from General are stored as global. Pinned global memories
+form the always-on core profile, bounded by `memory.core_profile_chars`; the
+Memory panel has a Core profile filter and editor for this set. Domain facts
+remain domain-scoped, while durable facts about the user should be saved as
+global.
 
 Memory lifetime is deterministic and model-free. Every memory tracks
 `access_count` and `last_accessed_at`; a memory is counted once per run when
@@ -527,8 +585,8 @@ and changes that glue facts together with `Also:` are rejected and logged.
 
 ### Approvals and quick confirmation
 
-Confirm-risk actions (MCP tools by default, `create_domain`) create an
-approval bound to the exact tool and arguments, record an
+Confirm-risk actions (MCP tools by default, `create_domain`, `edit_domain`)
+create an approval bound to the exact tool and arguments, record an
 awaiting-approval execution row, and pause the run. The user decides via
 the web panel, the CLI, or a short chat reply. Short replies are resolved
 by deterministic keywords ("yes", "approve", "go ahead", "no", "reject",
@@ -653,7 +711,9 @@ reconciliation rather than blindly retried.
 Built-in tools (all low-risk unless noted): `remember`, `update_memory`,
 `retract_memory`, `search_knowledge`, `read_artifact`,
 `update_task_notes`, `use_domain`, `delegate_task`, `create_domain`
-(confirm-risk), `schedule_task` / `cancel_schedule` (confirm-risk; bounded
+(confirm-risk), `edit_domain` (confirm-risk; changes user-authored domain
+instructions only after approval), `schedule_task` / `cancel_schedule`
+(confirm-risk; bounded
 to schedules the task owns), `propose_skill` (confirm-risk; saves a draft
 only after approval), and `edit_skill` (confirm-risk; refines only skills
 the agent created).
@@ -896,8 +956,20 @@ Main groups:
 - `context.*`: token budgets, reserved output and tool-schema headroom,
   recent-message window, memory and history retrieval counts, per-section
   budgets
-- `domains.*`: routing threshold, ambiguity margins
-- `memory.*`: result limits, temp expiry, and `memory.lifetime.*` (enabled,
+- `domains.*`: routing threshold and ambiguity margin (both `1.0`),
+  task-resume margin, evidence weights (name `1.5`, keyword `1.0`, example
+  `0.75`, description `0.5`, learned term `0.5`, learned-vocabulary cap
+  `2.0`; learned-only routing requires at least two terms), stemming (`true`),
+  `hint_min_score` (`0.5`), `briefing_chars` (`1800`),
+  `instructions_max_chars` (`1200`), `model_routing`
+  (`off|shadow|on`), `model_routing_timeout_s` (`3.0`), `status_line`
+  (`true`), `suggestions.enabled` (`true`), `suggestions.min_tasks` (`6`),
+  and `suggestions.window_days` (`30`). Domain
+  instructions are user-authored; the agent can write them only through an
+  approved `edit_domain`, and a tainted run is refused.
+- `memory.*`: result limits, temp expiry, `cross_domain`
+  (`off|boost|search`, default `boost`), `cross_domain_max` (`3`),
+  `core_profile_chars` (`1200`), and `memory.lifetime.*` (enabled,
   base/growth/min/max days, protected kinds, sweep interval and batch)
 - `tools.*`: MCP servers import file, skills dir, default MCP risk, risk
   overrides
@@ -969,6 +1041,19 @@ python -m pytest tests -m live -o addopts="" # real-endpoint integration tests
 scratch data directory. It never touches the deployed `data/` directory or the
 repository (the sandbox refuses both). See `eval/README.md` for the scenario
 and assertion reference.
+
+Phase 10 adds `eval/scenarios/k_routing.yaml` with 50 labelled routing cases
+and `eval/scenarios/k_memory_recall.yaml` for cross-domain recall. The
+`routing` assertion reads the recorded `domain.routed` decision and can check
+the domain, candidates, reason, and score. `scripts/route_sweep.py` measures
+routing across threshold/margin grids, while
+`scripts/memory_recall_report.py` compares the memory modes. Committed
+reports under `eval/results/` include the Phase 10A baseline, the Phase 10B
+routing result (94.00% accuracy and 0% false positives; General-only control
+28.00%), and the Phase 10D memory result (`boost` and explicit `search`:
+100% recall@5). The memory result is from the deterministic corpus, not a
+live-model or real-use measurement. Routing scenarios are marked
+`measurement: true`: misses are reported but do not gate the eval command.
 
 ```bash
 # See what would run (live-only scenarios appear only in live mode).
@@ -1123,9 +1208,11 @@ scenario between paths.
 
 - Single user, single process per data directory; no accounts, no TLS.
   Put the token-protected UI behind a VPN or a TLS reverse proxy.
-- Domain routing and task resumption are deterministic keyword scoring,
-  not semantic understanding; paraphrases without shared words may
-  misroute to General (recoverable — the user just says which domain).
+- Domain routing and task resumption remain primarily deterministic lexical
+  matching, not general semantic understanding. Routing evidence is richer
+  than the original name/description score, and the optional model tie-break
+  is constrained and off by default, but paraphrases without shared evidence
+  may still misroute to General (recoverable through task correction).
 - Retrieval is FTS5 keyword search; no embeddings or vector database.
   Deep paraphrase recall can miss.
 - Scheduling is process-bound: due work is noticed on a tick while

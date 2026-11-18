@@ -96,15 +96,27 @@ class MemoryManager:
         domain_id: str | None,
         domains,
     ) -> tuple[str, str | None]:
-        """Validate scope. The model's scope is a hint; invalid falls back."""
+        """Validate scope and keep General unscoped.
+
+        General is the unscoped interface, not a memory silo. New writes from
+        General are therefore stored as global rows with no domain id. Legacy
+        ``domain:general`` rows are left untouched and are normalised at read
+        time by :meth:`_effective_scope`.
+        """
+        # General owns no silo. Even an explicit domain scope requested from
+        # a General task remains unscoped, matching the owner decision.
+        if str(domain_id or "") == "general":
+            return "global", None
         if scope == "global":
             return "global", None
         if scope and scope.startswith("domain:"):
             candidate = scope.split(":", 1)[1]
-            if domains.get(candidate):
+            if candidate == "general":
+                return "global", None
+            if domains is not None and domains.get(candidate):
                 return scope, candidate
             raise MemoryError(f"unknown domain in scope: {candidate}")
-        if domain_id and domains.get(domain_id):
+        if domain_id and domains is not None and domains.get(domain_id):
             return f"domain:{domain_id}", domain_id
         return "global", None
 
@@ -615,6 +627,99 @@ class MemoryManager:
 
     # -- retrieval --------------------------------------------------------
 
+    def domain_affinity(
+        self, text: str, limit_per_domain: int = 3
+    ) -> dict[str, list[str]]:
+        """Return message terms learned from active domain memories.
+
+        FTS finds candidate memories; the returned terms use the same
+        ``domains.stemming`` normalization as domain routing. The query is
+        read-only: it records no access, emits no event, and writes nothing.
+        """
+        query_terms = util.keywords(text)
+        if not query_terms or limit_per_domain <= 0:
+            return {}
+        stemming = bool(self.config.get("domains.stemming", True))
+        normalize = util.stemmed_keywords if stemming else util.keywords
+        normalized_query = normalize(text)
+        match = " OR ".join(f'"{term}"' for term in query_terms)
+        try:
+            rows = self.db.query(
+                "SELECT m.* FROM memories_fts f JOIN memories m"
+                " ON m.row_num=f.rowid WHERE memories_fts MATCH ? "
+                "AND m.status='active' AND m.archived_at IS NULL "
+                "AND (m.expires_at IS NULL OR m.expires_at > ?) "
+                "AND m.scope LIKE 'domain:%' AND m.scope != 'domain:general' "
+                "ORDER BY m.row_num ASC",
+                (match, util.iso()),
+            )
+        except Exception:
+            return {}
+
+        wanted = set(normalized_query)
+        affinity: dict[str, list[str]] = {}
+        for row in rows_to_dicts(rows):
+            domain_id = str(row.get("domain_id") or "")
+            if not domain_id:
+                scope = str(row.get("scope") or "")
+                domain_id = scope.split(":", 1)[1] if ":" in scope else ""
+            if not domain_id or domain_id == "general":
+                continue
+            content_terms = set(normalize(str(row.get("content") or "")))
+            matched = wanted & content_terms
+            if not matched:
+                continue
+            bucket = affinity.setdefault(domain_id, [])
+            for term in normalized_query:
+                if term in matched and term not in bucket:
+                    if len(bucket) >= max(1, int(limit_per_domain)):
+                        break
+                    bucket.append(term)
+        return {domain_id: affinity[domain_id] for domain_id in sorted(affinity)}
+
+    def core_profile(
+        self, limit_chars: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return the always-on profile made from pinned global memories.
+
+        Legacy ``domain:general`` rows count as global at read time. The
+        returned content is clipped cumulatively to ``limit_chars`` (or the
+        configured ``memory.core_profile_chars``). This method is read-only:
+        it records no access and emits no event.
+        """
+        if limit_chars is None:
+            limit_chars = int(self.config.get("memory.core_profile_chars", 1200))
+        limit_chars = max(0, int(limit_chars))
+        if limit_chars <= 0:
+            return []
+        rows = rows_to_dicts(self.db.query(
+            "SELECT * FROM memories WHERE status='active'"
+            " AND archived_at IS NULL AND COALESCE(pinned, 0)=1"
+            " AND scope IN ('global', 'domain:general')"
+            " ORDER BY created_at DESC, row_num DESC"
+        ))
+        now = util.now_utc()
+        remaining = limit_chars
+        profile: list[dict[str, Any]] = []
+        for row in rows:
+            if self._expired(row, now):
+                continue
+            content = str(row.get("content") or "")
+            if not content:
+                continue
+            if len(content) > remaining:
+                content = content[:remaining]
+            if not content:
+                break
+            item = self._to_public(row)
+            item["content"] = content
+            item["effective_scope"] = self._effective_scope(row)
+            profile.append(item)
+            remaining -= len(content)
+            if remaining <= 0:
+                break
+        return profile
+
     def search(
         self,
         query: str,
@@ -623,8 +728,16 @@ class MemoryManager:
         limit: int | None = None,
         include_expired: bool = False,
         include_archived: bool = False,
+        cross_domain: bool = False,
     ) -> list[dict[str, Any]]:
         """Explainable retrieval: FTS relevance + scope priority + recency.
+
+        ``scope_priority`` lists the current domain first and global second.
+        With ``cross_domain=False`` (the default), only those priority scopes
+        and global memory are visible. With ``cross_domain=True``, lexical
+        hits from every active domain are eligible and labelled as
+        cross-domain results. Other-domain rows are capped by
+        ``memory.cross_domain_max`` and never enter the no-hit filler path.
 
         Superseded, retracted, and expired rows never enter results. Archived
         rows are excluded by default; with ``include_archived`` they return
@@ -647,47 +760,100 @@ class MemoryManager:
 
         if terms:
             match = " OR ".join(f'"{t}"' for t in terms)
+            cross_cap = max(
+                0, int(self.config.get("memory.cross_domain_max", 3))
+            ) if cross_domain else 0
+            candidate_limit = max(limit * 4, (limit + cross_cap) * 4, 20)
             try:
                 rows = self.db.query(
                     "SELECT m.* FROM memories_fts f JOIN memories m"
                     " ON m.row_num=f.rowid WHERE memories_fts MATCH ?"
                     " ORDER BY rank LIMIT ?",
-                    (match, limit * 4),
+                    (match, candidate_limit),
                 )
             except Exception:
                 rows = []
             for row in rows_to_dicts(rows):
                 if not usable(row):
                     continue
-                if not self._scope_visible(row, scope_priority):
+                if not self._scope_visible(
+                    row, scope_priority, cross_domain=cross_domain
+                ):
                     continue
+                is_cross = self._is_other_domain(row, scope_priority)
                 parts = {
                     "fts": 1.0,
                     "scope": self._scope_bonus(row, scope_priority),
                     "recency": self._recency(row, now),
                 }
+                if is_cross:
+                    # A small, explicit boost keeps an attributed sibling hit
+                    # below global and the current domain.
+                    parts["cross_domain"] = 0.1
                 score = sum(parts.values())
-                results.append(self._scored(row, score, parts, terms))
+                results.append(self._scored(
+                    row, score, parts, terms, cross_domain=is_cross
+                ))
+
         # Always include a few recent active memories from the priority
-        # scopes even without a lexical hit (domain context).
+        # scopes even without a lexical hit (domain context). Other domains
+        # never enter this filler path. Legacy domain:general rows are read
+        # as global and therefore share the global filler group.
         if len(results) < limit:
             known = {r["id"] for r in results}
+            seen_groups: set[tuple[str, ...]] = set()
             for scope in scope_priority:
                 if len(results) >= limit:
                     break
+                if scope in ("global", "domain:general"):
+                    group = ("global", "domain:general")
+                else:
+                    group = (scope,)
+                if group in seen_groups:
+                    continue
+                seen_groups.add(group)
+                placeholders = ",".join("?" for _ in group)
                 for row in rows_to_dicts(
                     self.db.query(
-                        "SELECT * FROM memories WHERE scope=? AND status="
-                        "'active' ORDER BY updated_at DESC LIMIT ?",
-                        (scope, 6),
+                        "SELECT * FROM memories WHERE scope IN "
+                        f"({placeholders}) AND status='active'"
+                        " ORDER BY updated_at DESC LIMIT ?",
+                        (*group, 6),
                     )
                 ):
                     if row["id"] in known or not usable(row):
                         continue
+                    if not self._scope_visible(row, scope_priority):
+                        continue
                     known.add(row["id"])
-                    results.append(self._scored(row, 0.4, {"scope": 0.4},
-                                                terms))
-        results.sort(key=lambda r: r["score"], reverse=True)
+                    bonus = self._scope_bonus(row, scope_priority)
+                    results.append(self._scored(
+                        row, bonus, {"scope": bonus}, terms
+                    ))
+
+        # Scope tiers are absolute: current domain first, global second,
+        # attributed sibling domains last. Score breaks ties inside a tier.
+        # This keeps a very recent sibling from outranking a current-domain
+        # hit merely because recency has a wider range than the old bonus.
+        results.sort(key=lambda item: (
+            1 if item.get("effective_scope") == "global"
+            else (2 if item.get("cross_domain") else 0),
+            -float(item.get("score") or 0.0),
+        ))
+        if cross_domain:
+            cross_cap = max(
+                0, int(self.config.get("memory.cross_domain_max", 3))
+            )
+            cross_items = [
+                item for item in results if item.get("cross_domain")
+            ]
+            allowed_cross = {
+                item["id"] for item in cross_items[:cross_cap]
+            }
+            results = [
+                item for item in results
+                if not item.get("cross_domain") or item["id"] in allowed_cross
+            ]
         final = results[:limit]
         if include_archived:
             for item in final:
@@ -704,7 +870,7 @@ class MemoryManager:
 
     def _scored(
         self, row: dict[str, Any], score: float, parts: dict[str, float],
-        terms: list[str],
+        terms: list[str], *, cross_domain: bool = False,
     ) -> dict[str, Any]:
         out = self._to_public(row)
         archived = bool(row.get("archived_at"))
@@ -712,12 +878,21 @@ class MemoryManager:
             # Archived rows are retrievable but never outrank live memory.
             parts = {**parts, "archived": -0.75}
             score += -0.75
+        effective_scope = self._effective_scope(row)
         out["score"] = round(score, 3)
         out["score_parts"] = {k: round(v, 3) for k, v in parts.items()}
+        out["effective_scope"] = effective_scope
+        out["cross_domain"] = bool(cross_domain)
+        if effective_scope.startswith("domain:"):
+            out["origin_domain_id"] = effective_scope.split(":", 1)[1]
         reason = (
             f"lexical match on {', '.join(terms[:4]) or 'recency'}"
-            f"; scope={row['scope']}"
+            f"; scope={effective_scope}"
         )
+        if cross_domain:
+            reason += "; cross-domain lexical match"
+        elif str(row.get("scope") or "") != effective_scope:
+            reason += "; legacy domain:general treated as global"
         if archived:
             reason += (
                 "; archived: included because archived memories were "
@@ -732,18 +907,59 @@ class MemoryManager:
             return False
         return util.parse_iso(row["expires_at"]) < now
 
+    def _effective_scope(self, row: dict[str, Any]) -> str:
+        """Return the scope used for reads.
+
+        General has no memory silo. Legacy ``domain:general`` rows are
+        therefore global for visibility, ranking, and core-profile purposes;
+        the stored scope is not rewritten.
+        """
+        scope = str(row.get("scope") or "")
+        if scope == "domain:general":
+            return "global"
+        return scope
+
     def _scope_visible(
-        self, row: dict[str, Any], scope_priority: list[str]
+        self,
+        row: dict[str, Any],
+        scope_priority: list[str],
+        cross_domain: bool = False,
     ) -> bool:
-        # A lexical hit never widens scope. Global memory plus the active
-        # domain's priority scope are visible; sibling domain scopes are not.
-        return row["scope"] == "global" or row["scope"] in scope_priority
+        """Central visibility rule for memory retrieval.
+
+        Global memory (including legacy General rows) and the active domain's
+        priority scopes are always visible. A cross-domain request may also
+        see lexical hits from other *active* domains, but never archived or
+        inactive domain scopes.
+        """
+        effective = self._effective_scope(row)
+        if effective == "global" or effective in scope_priority:
+            return True
+        if not cross_domain or not effective.startswith("domain:"):
+            return False
+        domain_id = effective.split(":", 1)[1]
+        if not domain_id:
+            return False
+        domain = self.db.query_one(
+            "SELECT status FROM domains WHERE id=?", (domain_id,)
+        )
+        return domain is not None and str(domain["status"]) == "active"
+
+    def _is_other_domain(
+        self, row: dict[str, Any], priority: list[str]
+    ) -> bool:
+        effective = self._effective_scope(row)
+        return (
+            effective.startswith("domain:")
+            and effective not in priority
+        )
 
     def _scope_bonus(self, row: dict[str, Any], priority: list[str]) -> float:
-        if row["scope"] in priority:
-            return 0.6
-        if row["scope"] == "global":
+        effective = self._effective_scope(row)
+        if effective == "global":
             return 0.3
+        if effective in priority:
+            return 0.6
         return 0.0
 
     def _recency(self, row: dict[str, Any], now: dt.datetime) -> float:
@@ -754,19 +970,27 @@ class MemoryManager:
 
     def list(
         self, scope: str | None = None, limit: int = 100,
-        status: str | None = "active",
+        status: str | None = "active", pinned: bool | None = None,
     ) -> list[dict[str, Any]]:
-        """List memories by status.
+        """List memories by status and optional filters.
 
         ``status='active'`` (default) means live rows only; archived rows are
         separate. ``status='archived'`` lists only archived rows.
         ``status='any'`` (or ``None``) means every status, archived included.
+        ``scope='core'`` is the effective global scope, so legacy
+        ``domain:general`` rows are included for the core-profile editor.
+        ``pinned`` filters pinned (true) or unpinned (false) rows.
         """
         clauses: list[str] = []
         args: list[Any] = []
-        if scope:
+        if scope == "core":
+            clauses.append("scope IN ('global', 'domain:general')")
+        elif scope:
             clauses.append("scope=?")
             args.append(scope)
+        if pinned is not None:
+            clauses.append("COALESCE(pinned, 0)=?")
+            args.append(1 if pinned else 0)
         if status == "archived":
             clauses.append("status='active'")
             clauses.append("archived_at IS NOT NULL")

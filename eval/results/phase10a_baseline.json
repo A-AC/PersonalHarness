@@ -1,0 +1,1126 @@
+{
+  "best": {
+    "accuracy": 0.7174,
+    "confusion": {
+      "labels": [
+        "Clothing",
+        "General",
+        "Health",
+        "Home automation",
+        "Language learning"
+      ],
+      "rows": {
+        "Clothing": {
+          "Clothing": 5,
+          "General": 3,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "General": {
+          "Clothing": 1,
+          "General": 10,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 1
+        },
+        "Health": {
+          "Clothing": 0,
+          "General": 4,
+          "Health": 6,
+          "Home automation": 0,
+          "Language learning": 0
+        },
+        "Home automation": {
+          "Clothing": 0,
+          "General": 3,
+          "Health": 0,
+          "Home automation": 5,
+          "Language learning": 0
+        },
+        "Language learning": {
+          "Clothing": 0,
+          "General": 1,
+          "Health": 0,
+          "Home automation": 0,
+          "Language learning": 7
+        }
+      }
+    },
+    "correct": 33,
+    "false_positive_rate": 0.0435,
+    "general_fallback_rate": 0.4565,
+    "margin": 0.5,
+    "threshold": 0.5,
+    "total": 46
+  },
+  "case_count": 46,
+  "corpus": "eval/scenarios/k_routing.yaml",
+  "experiment": "phase10a_route_sweep",
+  "grid": [
+    {
+      "accuracy": 0.7174,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 5,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 1,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 4,
+            "Health": 6,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 5,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 33,
+      "false_positive_count": 2,
+      "false_positive_rate": 0.0435,
+      "general_fallback_count": 21,
+      "general_fallback_rate": 0.4565,
+      "margin": 0.5,
+      "misses": 11,
+      "threshold": 0.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.7174,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 5,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 1,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 4,
+            "Health": 6,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 5,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 33,
+      "false_positive_count": 2,
+      "false_positive_rate": 0.0435,
+      "general_fallback_count": 21,
+      "general_fallback_rate": 0.4565,
+      "margin": 0.75,
+      "misses": 11,
+      "threshold": 0.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.7174,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 5,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 1,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 4,
+            "Health": 6,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 3,
+            "Health": 0,
+            "Home automation": 5,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 1,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 7
+          }
+        }
+      },
+      "correct": 33,
+      "false_positive_count": 2,
+      "false_positive_rate": 0.0435,
+      "general_fallback_count": 21,
+      "general_fallback_rate": 0.4565,
+      "margin": 1.0,
+      "misses": 11,
+      "threshold": 0.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.4348,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 3,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 11,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 3
+          }
+        }
+      },
+      "correct": 20,
+      "false_positive_count": 1,
+      "false_positive_rate": 0.0217,
+      "general_fallback_count": 36,
+      "general_fallback_rate": 0.7826,
+      "margin": 0.5,
+      "misses": 25,
+      "threshold": 1.0,
+      "total": 46
+    },
+    {
+      "accuracy": 0.4348,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 3,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 11,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 3
+          }
+        }
+      },
+      "correct": 20,
+      "false_positive_count": 1,
+      "false_positive_rate": 0.0217,
+      "general_fallback_count": 36,
+      "general_fallback_rate": 0.7826,
+      "margin": 0.75,
+      "misses": 25,
+      "threshold": 1.0,
+      "total": 46
+    },
+    {
+      "accuracy": 0.4348,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 3,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 11,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 5,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 3
+          }
+        }
+      },
+      "correct": 20,
+      "false_positive_count": 1,
+      "false_positive_rate": 0.0217,
+      "general_fallback_count": 36,
+      "general_fallback_rate": 0.7826,
+      "margin": 1.0,
+      "misses": 25,
+      "threshold": 1.0,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3696,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 17,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 41,
+      "general_fallback_rate": 0.8913,
+      "margin": 0.5,
+      "misses": 29,
+      "threshold": 1.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3696,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 17,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 41,
+      "general_fallback_rate": 0.8913,
+      "margin": 0.75,
+      "misses": 29,
+      "threshold": 1.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3696,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 17,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 41,
+      "general_fallback_rate": 0.8913,
+      "margin": 1.0,
+      "misses": 29,
+      "threshold": 1.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3696,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 17,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 41,
+      "general_fallback_rate": 0.8913,
+      "margin": 0.5,
+      "misses": 29,
+      "threshold": 2.0,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3696,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 17,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 41,
+      "general_fallback_rate": 0.8913,
+      "margin": 0.75,
+      "misses": 29,
+      "threshold": 2.0,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3696,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 9,
+            "Health": 1,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 17,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 41,
+      "general_fallback_rate": 0.8913,
+      "margin": 1.0,
+      "misses": 29,
+      "threshold": 2.0,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3478,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 16,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 42,
+      "general_fallback_rate": 0.913,
+      "margin": 0.5,
+      "misses": 30,
+      "threshold": 2.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3478,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 16,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 42,
+      "general_fallback_rate": 0.913,
+      "margin": 0.75,
+      "misses": 30,
+      "threshold": 2.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3478,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 1,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 6,
+            "Health": 0,
+            "Home automation": 2,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 16,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 42,
+      "general_fallback_rate": 0.913,
+      "margin": 1.0,
+      "misses": 30,
+      "threshold": 2.5,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3043,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 0,
+            "General": 8,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 14,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 44,
+      "general_fallback_rate": 0.9565,
+      "margin": 0.5,
+      "misses": 32,
+      "threshold": 3.0,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3043,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 0,
+            "General": 8,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 14,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 44,
+      "general_fallback_rate": 0.9565,
+      "margin": 0.75,
+      "misses": 32,
+      "threshold": 3.0,
+      "total": 46
+    },
+    {
+      "accuracy": 0.3043,
+      "confusion": {
+        "labels": [
+          "Clothing",
+          "General",
+          "Health",
+          "Home automation",
+          "Language learning"
+        ],
+        "rows": {
+          "Clothing": {
+            "Clothing": 0,
+            "General": 8,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "General": {
+            "Clothing": 0,
+            "General": 12,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Health": {
+            "Clothing": 0,
+            "General": 10,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 0
+          },
+          "Home automation": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 1,
+            "Language learning": 0
+          },
+          "Language learning": {
+            "Clothing": 0,
+            "General": 7,
+            "Health": 0,
+            "Home automation": 0,
+            "Language learning": 1
+          }
+        }
+      },
+      "correct": 14,
+      "false_positive_count": 0,
+      "false_positive_rate": 0.0,
+      "general_fallback_count": 44,
+      "general_fallback_rate": 0.9565,
+      "margin": 1.0,
+      "misses": 32,
+      "threshold": 3.0,
+      "total": 46
+    }
+  ],
+  "historical": true,
+  "margins": [
+    0.5,
+    0.75,
+    1.0
+  ],
+  "note": "Pre-evidence-v2 Phase 10A baseline; rerunning the current script produces v2 numbers.",
+  "thresholds": [
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    3.0
+  ],
+  "zero_domain_control": {
+    "accuracy": 0.2609,
+    "correct": 12,
+    "total": 46
+  }
+}

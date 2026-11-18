@@ -73,6 +73,7 @@ class Scenario:
     steps: list[ScenarioStep] = field(default_factory=list)
     cleanup: str = "reset"
     source: str = ""
+    measurement: bool = False
 
     def supports(self, mode: str) -> bool:
         return mode in self.modes
@@ -90,6 +91,7 @@ class Scenario:
             "fixtures": self.fixtures,
             "cleanup": self.cleanup,
             "source": self.source,
+            "measurement": self.measurement,
             "steps": [step.as_dict() for step in self.steps],
         }
 
@@ -178,6 +180,7 @@ class ScenarioResult:
     steps: list[StepResult] = field(default_factory=list)
     error: str | None = None
     data_dir: str = ""
+    measurement: bool = False
 
     @property
     def assertions(self) -> list[AssertionResult]:
@@ -203,6 +206,7 @@ class ScenarioResult:
             "duration_ms": self.duration_ms,
             "error": self.error,
             "data_dir": self.data_dir,
+            "measurement": self.measurement,
             "steps": [step.as_dict() for step in self.steps],
             "assertions": [item.as_dict() for item in self.assertions],
             "model": _step_model_totals(self.steps),

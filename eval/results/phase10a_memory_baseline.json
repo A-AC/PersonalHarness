@@ -1,0 +1,404 @@
+{
+  "clip_chars": 400,
+  "corpus": "eval/scenarios/k_memory_recall.yaml",
+  "experiment": "phase10a_memory_recall",
+  "modes": [
+    "off",
+    "search",
+    "boost"
+  ],
+  "scenarios": [
+    {
+      "expected": [
+        "avoids peanuts"
+      ],
+      "id": "k_memory_recall.general_allergy",
+      "modes": {
+        "boost": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        },
+        "off": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        },
+        "search": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        }
+      },
+      "query": "What should I avoid eating because of my peanut allergy?",
+      "routed_domain": "General",
+      "siblings": [
+        "navy and charcoal"
+      ]
+    },
+    {
+      "expected": [
+        "120g per day"
+      ],
+      "id": "k_memory_recall.general_protein",
+      "modes": {
+        "boost": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        },
+        "off": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        },
+        "search": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        }
+      },
+      "query": "How much protein should I eat each day?",
+      "routed_domain": "General",
+      "siblings": [
+        "size 42"
+      ]
+    },
+    {
+      "expected": [
+        "navy and charcoal"
+      ],
+      "id": "k_memory_recall.health_clothing_preference",
+      "modes": {
+        "boost": {
+          "contents": [
+            "The user prefers metric units",
+            "The user avoids peanuts because of an allergy",
+            "The user's protein target is 120g per day"
+          ],
+          "context_budget_share": 0.016,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        },
+        "off": {
+          "contents": [
+            "The user prefers metric units",
+            "The user avoids peanuts because of an allergy",
+            "The user's protein target is 120g per day"
+          ],
+          "context_budget_share": 0.016,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        },
+        "search": {
+          "contents": [
+            "The user prefers metric units",
+            "The user avoids peanuts because of an allergy",
+            "The user's protein target is 120g per day"
+          ],
+          "context_budget_share": 0.016,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        }
+      },
+      "query": "For my health routine, help me pick a navy or charcoal base for my capsule wardrobe",
+      "routed_domain": "Health",
+      "siblings": [
+        "size 42"
+      ]
+    },
+    {
+      "expected": [
+        "avoids peanuts"
+      ],
+      "id": "k_memory_recall.clothing_health_allergy",
+      "modes": {
+        "boost": {
+          "contents": [
+            "The user prefers metric units",
+            "The user prefers navy and charcoal",
+            "The user wears size 42 shoes"
+          ],
+          "context_budget_share": 0.0126,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        },
+        "off": {
+          "contents": [
+            "The user prefers metric units",
+            "The user prefers navy and charcoal",
+            "The user wears size 42 shoes"
+          ],
+          "context_budget_share": 0.0126,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        },
+        "search": {
+          "contents": [
+            "The user prefers metric units",
+            "The user prefers navy and charcoal",
+            "The user wears size 42 shoes"
+          ],
+          "context_budget_share": 0.0126,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        }
+      },
+      "query": "My clothing wardrobe includes a scarf, is there any allergy risk with peanuts?",
+      "routed_domain": "Clothing",
+      "siblings": [
+        "120g per day"
+      ]
+    },
+    {
+      "expected": [
+        "metric units"
+      ],
+      "id": "k_memory_recall.general_units",
+      "modes": {
+        "boost": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": true,
+          "recall_at_5": 1.0,
+          "returned": 1,
+          "sibling_leak": false
+        },
+        "off": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": true,
+          "recall_at_5": 1.0,
+          "returned": 1,
+          "sibling_leak": false
+        },
+        "search": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": true,
+          "recall_at_5": 1.0,
+          "returned": 1,
+          "sibling_leak": false
+        }
+      },
+      "query": "Do you use metric or imperial units for measurements?",
+      "routed_domain": "General",
+      "siblings": [
+        "avoids peanuts"
+      ]
+    },
+    {
+      "expected": [
+        "120g per day"
+      ],
+      "id": "k_memory_recall.clothing_health_protein",
+      "modes": {
+        "boost": {
+          "contents": [
+            "The user prefers metric units",
+            "The user prefers navy and charcoal",
+            "The user wears size 42 shoes"
+          ],
+          "context_budget_share": 0.0126,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        },
+        "off": {
+          "contents": [
+            "The user prefers metric units",
+            "The user prefers navy and charcoal",
+            "The user wears size 42 shoes"
+          ],
+          "context_budget_share": 0.0126,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        },
+        "search": {
+          "contents": [
+            "The user prefers metric units",
+            "The user prefers navy and charcoal",
+            "The user wears size 42 shoes"
+          ],
+          "context_budget_share": 0.0126,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 3,
+          "sibling_leak": false
+        }
+      },
+      "query": "For my clothing wardrobe, how much protein should I eat daily?",
+      "routed_domain": "Clothing",
+      "siblings": [
+        "avoids peanuts"
+      ]
+    },
+    {
+      "expected": [
+        "size 42"
+      ],
+      "id": "k_memory_recall.general_shoe_size",
+      "modes": {
+        "boost": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        },
+        "off": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        },
+        "search": {
+          "contents": [
+            "The user prefers metric units"
+          ],
+          "context_budget_share": 0.004,
+          "found": false,
+          "recall_at_5": 0.0,
+          "returned": 1,
+          "sibling_leak": false
+        }
+      },
+      "query": "What shoe size do I wear again?",
+      "routed_domain": "General",
+      "siblings": [
+        "120g per day"
+      ]
+    },
+    {
+      "expected": [
+        "metric units"
+      ],
+      "id": "k_memory_recall.health_units",
+      "modes": {
+        "boost": {
+          "contents": [
+            "The user prefers metric units",
+            "The user avoids peanuts because of an allergy",
+            "The user's protein target is 120g per day"
+          ],
+          "context_budget_share": 0.016,
+          "found": true,
+          "recall_at_5": 1.0,
+          "returned": 3,
+          "sibling_leak": false
+        },
+        "off": {
+          "contents": [
+            "The user prefers metric units",
+            "The user avoids peanuts because of an allergy",
+            "The user's protein target is 120g per day"
+          ],
+          "context_budget_share": 0.016,
+          "found": true,
+          "recall_at_5": 1.0,
+          "returned": 3,
+          "sibling_leak": false
+        },
+        "search": {
+          "contents": [
+            "The user prefers metric units",
+            "The user avoids peanuts because of an allergy",
+            "The user's protein target is 120g per day"
+          ],
+          "context_budget_share": 0.016,
+          "found": true,
+          "recall_at_5": 1.0,
+          "returned": 3,
+          "sibling_leak": false
+        }
+      },
+      "query": "For my health log, should measurements use the metric system or imperial?",
+      "routed_domain": "Health",
+      "siblings": [
+        "navy and charcoal"
+      ]
+    }
+  ],
+  "summary": {
+    "boost": {
+      "found": 2,
+      "mean_context_budget_share": 0.0092,
+      "recall_at_5": 0.25,
+      "scenarios": 8,
+      "sibling_leaks": 0
+    },
+    "off": {
+      "found": 2,
+      "mean_context_budget_share": 0.0092,
+      "recall_at_5": 0.25,
+      "scenarios": 8,
+      "sibling_leaks": 0
+    },
+    "search": {
+      "found": 2,
+      "mean_context_budget_share": 0.0092,
+      "recall_at_5": 0.25,
+      "scenarios": 8,
+      "sibling_leaks": 0
+    }
+  },
+  "top_k": 5
+}

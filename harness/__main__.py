@@ -20,6 +20,9 @@ from pathlib import Path
 from . import __version__, util
 
 
+DEFAULT_ROUTING_FEEDBACK_EXPORT = "eval/scenarios/k_routing_feedback.yaml"
+
+
 def _local_time(value: str | None) -> str:
     """Render a stored UTC timestamp in this computer's local time."""
     if not value:
@@ -480,6 +483,35 @@ def cmd_memories(args: argparse.Namespace) -> None:
 
 def cmd_domains(args: argparse.Namespace) -> None:
     client = Client(_base_url(args), _token(args))
+    export_feedback = getattr(args, "export_feedback", None)
+    if export_feedback is not None:
+        out = client.call("GET", "/api/domains/feedback")
+        scenarios = out.get("scenarios") or []
+        target = Path(export_feedback)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        import yaml
+
+        target.write_text(
+            yaml.safe_dump(
+                {"scenarios": scenarios}, sort_keys=False, allow_unicode=True
+            ),
+            encoding="utf-8",
+        )
+        print(
+            f"exported {len(scenarios)} routing feedback scenarios to {target}"
+        )
+        return
+    if getattr(args, "suggestions", False):
+        out = client.call("GET", "/api/domain-suggestions")
+        for suggestion in out.get("suggestions", []):
+            terms = ", ".join(str(item) for item in suggestion.get("terms") or [])
+            print(f"{suggestion.get('name') or '(unnamed)'}  "
+                  f"[{suggestion.get('id')}]")
+            print(f"    terms: {terms or '-'}")
+            print(f"    tasks: {suggestion.get('task_count', 0)}")
+        if not out.get("suggestions"):
+            print("(no domain suggestions)")
+        return
     if args.create:
         out = client.call("POST", "/api/domains", {
             "name": args.create[0], "description": args.create[1] or "",
@@ -491,6 +523,25 @@ def cmd_domains(args: argparse.Namespace) -> None:
         print(f"[{domain['status']}] {domain['name']} ({domain['id']})")
         if domain["description"]:
             print(f"    {domain['description']}")
+        keywords = domain.get("keywords") or []
+        examples = domain.get("examples") or []
+        instructions = domain.get("instructions") or ""
+        print(
+            f"    keywords={len(keywords)} examples={len(examples)} "
+            f"instructions={'yes' if instructions else 'no'}"
+        )
+        if keywords:
+            print(f"    keyword terms: {', '.join(str(item) for item in keywords)}")
+        if examples:
+            print(f"    example terms: {', '.join(str(item) for item in examples)}")
+        stats = domain.get("routing_stats")
+        if isinstance(stats, dict):
+            print(
+                "    routing: "
+                f"routed_here={stats.get('routed_here', 0)} "
+                f"corrected_away={stats.get('corrected_away', 0)} "
+                f"corrected_in={stats.get('corrected_in', 0)}"
+            )
 
 
 def cmd_consolidate(args: argparse.Namespace) -> None:
@@ -835,9 +886,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--unpin", metavar="ID", default=None)
     p.set_defaults(func=cmd_memories)
 
-    p = sub.add_parser("domains", help="list domains")
+    p = sub.add_parser("domains", help="list or export domains")
     common(p)
     p.add_argument("--create", nargs=2, metavar=("NAME", "DESCRIPTION"))
+    p.add_argument(
+        "--suggestions",
+        action="store_true",
+        help="list open usage-based domain suggestions",
+    )
+    p.add_argument(
+        "--export-feedback",
+        nargs="?",
+        const=DEFAULT_ROUTING_FEEDBACK_EXPORT,
+        default=None,
+        metavar="PATH",
+        help=(
+            "export routing feedback as k_routing scenarios "
+            "(default eval/scenarios/k_routing_feedback.yaml)"
+        ),
+    )
     p.set_defaults(func=cmd_domains)
 
     p = sub.add_parser("consolidate", help="run one consolidation pass")

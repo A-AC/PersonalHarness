@@ -50,6 +50,8 @@ class ContextBuilder:
         trigger: dict[str, Any],
         pending_approvals: list[dict[str, Any]] | None = None,
         run_id: str | None = None,
+        routing: dict[str, Any] | None = None,
+        tool_selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Assemble the system message for a run. Returns content + sources."""
         sources: list[dict[str, Any]] = []
@@ -68,6 +70,12 @@ class ContextBuilder:
             ("state", self._state_block(
                 task, domain, trigger,
                 None if is_subagent else pending_approvals, sources,
+                routing=routing,
+            ), -1)
+        )
+        sections.append(
+            ("domain_instructions", self._domain_instructions_block(
+                domain, sources
             ), -1)
         )
         if is_subagent:
@@ -76,9 +84,14 @@ class ContextBuilder:
             sections.append(
                 ("delegation", self._delegation_block(task, sources), -1)
             )
+        core_text, core_ids = self._core_profile_block(
+            self.memory.core_profile(), sources, run_id=run_id
+        )
+        sections.append(("core_profile", core_text, -1))
         sections.append(
             ("memories", self._memories_block(
-                objective, task, sources, run_id
+                objective, task, sources, run_id,
+                excluded_ids=core_ids,
             ), 1)
         )
         if not is_subagent:
@@ -90,6 +103,11 @@ class ContextBuilder:
                 task.get("domain_id"), objective, sources
             ), 3)
         )
+        discovery_text, discovery_sources = self._tool_discovery_block(
+            tool_selection
+        )
+        sources.extend(discovery_sources)
+        sections.append(("tool_discovery", discovery_text, 4))
 
         total_budget = self._total_budget_chars()
         section_budgets = self.config.get("context.section_budgets", {}) or {}
@@ -171,9 +189,9 @@ class ContextBuilder:
             "completes.\n"
             "- Propose one action at a time. Wait for its result before "
             "proposing the next.\n"
-            "- Durable facts, preferences, and decisions the user states belong "
-            "in memory (the remember tool), not in the hope that chat history "
-            "keeps them.\n"
+            "- When using remember, durable facts about the user (preferences, "
+            "constraints, identity) default to global; facts about the current "
+            "domain use that domain's scope.\n"
             "- Prefer search_knowledge when a relevant fact may exist but is "
             "not visible in your context.\n"
             "- Route work to an existing domain with use_domain when the "
@@ -216,6 +234,8 @@ class ContextBuilder:
         trigger: dict[str, Any],
         pending_approvals: list[dict[str, Any]] | None,
         sources: list[dict[str, Any]],
+        *,
+        routing: dict[str, Any] | None = None,
     ) -> str:
         lines = ["# Current situation"]
         zone = local_tz(self.config)
@@ -232,14 +252,33 @@ class ContextBuilder:
         lines.append(f"Active domain: {domain['name'] if domain else 'General'}")
         domains = self.domains.list_active()
         if domains:
+            descriptions = []
+            for item in domains[:8]:
+                description = util.clip(
+                    " ".join(
+                        str(item.get("description") or "No description.").split()
+                    ),
+                    80,
+                )
+                descriptions.append(
+                    f"{item['name']} ({item['id']}): {description}"
+                )
             lines.append(
                 "Available domains: "
-                + ", ".join(
-                    f"{item['name']} ({item['id']})"
-                    for item in domains[:12]
-                )
+                + ", ".join(descriptions)
                 + ". Do not create a domain that already appears here."
             )
+            sources.append({
+                "section": "domain", "ref": "domain:list",
+                "reason": "available domain descriptions",
+            })
+        hint = self._routing_hint(routing)
+        if hint:
+            lines.append(hint)
+            sources.append({
+                "section": "domain", "ref": "domain:hint",
+                "reason": "below-threshold domain evidence",
+            })
         lines.append(f"Task objective: {task['objective']}")
         lines.append(f"Task status: {task['status']}")
         meta = util.loads(task.get("meta") or "{}", {})
@@ -309,6 +348,168 @@ class ContextBuilder:
                         "reason": "task and trigger state"})
         return "\n".join(lines)
 
+    def _domain_instructions_block(
+        self,
+        domain: dict[str, Any] | None,
+        sources: list[dict[str, Any]],
+    ) -> str:
+        """Disclose user-authored instructions for the active domain only."""
+        if not domain:
+            return ""
+        instructions = str(domain.get("instructions") or "").strip()
+        if not instructions:
+            return ""
+        try:
+            limit = int(
+                self.config.get("domains.instructions_max_chars", 1200)
+            )
+        except (TypeError, ValueError):
+            limit = 1200
+        limit = max(1, limit)
+        text = util.clip(instructions, limit)
+        sources.append({
+            "section": "domain",
+            "ref": f"domain:{domain['id']}:instructions",
+            "reason": "user-authored domain instructions",
+        })
+        return f"# Domain instructions ({domain['name']})\n{text}"
+
+    def _routing_hint(self, routing: dict[str, Any] | None) -> str:
+        """One bounded line naming up to two plausible non-General domains."""
+        if not isinstance(routing, dict):
+            return ""
+        if str(routing.get("domain_id") or "") != "general":
+            return ""
+        try:
+            minimum = float(self.config.get("domains.hint_min_score", 0.5))
+        except (TypeError, ValueError):
+            minimum = 0.5
+
+        evidence: list[dict[str, Any]] = []
+        hint = routing.get("hint")
+        if isinstance(hint, dict):
+            evidence.append(hint)
+        candidates = routing.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("domain_id") or "") == "general":
+                    continue
+                try:
+                    score = float(candidate.get("score") or 0.0)
+                except (TypeError, ValueError):
+                    score = 0.0
+                if score >= minimum:
+                    evidence.append(candidate)
+
+        possible: list[tuple[str, list[str]]] = []
+        seen: set[str] = set()
+        for candidate in evidence:
+            domain_id = str(candidate.get("domain_id") or "")
+            if not domain_id or domain_id == "general" or domain_id in seen:
+                continue
+            seen.add(domain_id)
+            breakdown = candidate.get("breakdown")
+            breakdown = breakdown if isinstance(breakdown, dict) else {}
+            matched = candidate.get("matched")
+            if not isinstance(matched, list) or not matched:
+                matched = breakdown.get("matched")
+            if not isinstance(matched, list):
+                matched = []
+            terms: list[str] = []
+            for term in matched:
+                cleaned = str(term).strip()
+                if cleaned and cleaned not in terms:
+                    terms.append(cleaned)
+            name = " ".join(
+                str(candidate.get("name") or domain_id).split()
+            )
+            possible.append((name, terms[:8]))
+            if len(possible) >= 2:
+                break
+        if not possible:
+            return ""
+        rendered = ", ".join(
+            f"{name} (matched: {', '.join(terms)})"
+            if terms else f"{name} (matched: none)"
+            for name, terms in possible
+        )
+        line = (
+            f"Possible domain(s): {rendered}. Call use_domain if the work "
+            "belongs there."
+        )
+        return util.clip(line, 700)
+
+    def _tool_discovery_block(
+        self,
+        tool_selection: dict[str, Any] | None,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Name domain-bound tools without disclosing their schemas."""
+        if not isinstance(tool_selection, dict) or self.modules is None:
+            return "", []
+        exclusions = tool_selection.get("exclusions")
+        if not isinstance(exclusions, list):
+            return "", []
+        grouped: dict[str, dict[str, Any]] = {}
+        for exclusion in exclusions:
+            if not isinstance(exclusion, dict):
+                continue
+            if exclusion.get("reason") != "module_not_eligible":
+                continue
+            module_id = str(exclusion.get("module") or "")
+            tool_name = str(exclusion.get("tool") or "")
+            if not module_id or not tool_name:
+                continue
+            module = self.modules.get(module_id)
+            if module is None or module.status != "active":
+                continue
+            bucket = grouped.setdefault(
+                module_id, {"tools": [], "domains": []}
+            )
+            if tool_name not in bucket["tools"]:
+                bucket["tools"].append(tool_name)
+            for binding in self.modules.bindings(module_id):
+                if not binding.enabled:
+                    continue
+                domain = self.domains.get(str(binding.domain_id or ""))
+                if domain is None or domain.get("status") != "active":
+                    continue
+                name = " ".join(
+                    str(domain.get("name") or domain.get("id") or "").split()
+                )
+                if name and name not in bucket["domains"]:
+                    bucket["domains"].append(name)
+        if not grouped:
+            return "", []
+
+        items: list[str] = []
+        tool_count = 0
+        for module_id, bucket in sorted(grouped.items()):
+            if not bucket["domains"] or tool_count >= 6:
+                continue
+            domains = ", ".join(
+                util.clip(str(name), 60) for name in bucket["domains"]
+            )
+            for tool_name in bucket["tools"][:6 - tool_count]:
+                items.append(f"{tool_name} ({domains})")
+                tool_count += 1
+            if tool_count >= 6:
+                break
+        if not items:
+            return "", []
+
+        prefix = "Tools in other domains: "
+        suffix = ". use_domain to enter."
+        body_limit = max(1, 400 - len(prefix) - len(suffix))
+        body = util.clip(", ".join(items), body_limit)
+        text = f"{prefix}{body}{suffix}"
+        sources = [{
+            "section": "tools", "ref": "domain:tool-discovery",
+            "reason": "tools excluded for domain reasons",
+        }]
+        return text, sources
+
     def _delegation_block(
         self, task: dict[str, Any], sources: list[dict[str, Any]]
     ) -> str:
@@ -339,14 +540,83 @@ class ContextBuilder:
         })
         return "\n".join(lines)
 
+    def _core_profile_block(
+        self,
+        rows: list[dict[str, Any]],
+        sources: list[dict[str, Any]],
+        run_id: str | None = None,
+    ) -> tuple[str, set[str]]:
+        """Build the always-on profile from pinned global memories.
+
+        The block is clipped to its own character budget and uses a
+        non-dropping section priority in :meth:`build`. Only rows actually
+        shown are deduplicated from the lexical memory block.
+        """
+        try:
+            budget = int(self.config.get("memory.core_profile_chars", 1200))
+        except (TypeError, ValueError):
+            budget = 1200
+        heading = "# Core profile"
+        budget = max(0, budget)
+        if budget < len(heading):
+            return "", set()
+
+        lines = [heading]
+        used = len(heading)
+        included: list[str] = []
+        for item in rows:
+            prefix = f"- [{item.get('kind') or 'fact'}] "
+            separator = 1 if len(lines) > 1 else 0
+            available = budget - used - separator - len(prefix)
+            if available <= 0:
+                break
+            raw = str(item.get("content") or "").strip()
+            if not raw:
+                continue
+            max_content = min(300, available)
+            if len(raw) > max_content:
+                content = (
+                    util.clip(raw, max_content)
+                    if max_content >= 16 else raw[:max_content]
+                )
+                # util.clip marks very small cuts; keep the hard bound even
+                # if a future marker grows beyond the requested allowance.
+                content = content[:max_content]
+            else:
+                content = raw
+            bullet = f"{prefix}{content}"
+            if used + separator + len(bullet) > budget:
+                break
+            lines.append(bullet)
+            used += separator + len(bullet)
+            included.append(str(item.get("id") or ""))
+            sources.append({
+                "section": "core_profile",
+                "ref": f"memory:{item.get('id')}",
+                "reason": "pinned global core profile",
+            })
+
+        if run_id and included:
+            self.memory.record_access(included, run_id=run_id)
+        return "\n".join(lines), set(included)
+
     def _memories_block(
         self, objective: str, task: dict[str, Any],
         sources: list[dict[str, Any]], run_id: str | None = None,
+        excluded_ids: set[str] | None = None,
     ) -> str:
-        priority = ["global"]
-        if task.get("domain_id"):
-            priority.insert(0, f"domain:{task['domain_id']}")
-        results = self.memory.search(objective, scope_priority=priority)
+        priority: list[str] = []
+        domain_id = str(task.get("domain_id") or "")
+        if domain_id and domain_id != "general":
+            priority.append(f"domain:{domain_id}")
+        priority.append("global")
+        mode = str(self.config.get("memory.cross_domain", "off") or "off")
+        cross_domain = mode == "boost"
+        results = self.memory.search(
+            objective, scope_priority=priority, cross_domain=cross_domain
+        )
+        excluded_ids = excluded_ids or set()
+        results = [item for item in results if item["id"] not in excluded_ids]
         if not results:
             sources.append({"section": "memories", "ref": None,
                             "reason": "no relevant memories found"})
@@ -359,15 +629,36 @@ class ContextBuilder:
             )
         lines = ["# Relevant memory"]
         for item in results:
-            lines.append(
-                f"- [{item['kind']}] ({item['scope']}, {item['updated_at'][:10]}): "
-                f"{util.clip(item['content'], 400)}"
-                + (f" [note: {item['artifact_path']}]" if item.get("artifact_path") else "")
+            scope = str(item.get("effective_scope") or item.get("scope") or "")
+            content = util.clip(item["content"], 400)
+            artifact = (
+                f" [note: {item['artifact_path']}]"
+                if item.get("artifact_path") else ""
             )
-            sources.append({
-                "section": "memories", "ref": f"memory:{item['id']}",
-                "reason": item["reason"],
-            })
+            if item.get("cross_domain"):
+                origin_domain_id = str(item.get("origin_domain_id") or "")
+                domain = self.domains.get(origin_domain_id)
+                domain_name = str(
+                    (domain or {}).get("name") or origin_domain_id
+                )
+                lines.append(
+                    f"- [{item['kind']}] ({scope}, {item['updated_at'][:10]}) "
+                    f"from: {domain_name}: {content}{artifact}"
+                )
+                sources.append({
+                    "section": "memories",
+                    "ref": f"memory:cross:{origin_domain_id}",
+                    "reason": "cross-domain memory, lexical match",
+                })
+            else:
+                lines.append(
+                    f"- [{item['kind']}] ({scope}, {item['updated_at'][:10]}): "
+                    f"{content}{artifact}"
+                )
+                sources.append({
+                    "section": "memories", "ref": f"memory:{item['id']}",
+                    "reason": item["reason"],
+                })
         return "\n".join(lines)
 
     def _history_block(

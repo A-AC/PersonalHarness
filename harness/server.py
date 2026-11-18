@@ -50,6 +50,18 @@ def _err(message: str, status: int = 400) -> Response:
     return JSONResponse({"error": message}, status_code=status)
 
 
+def _domain_terms(value: Any, field: str) -> list[str] | None:
+    """Normalize a domain keyword/example field from a list or string."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    raise ValueError(f"domain {field} must be a list of strings or a string")
+
+
 class Server:
     def __init__(self, app: App):
         self.app = app
@@ -374,6 +386,8 @@ class Server:
                 " WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
                 (task["id"],),
             )
+            task_meta = util.loads(task.get("meta") or "{}", {})
+            routing = task_meta.get("routing") if isinstance(task_meta, dict) else None
             working = {
                 "id": task["id"],
                 "objective": task.get("objective"),
@@ -386,6 +400,7 @@ class Server:
                 "decision": run["decision"] if run else None,
                 "iterations": int(run["iterations"]) if run else 0,
                 "tool_calls": int(run["tool_calls"]) if run else 0,
+                "routing": routing if isinstance(routing, dict) else None,
             }
         return {
             "counts": {
@@ -568,6 +583,20 @@ class Server:
             " started_at",
             (task_id,),
         )
+        task_meta = util.loads(task.get("meta") or "{}", {})
+        routing = task_meta.get("routing") if isinstance(task_meta, dict) else None
+        entered_row = self.app.db.query_one(
+            "SELECT ts, data FROM event_log WHERE type='domain.entered'"
+            " AND task_id=? ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        )
+        domain_entered = None
+        if entered_row is not None:
+            entered_data = util.loads(entered_row["data"] or "{}", {})
+            domain_entered = {
+                "data": entered_data if isinstance(entered_data, dict) else {},
+                "ts": entered_row["ts"],
+            }
         children = []
         for child in self.app.tasks.children(task_id):
             meta = util.loads(child.get("meta") or "{}", {})
@@ -582,6 +611,8 @@ class Server:
             "children": children,
             "domain": self.app.domains.get(task.get("domain_id"))
             if task.get("domain_id") else None,
+            "routing": routing if isinstance(routing, dict) else None,
+            "domain_entered": domain_entered,
             "runs": runs_payload,
             "toolset": latest_toolset,
             "executions": [dict(r) for r in executions],
@@ -618,11 +649,31 @@ class Server:
             return _json({"task": self.app.tasks.get(task_id),
                           "status": result.status, "message": result.message})
         if action == "domain":
-            domain_id = str(body.get("domain_id", "")).strip()
-            if self.app.domains.get(domain_id) is None:
+            domain_id = body.get("domain_id")
+            if not isinstance(domain_id, str) or not domain_id.strip():
+                return _err("domain_id is required", 400)
+            domain_id = domain_id.strip()
+            reason = body.get("reason", "")
+            if not isinstance(reason, str):
+                return _err("reason must be a string", 400)
+            if len(reason) > 1000:
+                return _err("reason is too long", 400)
+            domain = self.app.domains.get(domain_id)
+            if domain is None:
                 return _err("no such domain", 404)
-            updated = self.app.tasks.set_domain(task_id, domain_id)
-            return _json({"task": updated})
+            if domain.get("status") != "active":
+                return _err("domain is archived", 400)
+            try:
+                corrected = await run_in_threadpool(
+                    self.app.runtime.correct_task_domain,
+                    task_id, domain_id,
+                    reason=reason, source="web",
+                )
+            except KeyError:
+                return _err("no such task or domain", 404)
+            except ValueError as exc:
+                return _err(str(exc), 400)
+            return _json(corrected)
         if action == "resume":
             try:
                 result = await run_in_threadpool(
@@ -909,22 +960,33 @@ class Server:
             return _err("unauthorized", 401)
         scope = request.query_params.get("scope")
         status = request.query_params.get("status", "active")
+        pinned_raw = request.query_params.get("pinned")
+        pinned: bool | None = None
+        if pinned_raw not in (None, ""):
+            lowered = pinned_raw.strip().lower()
+            if lowered in ("1", "true", "yes"):
+                pinned = True
+            elif lowered in ("0", "false", "no"):
+                pinned = False
+            else:
+                return _err("pinned must be 1, 0, true, or false", 400)
         try:
             limit = int(request.query_params.get("limit", 200))
         except ValueError:
             return _err("limit must be an integer")
         limit = max(1, min(limit, 1000))
         payload = await run_in_threadpool(
-            self._memories_payload, scope, status, limit
+            self._memories_payload, scope, status, limit, pinned
         )
         return _json(payload)
 
     def _memories_payload(
-        self, scope: str | None, status: str, limit: int = 200
+        self, scope: str | None, status: str, limit: int = 200,
+        pinned: bool | None = None,
     ) -> dict[str, Any]:
         return {
             "memories": self.app.memory.list(
-                scope=scope, status=status, limit=limit
+                scope=scope, status=status, limit=limit, pinned=pinned
             ),
             "artifact_problems": self.app.memory.check_artifacts(),
             "counts": self._memory_counts(),
@@ -1054,23 +1116,239 @@ class Server:
     async def domains_list(self, request: Request) -> Response:
         if not self._authorized(request):
             return _err("unauthorized", 401)
-        return _json({"domains": self.app.domains.list_all()})
+        return _json(await run_in_threadpool(self._domains_payload))
+
+    def _domain_suggestions_payload(
+        self, status: str = "open", limit: int = 100
+    ) -> dict[str, Any]:
+        """Serialize suggestions with a bounded view of their task context."""
+        rows = self.app.domain_suggestions.list(status=status, limit=limit)
+        suggestions: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            task_ids = list(item.get("task_ids") or [])
+            context_ids = task_ids[:20]
+            tasks_by_id: dict[str, dict[str, Any]] = {}
+            if context_ids:
+                marks = ",".join("?" for _ in context_ids)
+                for task_row in self.app.db.query(
+                    f"SELECT id, objective FROM tasks WHERE id IN ({marks})",
+                    tuple(context_ids),
+                ):
+                    tasks_by_id[str(task_row["id"])] = {
+                        "id": str(task_row["id"]),
+                        "objective": util.clip(
+                            str(task_row["objective"] or ""), 300
+                        ),
+                    }
+            tasks = [
+                tasks_by_id[task_id] for task_id in context_ids
+                if task_id in tasks_by_id
+            ]
+            objectives = [task["objective"] for task in tasks]
+            item.update({
+                "tasks": tasks,
+                "objectives": objectives,
+                "task_objectives": objectives,
+            })
+            suggestions.append(item)
+        return {"suggestions": suggestions, "count": len(suggestions)}
+
+    async def domain_suggestions_list(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        status = request.query_params.get("status", "open")
+        if status not in ("open", "created", "dismissed", "all"):
+            return _err("unknown suggestion status", 400)
+        try:
+            limit = int(request.query_params.get("limit", 100))
+        except ValueError:
+            return _err("limit must be an integer", 400)
+        limit = max(1, min(limit, 1000))
+        try:
+            payload = await run_in_threadpool(
+                self._domain_suggestions_payload, status, limit
+            )
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        return _json(payload)
+
+    async def domain_suggestion_dismiss(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        suggestion_id = request.path_params["suggestion_id"]
+        try:
+            suggestion = await run_in_threadpool(
+                self.app.domain_suggestions.dismiss, suggestion_id
+            )
+        except ValueError as exc:
+            return _err(str(exc), 404)
+        payload = self._domain_suggestions_payload(status="all", limit=1000)
+        enriched = next(
+            (
+                item for item in payload["suggestions"]
+                if item.get("id") == suggestion.get("id")
+            ),
+            suggestion,
+        )
+        return _json({"suggestion": enriched})
+
+    def _domains_payload(self) -> dict[str, Any]:
+        """Environment cards for every domain, with bounded grouped counts."""
+        app = self.app
+        domains = app.domains.list_all()
+
+        memory_counts = {
+            str(row["scope"]): int(row["n"])
+            for row in app.db.query(
+                "SELECT scope, COUNT(*) AS n FROM memories"
+                " WHERE status='active' AND archived_at IS NULL"
+                " AND scope LIKE 'domain:%' GROUP BY scope"
+            )
+        }
+        skill_counts = {
+            str(row["domain_id"]): int(row["n"])
+            for row in app.db.query(
+                "SELECT b.domain_id, COUNT(*) AS n FROM module_bindings b"
+                " JOIN modules m ON m.id=b.module_id"
+                " WHERE b.enabled=1 AND m.kind='skill' AND m.status='active'"
+                " GROUP BY b.domain_id"
+            )
+        }
+        module_counts = {
+            str(row["domain_id"]): int(row["n"])
+            for row in app.db.query(
+                "SELECT b.domain_id, COUNT(*) AS n FROM module_bindings b"
+                " JOIN modules m ON m.id=b.module_id"
+                " WHERE b.enabled=1 AND m.kind='mcp' AND m.status='active'"
+                " GROUP BY b.domain_id"
+            )
+        }
+        task_stats = {
+            str(row["domain_id"]): (int(row["n"]), row["last_used"])
+            for row in app.db.query(
+                "SELECT domain_id, COUNT(*) AS n,"
+                " MAX(last_activity_at) AS last_used FROM tasks"
+                " WHERE domain_id IS NOT NULL GROUP BY domain_id"
+            )
+        }
+        routed_counts = {
+            str(row["domain_id"]): int(row["n"])
+            for row in app.db.query(
+                "SELECT domain_id, COUNT(*) AS n FROM event_log"
+                " WHERE type='domain.routed' AND domain_id IS NOT NULL"
+                " GROUP BY domain_id"
+            )
+        }
+        corrected_away = {
+            str(row["routed_domain"]): int(row["n"])
+            for row in app.db.query(
+                "SELECT routed_domain, COUNT(*) AS n FROM routing_feedback"
+                " WHERE routed_domain IS NOT NULL GROUP BY routed_domain"
+            )
+        }
+        corrected_in = {
+            str(row["correct_domain"]): int(row["n"])
+            for row in app.db.query(
+                "SELECT correct_domain, COUNT(*) AS n FROM routing_feedback"
+                " WHERE correct_domain IS NOT NULL GROUP BY correct_domain"
+            )
+        }
+
+        cards: list[dict[str, Any]] = []
+        for domain in domains:
+            domain_id = str(domain["id"])
+            task_count, last_used = task_stats.get(domain_id, (0, None))
+            cards.append({
+                **domain,
+                "counts": {
+                    "memories": memory_counts.get(
+                        f"domain:{domain_id}", 0
+                    ),
+                    "skills": skill_counts.get(domain_id, 0),
+                    "modules": module_counts.get(domain_id, 0),
+                    "tasks": task_count,
+                    "last_used": last_used,
+                },
+                "routing_stats": {
+                    "routed_here": routed_counts.get(domain_id, 0),
+                    "corrected_away": corrected_away.get(domain_id, 0),
+                    "corrected_in": corrected_in.get(domain_id, 0),
+                },
+            })
+        suggestions = self._domain_suggestions_payload(
+            status="open", limit=100
+        )["suggestions"]
+        return {"domains": cards, "suggestions": suggestions}
+
+    async def domains_feedback(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        limit: int | None = None
+        raw_limit = request.query_params.get("limit")
+        if raw_limit not in (None, ""):
+            try:
+                limit = int(raw_limit)
+            except ValueError:
+                return _err("limit must be an integer", 400)
+            limit = max(1, min(limit, 1000))
+        scenarios = await run_in_threadpool(
+            self.app.routing_feedback.export_scenarios, limit
+        )
+        return _json({"scenarios": scenarios, "count": len(scenarios)})
+
+    async def domains_route_preview(self, request: Request) -> Response:
+        if not self._authorized(request):
+            return _err("unauthorized", 401)
+        body = await self._body(request)
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return _err("text is required", 400)
+        text = text.strip()
+        if len(text) > 4000:
+            return _err("text is too long", 400)
+        routing = await run_in_threadpool(
+            self.app.runtime.preview_route, text
+        )
+        return _json({"routing": routing})
 
     async def domains_create(self, request: Request) -> Response:
         if not self._authorized(request):
             return _err("unauthorized", 401)
         body = await self._body(request)
+        suggestion_id = body.get("suggestion_id")
+        if suggestion_id is not None and (
+            not isinstance(suggestion_id, str) or not suggestion_id.strip()
+        ):
+            return _err("suggestion_id must be a non-empty string", 400)
+        suggestion_id = suggestion_id.strip() if suggestion_id else None
         name = str(body.get("name", "")).strip()
         if not name:
             return _err("name required")
         if self.app.domains.by_name(name):
             return _err("a domain with that name exists", 409)
-        domain_id = util.new_id("dom")
-        domain = self.app.domains.create(
-            domain_id, name=name,
-            description=str(body.get("description", "")),
-            created_by="web", seed_note=body.get("note") or None,
-        )
+        try:
+            keywords = _domain_terms(body.get("keywords"), "keywords")
+            examples = _domain_terms(body.get("examples"), "examples")
+            instructions = body.get("instructions", "")
+            if not isinstance(instructions, str):
+                raise ValueError("domain instructions must be a string")
+            domain_id = util.new_id("dom")
+            domain = self.app.domains.create(
+                domain_id, name=name,
+                description=str(body.get("description", "")),
+                created_by="web", seed_note=body.get("note") or None,
+                keywords=keywords or [],
+                examples=examples or [],
+                instructions=instructions,
+            )
+        except ValueError as exc:
+            return _err(str(exc), 400)
+        if suggestion_id:
+            # A stale/unknown suggestion id must not prevent the explicit
+            # domain creation. Known suggestions are closed as ``created``.
+            if self.app.domain_suggestions.get(suggestion_id) is not None:
+                self.app.domain_suggestions.mark_created(suggestion_id)
         return _json({"domain": domain})
 
     async def domain_update(self, request: Request) -> Response:
@@ -1089,6 +1367,11 @@ class Server:
             if existing and existing["id"] != domain_id:
                 return _err("a domain with that name exists", 409)
         try:
+            keywords = _domain_terms(body.get("keywords"), "keywords")
+            examples = _domain_terms(body.get("examples"), "examples")
+            instructions = body.get("instructions")
+            if instructions is not None and not isinstance(instructions, str):
+                raise ValueError("domain instructions must be a string")
             domain = self.app.domains.update(
                 domain_id,
                 name=name,
@@ -1097,6 +1380,9 @@ class Server:
                     if "description" in body else None
                 ),
                 status=body.get("status"),
+                keywords=keywords,
+                examples=examples,
+                instructions=instructions,
             )
         except (KeyError, ValueError) as exc:
             return _err(str(exc), 400)
@@ -1734,8 +2020,16 @@ class Server:
                   methods=["DELETE"]),
             Route("/api/memories/{memory_id}/{action}", self.memory_action,
                   methods=["POST"]),
+            Route("/api/domain-suggestions", self.domain_suggestions_list,
+                  methods=["GET"]),
+            Route("/api/domain-suggestions/{suggestion_id}/dismiss",
+                  self.domain_suggestion_dismiss, methods=["POST"]),
             Route("/api/domains", self.domains_list, methods=["GET"]),
             Route("/api/domains", self.domains_create, methods=["POST"]),
+            Route("/api/domains/feedback", self.domains_feedback,
+                  methods=["GET"]),
+            Route("/api/domains/route-preview", self.domains_route_preview,
+                  methods=["POST"]),
             Route("/api/domains/{domain_id}", self.domain_update,
                   methods=["PATCH"]),
             Route("/api/heartbeat", self.heartbeat, methods=["POST"]),

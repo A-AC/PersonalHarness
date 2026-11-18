@@ -32,6 +32,8 @@ suite partitions them:
 | `h_agent_loops.yaml` | deterministic | Sequential multi-tool loops, recovery, approval boundaries, budgets, deferred batches |
 | `i_live_behavior.yaml` | live | Multi-turn continuity, correction, skill following, delegation, hostile inbox, scheduling, live tool chaining |
 | `j_live_holdout.yaml` | live | Held-out judgment and instruction following: unknown facts, contradictions, exact tool arguments, grounding, secret refusal, strict format |
+| `k_routing.yaml` | deterministic | 50 labelled routing cases across placeholder domains and learned-evidence fixtures; the `routing` assertion reads the latest `domain.routed` event |
+| `k_memory_recall.yaml` | deterministic | Cross-domain memory recall and core-profile/global-scope behaviour, including paraphrases and sibling-domain leak checks |
 
 The `j_` suite is a holdout. It was written after the behavior prompts were
 tuned and is intentionally not used to tune them further. Use it to check
@@ -165,7 +167,9 @@ scenarios:
 ```
 
 Fixtures support `domains`, `memories`, `tasks`, `skills`, `schedules`,
-`automations`, and `mcp_servers`.
+`automations`, and `mcp_servers`. Domain fixtures may set `keywords`,
+`examples`, and user-authored `instructions` in addition to name and
+description; they are the same routing evidence the production API accepts.
 
 ## Step kinds
 
@@ -251,6 +255,7 @@ Every assertion reads persisted state. An unobservable expectation fails with
 | `task` | `status`, `domain`, `role`, `parent`, `reason_contains` |
 | `tasks` | `count`, `exists: [{origin, status, tainted}]`, `none` |
 | `domains` | `exists`, `none`, `count` |
+| `routing` | `domain` (id or name), `candidates_include`, `reason_contains`, `score_min` |
 | `run` | `status`, `iterations_min`, `iterations_max`, `tool_calls_min`, `tool_calls_max`, `context_not_empty` |
 | `memories` | `exists`, `none`, `count_min`, `superseded_contains`, `revision_min` |
 | `tools` | `calls`, `none`, `succeeded`, `forbidden`, `count_min`, `count_max`, `result_contains`, `error_contains`, `sequence`, `sequence_contiguous`, `deferred_min`, `deferred_max` |
@@ -264,7 +269,16 @@ Every assertion reads persisted state. An unobservable expectation fails with
 | `misc` | `no_error`, `detail_contains`, `no_hidden_chat` |
 
 Assertions inherit the scenario `severity` (default `medium`); critical
-failures are counted separately in every report.
+failures are counted separately in every report. Scenarios with
+`measurement: true` are benchmark cases: failures are reported and counted but
+do not make `harness eval` exit non-zero.
+
+Phase 10 routing experiments use two helper scripts that write deterministic
+reports: `python scripts/route_sweep.py --tag phase10b_routing` sweeps the
+threshold/margin grid over `k_routing.yaml`, and
+`python scripts/memory_recall_report.py --tag phase10d_memory` compares the
+`off`, `search`, and `boost` memory modes over `k_memory_recall.yaml`. The
+committed reference runs live under `eval/results/`.
 
 `tools.calls` entries accept `result_contains` and `error_contains`, so a loop
 can prove that a later call consumed the previous call's output. `tools.sequence`

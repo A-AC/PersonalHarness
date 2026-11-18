@@ -316,6 +316,7 @@ class Evaluator:
             mode=self.mode,
             repeat=repeat,
             run_id=run_id,
+            measurement=scenario.measurement,
         )
         if not scenario.supports(self.mode):
             result.status = "skipped"

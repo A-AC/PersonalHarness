@@ -573,7 +573,7 @@ UPDATE schema_meta SET value='7' WHERE key='schema_version';
         version = reopened.query_one(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         )["value"]
-        assert int(version) == SCHEMA_VERSION == 8
+        assert int(version) == SCHEMA_VERSION == 9
         row = reopened.query_one(
             "SELECT * FROM approvals WHERE id='apr_old'"
         )

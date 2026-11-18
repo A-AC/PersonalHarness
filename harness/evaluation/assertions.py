@@ -756,6 +756,83 @@ def _check_context(obs: Observation, value: Any, add) -> None:
             "the system prompt contained forbidden text")
 
 
+def _check_routing(obs: Observation, value: Any, add) -> None:
+    """Assert the latest ``domain.routed`` decision.
+
+    The routing event is the evidence: an assertion never passes when the
+    event is absent. ``domain`` matches either the chosen id or its record
+    name, so ``General`` matches the built-in ``general`` domain.
+    """
+    if isinstance(value, str):
+        value = {"domain": value}
+    if not isinstance(value, dict):
+        add("routing", "domain", False, "a routing expectation", value,
+            "routing expectation must be a mapping or a domain name")
+        return
+
+    events = [
+        event for event in _events(obs.app)
+        if event.get("type") == "domain.routed"
+    ]
+    if not events:
+        add("routing", "domain", False, value.get("domain"), None,
+            "no domain.routed event was recorded")
+        return
+
+    event = events[-1]
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    chosen_id = str(event.get("domain_id") or "")
+    record = obs.app.domains.get(chosen_id) if chosen_id else None
+    chosen_name = str(record["name"]) if record else None
+    observed = {"id": chosen_id or None, "name": chosen_name}
+
+    if "domain" in value:
+        expected = value["domain"]
+        ok = bool(chosen_id) and (
+            chosen_id.lower() == str(expected).lower()
+            or (chosen_name or "").lower() == str(expected).lower()
+        )
+        add("routing", "domain", ok, expected, observed,
+            f"routed domain was {chosen_name or chosen_id or None!r},"
+            f" expected {expected!r}")
+    if "candidates_include" in value:
+        wanted = value["candidates_include"]
+        if isinstance(wanted, str):
+            wanted = [wanted]
+        candidates = data.get("candidates") or []
+        names = [
+            str(item.get("name")) for item in candidates
+            if isinstance(item, dict)
+        ]
+        lowered = [name.lower() for name in names]
+        missing = [
+            name for name in wanted if str(name).lower() not in lowered
+        ]
+        add("routing", "candidates_include", not missing, list(wanted), names,
+            f"candidate domains were missing: {missing}")
+    if "reason_contains" in value:
+        reason = str(data.get("reason") or "")
+        needle = str(value["reason_contains"])
+        ok = needle.lower() in reason.lower()
+        add("routing", "reason", ok, needle, reason,
+            f"routing reason did not contain {needle!r}")
+    if "score_min" in value:
+        minimum = float(value["score_min"])
+        score = 0.0
+        for candidate in data.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            same_id = str(candidate.get("domain_id") or "") == chosen_id
+            same_name = chosen_name is not None and str(
+                candidate.get("name") or ""
+            ).lower() == chosen_name.lower()
+            if same_id or same_name:
+                score = float(candidate.get("score") or 0.0)
+                break
+        add("routing", "score_min", score >= minimum, minimum, score,
+            f"chosen domain score {score!r} was below {minimum!r}")
+
+
 def _check_schedules(obs: Observation, value: Any, add) -> None:
     schedules = _schedules(obs.app)
     if "count" in value:
@@ -996,6 +1073,7 @@ _CHECKS = {
     "approvals": _check_approvals,
     "events": _check_events,
     "context": _check_context,
+    "routing": _check_routing,
     "schedules": _check_schedules,
     "inbox": _check_inbox,
     "modules": _check_modules,

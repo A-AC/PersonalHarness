@@ -14,6 +14,12 @@ from __future__ import annotations
 from typing import Any
 
 from . import util
+from .config import (
+    ROUTING_HINT_MIN_FALLBACK,
+    ROUTING_MARGIN_FALLBACK,
+    ROUTING_STEMMING_FALLBACK,
+    ROUTING_THRESHOLD_FALLBACK,
+)
 from .db import Database, rows_to_dicts
 
 
@@ -195,6 +201,72 @@ class Events:
 
 GENERAL_DOMAIN = "general"
 
+DOMAIN_MAX_KEYWORDS = 24
+DOMAIN_KEYWORD_MAX_CHARS = 48
+DOMAIN_MAX_EXAMPLES = 24
+DOMAIN_EXAMPLE_MAX_CHARS = 160
+DEFAULT_INSTRUCTIONS_MAX_CHARS = 1200
+
+
+def _to_public(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Decode the additive v9 JSON columns on a domain row.
+
+    Existing callers see every field they saw before plus ``keywords`` and
+    ``examples`` as lists and ``instructions`` as a string; a missing or
+    malformed value degrades to an empty list/string rather than raising.
+    """
+    if row is None:
+        return None
+    out = dict(row)
+    for field in ("keywords", "examples"):
+        values = util.loads(out.get(field) or "[]", [])
+        out[field] = [str(item) for item in values] if isinstance(values, list) else []
+    out["instructions"] = out.get("instructions") or ""
+    return out
+
+
+def _clean_terms(
+    values: Any, *, field: str, limit: int, max_chars: int
+) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str) or not isinstance(values, (list, tuple)):
+        raise ValueError(f"domain {field} must be a list of strings")
+    items = list(values)
+    if len(items) > limit:
+        raise ValueError(f"domain supports at most {limit} {field}")
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"domain {field} entries must be non-empty strings"
+            )
+        item = item.strip()
+        if len(item) > max_chars:
+            raise ValueError(
+                f"domain {field} entries must be at most {max_chars} characters"
+            )
+        out.append(item)
+    return out
+
+
+def _clean_instructions(value: Any, config=None) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("domain instructions must be a string")
+    if "\x00" in value:
+        raise ValueError("domain instructions must not contain NUL bytes")
+    limit = DEFAULT_INSTRUCTIONS_MAX_CHARS
+    if config is not None:
+        try:
+            limit = int(
+                config.get("domains.instructions_max_chars", limit)
+            )
+        except (TypeError, ValueError):
+            limit = DEFAULT_INSTRUCTIONS_MAX_CHARS
+    return util.clip(value, limit)
+
 
 class Domains:
     """Domain records and deterministic routing.
@@ -226,15 +298,30 @@ class Domains:
         description: str = "",
         created_by: str = "user",
         seed_note: str | None = None,
+        keywords: list[str] | None = None,
+        examples: list[str] | None = None,
+        instructions: str | None = None,
     ) -> dict[str, Any]:
+        keyword_list = _clean_terms(
+            keywords, field="keywords", limit=DOMAIN_MAX_KEYWORDS,
+            max_chars=DOMAIN_KEYWORD_MAX_CHARS,
+        )
+        example_list = _clean_terms(
+            examples, field="examples", limit=DOMAIN_MAX_EXAMPLES,
+            max_chars=DOMAIN_EXAMPLE_MAX_CHARS,
+        )
+        instruction_text = _clean_instructions(instructions, self.config)
         ts = util.iso()
         with self.db.transaction() as conn:
             conn.execute(
                 "INSERT INTO domains(id, name, description, status, created_at,"
-                " updated_at, meta) VALUES (?,?,?,?,?,?,?)",
+                " updated_at, meta, keywords, examples, instructions)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     domain_id, name, description, "active", ts, ts,
                     util.dumps({"created_by": created_by}),
+                    util.dumps(keyword_list), util.dumps(example_list),
+                    instruction_text,
                 ),
             )
             if seed_note:
@@ -251,27 +338,35 @@ class Domains:
                 )
         self.events.record(
             "domain.created", domain_id=domain_id,
-            data={"name": name, "created_by": created_by},
+            data={
+                "name": name,
+                "created_by": created_by,
+                "keywords": len(keyword_list),
+                "examples": len(example_list),
+                "has_instructions": bool(instruction_text),
+            },
         )
         return self.get(domain_id)  # type: ignore[return-value]
 
     def get(self, domain_id: str) -> dict[str, Any] | None:
         row = self.db.query_one("SELECT * FROM domains WHERE id=?", (domain_id,))
-        return rows_to_dicts([row])[0] if row else None
+        return _to_public(rows_to_dicts([row])[0]) if row else None
 
     def by_name(self, name: str) -> dict[str, Any] | None:
         row = self.db.query_one(
             "SELECT * FROM domains WHERE lower(name)=lower(?)", (name.strip(),)
         )
-        return rows_to_dicts([row])[0] if row else None
+        return _to_public(rows_to_dicts([row])[0]) if row else None
 
     def list_active(self) -> list[dict[str, Any]]:
-        return rows_to_dicts(
+        rows = rows_to_dicts(
             self.db.query("SELECT * FROM domains WHERE status='active' ORDER BY name")
         )
+        return [item for item in map(_to_public, rows) if item is not None]
 
     def list_all(self) -> list[dict[str, Any]]:
-        return rows_to_dicts(self.db.query("SELECT * FROM domains ORDER BY name"))
+        rows = rows_to_dicts(self.db.query("SELECT * FROM domains ORDER BY name"))
+        return [item for item in map(_to_public, rows) if item is not None]
 
     # -- routing ----------------------------------------------------------
 
@@ -281,79 +376,362 @@ class Domains:
         *,
         open_tasks: list[dict[str, Any]] | None = None,
         recent_messages: list[dict[str, Any]] | None = None,
+        learned: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
         """Pick the domain for a new message. Deterministic and recorded.
 
-        Scores each active domain by evidence: keyword overlap of the message
-        with the domain name/description, open task objectives in the domain,
-        and recent message mentions. Routing to the right existing domain is
-        preferred; anything below the threshold lands in ``general`` — a new
-        topic never creates a domain by itself.
-        """
-        words = set(util.keywords(text))
-        if not words:
-            return {"domain_id": GENERAL_DOMAIN, "score": 0.0,
-                    "candidates": [], "reason": "empty message"}
+        Evidence v2 scores the domain name, user keywords, example phrases,
+        description, and learned vocabulary. Learned vocabulary combines the
+        caller's memory/skill affinity with open- and past-task evidence.
+        Every matched term is retained in the per-candidate breakdown so a
+        routing decision can be explained without a model call.
 
-        scored: list[dict[str, Any]] = []
+        Routing never creates a domain. A clear non-General winner above the
+        threshold wins; weak or ambiguous evidence falls back to ``general``.
+        """
+        words = self._routing_terms(text)
+        surface_forms = self._surface_forms(text)
+        if not words:
+            return {
+                "domain_id": GENERAL_DOMAIN,
+                "score": 0.0,
+                "reason": "empty message",
+                "candidates": [],
+                "breakdown": self._empty_breakdown(),
+                "signals": {},
+                "matched": [],
+                "hint": None,
+            }
+
+        learned_terms = self._merge_learned_terms(
+            text,
+            learned=learned,
+            open_tasks=open_tasks,
+            recent_messages=recent_messages,
+        )
+        weights = self._routing_weights()
+        candidates: list[dict[str, Any]] = []
         for domain in self.list_active():
-            score = 0.0
-            name_words = set(util.keywords(domain["name"]))
-            desc_words = set(util.keywords(domain["description"]))
-            score += 1.5 * len(words & name_words)
-            score += 0.5 * len(words & desc_words)
-            task_hits = 0
-            for task in open_tasks or []:
-                if task.get("domain_id") != domain["id"]:
-                    continue
-                overlap = len(words & set(util.keywords(task["objective"])))
-                if overlap >= 1:
-                    task_hits += 1
-            score += 0.75 * task_hits
-            recent_hits = 0
-            for message in recent_messages or []:
-                if message.get("domain_id") == domain["id"]:
-                    overlap = len(
-                        words & set(util.keywords(message["content"]))
-                    )
-                    if overlap >= 1:
-                        recent_hits += 1
-            score += 0.25 * min(recent_hits, 4)
-            if domain["id"] == GENERAL_DOMAIN:
-                score *= 0.5  # general is the fallback, not a magnet
-            if score > 0:
-                scored.append({
-                    "domain_id": domain["id"],
-                    "name": domain["name"],
-                    "score": round(score, 2),
-                })
-        scored.sort(key=lambda item: item["score"], reverse=True)
+            candidate = self._score_domain(
+                domain,
+                words,
+                learned_terms.get(domain["id"], set()),
+                weights,
+                surface_forms,
+            )
+            if candidate["score"] > 0:
+                candidates.append(candidate)
+
+        candidates.sort(
+            key=lambda item: (-float(item["score"]), str(item["domain_id"]))
+        )
+        specific = [
+            item for item in candidates if item["domain_id"] != GENERAL_DOMAIN
+        ]
+        best = specific[0] if specific else None
+        runner_up = specific[1] if len(specific) > 1 else None
         threshold = float(self._threshold())
         margin = float(self._margin())
-        if not scored or scored[0]["score"] < threshold:
-            chosen, reason = GENERAL_DOMAIN, "no domain evidence above threshold"
-        elif len(scored) > 1 and scored[0]["score"] - scored[1]["score"] < margin:
-            chosen = GENERAL_DOMAIN
-            reason = "ambiguous domain evidence; fell back to general"
-        else:
-            chosen = scored[0]["domain_id"]
-            reason = "best domain evidence"
+
+        chosen = GENERAL_DOMAIN
+        reason = "no domain evidence above threshold"
+        if best is not None and float(best["score"]) >= threshold:
+            if runner_up is not None and (
+                float(best["score"]) - float(runner_up["score"]) < margin
+            ):
+                reason = "ambiguous domain evidence; fell back to general"
+            else:
+                chosen = str(best["domain_id"])
+                reason = "best domain evidence"
+
+        winner = next(
+            (
+                item for item in candidates
+                if item["domain_id"] == chosen
+            ),
+            None,
+        )
+        winner_breakdown = (
+            winner["breakdown"] if winner is not None
+            else self._empty_breakdown()
+        )
+        matched = list(winner_breakdown.get("matched") or [])
+
+        hint = None
+        if chosen == GENERAL_DOMAIN and best is not None:
+            hint_min = float(self._hint_min_score())
+            if float(best["score"]) >= hint_min:
+                hint = {
+                    "domain_id": best["domain_id"],
+                    "name": best["name"],
+                    "score": best["score"],
+                    "matched": list(
+                        best["breakdown"].get("matched") or []
+                    ),
+                }
+
         return {
             "domain_id": chosen,
-            "score": scored[0]["score"] if scored else 0.0,
-            "candidates": scored[:3],
+            "score": float(winner["score"]) if winner is not None else 0.0,
             "reason": reason,
+            "candidates": candidates[:3],
+            "breakdown": winner_breakdown,
+            "signals": winner_breakdown.get("signals") or {},
+            "matched": matched,
+            "hint": hint,
+        }
+
+    def task_affinity(
+        self, text: str, limit: int = 200
+    ) -> dict[str, list[str]]:
+        """Return learned task terms grouped by domain.
+
+        Recent non-subagent task objectives are inspected in deterministic
+        activity order. Only terms shared with the message are returned, at
+        most three per domain; General is excluded because it is global.
+        """
+        words = self._routing_terms(text)
+        if not words or limit <= 0:
+            return {}
+        rows = self.db.query(
+            "SELECT id, domain_id, objective FROM tasks "
+            "WHERE COALESCE(role, 'user') != 'subagent' "
+            "AND domain_id IS NOT NULL AND domain_id != ? "
+            "ORDER BY last_activity_at DESC, id ASC LIMIT ?",
+            (GENERAL_DOMAIN, max(1, int(limit))),
+        )
+        affinity: dict[str, list[str]] = {}
+        for row in rows_to_dicts(rows):
+            domain_id = str(row.get("domain_id") or "")
+            if not domain_id or domain_id == GENERAL_DOMAIN:
+                continue
+            overlap = words & self._routing_terms(str(row.get("objective") or ""))
+            if not overlap:
+                continue
+            bucket = affinity.setdefault(domain_id, [])
+            for term in sorted(overlap):
+                if term not in bucket and len(bucket) < 3:
+                    bucket.append(term)
+        return {domain_id: affinity[domain_id] for domain_id in sorted(affinity)}
+
+    def _merge_learned_terms(
+        self,
+        text: str,
+        *,
+        learned: dict[str, list[str]] | None,
+        open_tasks: list[dict[str, Any]] | None,
+        recent_messages: list[dict[str, Any]] | None,
+    ) -> dict[str, set[str]]:
+        """Merge every learned-vocabulary source, de-duplicated per domain."""
+        merged: dict[str, set[str]] = {}
+
+        def add(domain_id: Any, terms: Any) -> None:
+            domain = str(domain_id or "")
+            if not domain or domain == GENERAL_DOMAIN:
+                return
+            bucket = merged.setdefault(domain, set())
+            bucket.update(self._routing_terms(" ".join(
+                str(term) for term in (terms or [])
+            )))
+
+        for domain_id, terms in (learned or {}).items():
+            add(domain_id, terms)
+
+        # Past task objectives are learned evidence even when the caller did
+        # not supply affinity explicitly.
+        for domain_id, terms in self.task_affinity(text).items():
+            add(domain_id, terms)
+
+        message_words = self._routing_terms(text)
+        for task in open_tasks or []:
+            domain_id = task.get("domain_id")
+            if not domain_id:
+                continue
+            overlap = message_words & self._routing_terms(
+                str(task.get("objective") or "")
+            )
+            add(domain_id, overlap)
+
+        # ``recent_messages`` remains a compatibility parameter, but its
+        # overlaps are intentionally not learned evidence: status chips and
+        # chat chatter must not make routing sticky. Past task objectives
+        # are covered by ``task_affinity`` above.
+        return merged
+
+    def _score_domain(
+        self,
+        domain: dict[str, Any],
+        words: set[str],
+        learned: set[str],
+        weights: dict[str, float],
+        surface_forms: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Score one domain and retain the evidence behind every term."""
+        name_terms = self._routing_terms(str(domain.get("name") or ""))
+        keyword_terms = self._routing_terms(
+            " ".join(str(item) for item in domain.get("keywords") or [])
+        )
+        example_terms = self._routing_terms(
+            " ".join(str(item) for item in domain.get("examples") or [])
+        )
+        description_terms = self._routing_terms(
+            str(domain.get("description") or "")
+        )
+
+        name_matches = sorted(words & name_terms)
+        keyword_matches = sorted(words & keyword_terms)
+        example_matches = sorted(words & example_terms)
+        # Description evidence is intentionally bounded: two terms is the
+        # maximum, so a long description cannot dominate explicit evidence.
+        description_matches = sorted(words & description_terms)[:2]
+        learned_matches = sorted(words & learned)
+
+        raw_signals = {
+            "name": (name_matches, weights["name"] * len(name_matches)),
+            "keyword": (
+                keyword_matches, weights["keyword"] * len(keyword_matches)
+            ),
+            "example": (
+                example_matches, weights["example"] * len(example_matches)
+            ),
+            "description": (
+                description_matches,
+                weights["description"] * len(description_matches),
+            ),
+        }
+        # Learned vocabulary is deliberately weaker than explicit evidence.
+        # A learned-only route needs at least two matching terms; one shared
+        # term must never be enough to select a domain by itself.
+        explicit_match_count = (
+            len(name_matches) + len(keyword_matches)
+            + len(example_matches) + len(description_matches)
+        )
+        learned_contribution = min(
+            weights["learned_cap"],
+            weights["learned_term"] * len(learned_matches),
+        )
+        if explicit_match_count == 0 and len(learned_matches) < 2:
+            learned_contribution = 0.0
+        raw_signals["learned"] = (learned_matches, learned_contribution)
+
+        factor = 0.5 if domain["id"] == GENERAL_DOMAIN else 1.0
+        signals: dict[str, dict[str, Any]] = {}
+        for signal, (terms, raw_contribution) in raw_signals.items():
+            contribution = raw_contribution * factor
+            signals[signal] = {
+                "terms": list(terms),
+                "contribution": round(contribution, 4),
+            }
+        surface_forms = surface_forms or {}
+        matched: list[str] = []
+        for signal in ("name", "keyword", "example", "description", "learned"):
+            for term in signals[signal]["terms"]:
+                surface = surface_forms.get(term, term)
+                if surface not in matched:
+                    matched.append(surface)
+        score = round(sum(float(item["contribution"]) for item in signals.values()), 4)
+        breakdown = {
+            "domain_id": domain["id"],
+            "name": domain["name"],
+            "score": score,
+            "factor": factor,
+            "signals": signals,
+            "matched": matched,
+        }
+        return {
+            "domain_id": domain["id"],
+            "name": domain["name"],
+            "score": score,
+            "breakdown": breakdown,
+            "signals": signals,
+            "matched": matched,
+        }
+
+    def _routing_terms(self, text: str) -> set[str]:
+        terms = (
+            util.stemmed_keywords(text)
+            if self._stemming_enabled() else util.keywords(text)
+        )
+        return set(terms)
+
+    def _stemming_enabled(self) -> bool:
+        if self.config is None:
+            return bool(ROUTING_STEMMING_FALLBACK)
+        return bool(self.config.get(
+            "domains.stemming", ROUTING_STEMMING_FALLBACK
+        ))
+
+    def _surface_forms(self, text: str) -> dict[str, str]:
+        """Map normalized message terms back to their original surfaces."""
+        forms: dict[str, str] = {}
+        stemming = self._stemming_enabled()
+        for surface in util.keywords(text):
+            normalized = util.stem(surface) if stemming else surface
+            forms.setdefault(normalized, surface)
+        return forms
+
+    def _routing_weights(self) -> dict[str, float]:
+        defaults = {
+            "name": 1.5,
+            "keyword": 1.0,
+            "example": 0.75,
+            "description": 0.5,
+            "learned_term": 0.5,
+            "learned_cap": 2.0,
+        }
+        if self.config is None:
+            return defaults
+        configured = self.config.get("domains.weights", {}) or {}
+        if not isinstance(configured, dict):
+            return defaults
+        out = dict(defaults)
+        for key, fallback in defaults.items():
+            try:
+                out[key] = float(configured.get(key, fallback))
+            except (TypeError, ValueError):
+                out[key] = fallback
+        return out
+
+    @staticmethod
+    def _empty_breakdown() -> dict[str, Any]:
+        empty_signal = {
+            "terms": [],
+            "contribution": 0.0,
+        }
+        return {
+            "domain_id": GENERAL_DOMAIN,
+            "name": "General",
+            "score": 0.0,
+            "factor": 0.5,
+            "signals": {
+                signal: dict(empty_signal)
+                for signal in (
+                    "name", "keyword", "example", "description", "learned",
+                )
+            },
+            "matched": [],
         }
 
     def _threshold(self) -> float:
         if self.config is None:
-            return 2.0
-        return float(self.config.get("domains.routing_threshold", 2.0))
+            return float(ROUTING_THRESHOLD_FALLBACK)
+        return float(self.config.get(
+            "domains.routing_threshold", ROUTING_THRESHOLD_FALLBACK
+        ))
 
     def _margin(self) -> float:
         if self.config is None:
-            return 0.75
-        return float(self.config.get("domains.ambiguity_margin", 0.75))
+            return float(ROUTING_MARGIN_FALLBACK)
+        return float(self.config.get(
+            "domains.ambiguity_margin", ROUTING_MARGIN_FALLBACK
+        ))
+
+    def _hint_min_score(self) -> float:
+        if self.config is None:
+            return float(ROUTING_HINT_MIN_FALLBACK)
+        return float(self.config.get(
+            "domains.hint_min_score", ROUTING_HINT_MIN_FALLBACK
+        ))
 
     def update(
         self,
@@ -362,8 +740,16 @@ class Domains:
         name: str | None = None,
         description: str | None = None,
         status: str | None = None,
+        keywords: list[str] | None = None,
+        examples: list[str] | None = None,
+        instructions: str | None = None,
     ) -> dict[str, Any]:
-        """Edit domain metadata. Never changes the id or routing rules."""
+        """Edit domain metadata. Never changes the id or routing rules.
+
+        ``None`` means "leave unchanged"; an empty list/string clears the
+        field. Routing evidence changes affect later deterministic routing
+        decisions; they never alter the domain id or create another domain.
+        """
         current = self.get(domain_id)
         if current is None:
             raise KeyError(f"no such domain: {domain_id}")
@@ -377,6 +763,24 @@ class Domains:
                 raise ValueError("domain status must be active or archived")
             if status != current["status"]:
                 fields["status"] = status
+        if keywords is not None:
+            keyword_list = _clean_terms(
+                keywords, field="keywords", limit=DOMAIN_MAX_KEYWORDS,
+                max_chars=DOMAIN_KEYWORD_MAX_CHARS,
+            )
+            if keyword_list != current.get("keywords", []):
+                fields["keywords"] = util.dumps(keyword_list)
+        if examples is not None:
+            example_list = _clean_terms(
+                examples, field="examples", limit=DOMAIN_MAX_EXAMPLES,
+                max_chars=DOMAIN_EXAMPLE_MAX_CHARS,
+            )
+            if example_list != current.get("examples", []):
+                fields["examples"] = util.dumps(example_list)
+        if instructions is not None:
+            instruction_text = _clean_instructions(instructions, self.config)
+            if instruction_text != current.get("instructions", ""):
+                fields["instructions"] = instruction_text
         if not fields:
             return current
         fields["updated_at"] = util.iso()
@@ -390,6 +794,217 @@ class Domains:
             data={"fields": sorted(k for k in fields if k != "updated_at")},
         )
         return self.get(domain_id)  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Routing feedback
+# ---------------------------------------------------------------------------
+
+ROUTING_FEEDBACK_SOURCES = frozenset({"ui", "tool", "cli"})
+ROUTING_FEEDBACK_MAX_MESSAGE_CHARS = 4000
+
+
+class RoutingFeedback:
+    """Durable labels for routing corrections and their eval export.
+
+    Feedback rows are deliberately small and immutable: they capture the
+    message, the route that was chosen, the user's corrected domain, and the
+    routing evidence available at correction time.  They do not alter routing
+    vocabulary; keyword suggestions are computed separately and never written
+    automatically.
+    """
+
+    def __init__(self, db: Database, events: Events):
+        self.db = db
+        self.events = events
+
+    def record(
+        self,
+        task_id: str | None,
+        message_text: str,
+        routed_domain: str,
+        correct_domain: str,
+        evidence: dict[str, Any] | None = None,
+        source: str = "ui",
+    ) -> dict[str, Any]:
+        """Record one labelled routing correction."""
+        if not isinstance(message_text, str) or not message_text.strip():
+            raise ValueError("routing feedback message must not be empty")
+        routed = str(routed_domain or "").strip()
+        correct = str(correct_domain or "").strip()
+        if not routed:
+            raise ValueError("routing feedback needs a routed domain")
+        if not correct:
+            raise ValueError("routing feedback needs a correct domain")
+        source = str(source or "").strip().lower()
+        if source not in ROUTING_FEEDBACK_SOURCES:
+            raise ValueError(
+                "routing feedback source must be ui, tool, or cli"
+            )
+        if evidence is None:
+            evidence_data: dict[str, Any] = {}
+        elif isinstance(evidence, dict):
+            evidence_data = evidence
+        else:
+            raise ValueError("routing feedback evidence must be a JSON object")
+
+        feedback_id = util.new_id("rfb")
+        created_at = util.iso()
+        bounded_message = util.clip(
+            message_text.strip(), ROUTING_FEEDBACK_MAX_MESSAGE_CHARS
+        )
+        self.db.execute(
+            "INSERT INTO routing_feedback(id, task_id, message_text,"
+            " routed_domain, correct_domain, evidence, source, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (
+                feedback_id, str(task_id) if task_id else None,
+                bounded_message, routed, correct, util.dumps(evidence_data),
+                source, created_at,
+            ),
+        )
+        self.events.record(
+            "routing.feedback.recorded",
+            task_id=str(task_id) if task_id else None,
+            data={
+                "feedback_id": feedback_id,
+                "routed_domain": routed,
+                "correct_domain": correct,
+                "source": source,
+            },
+        )
+        return self.get(feedback_id)  # type: ignore[return-value]
+
+    @staticmethod
+    def _to_public(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        out = dict(row)
+        evidence = util.loads(out.get("evidence") or "{}", {})
+        out["evidence"] = evidence if isinstance(evidence, dict) else {}
+        return out
+
+    def get(self, feedback_id: str) -> dict[str, Any] | None:
+        row = self.db.query_one(
+            "SELECT * FROM routing_feedback WHERE id=?", (feedback_id,)
+        )
+        return self._to_public(rows_to_dicts([row])[0]) if row else None
+
+    def list(self, limit: int = 200) -> list[dict[str, Any]]:
+        """List feedback newest first, with a stable insertion-order tie-break."""
+        bounded = max(0, int(limit))
+        if bounded == 0:
+            return []
+        rows = self.db.query(
+            "SELECT * FROM routing_feedback ORDER BY created_at DESC, rowid DESC"
+            " LIMIT ?",
+            (bounded,),
+        )
+        return [
+            item for item in map(self._to_public, rows_to_dicts(rows))
+            if item is not None
+        ]
+
+    def export_scenarios(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """Export feedback as loader-compatible routing scenarios.
+
+        The newest feedback comes first.  A specific active corrected domain
+        is reproduced as a one-domain fixture; General and inactive domains
+        intentionally use no fixture so the scenario stays honest about the
+        environment that was actually available.
+        """
+        if limit is None:
+            raw_rows = self.db.query(
+                "SELECT * FROM routing_feedback"
+                " ORDER BY created_at DESC, rowid DESC"
+            )
+            feedback_rows = [
+                item for item in map(self._to_public, rows_to_dicts(raw_rows))
+                if item is not None
+            ]
+        else:
+            feedback_rows = self.list(limit=limit)
+        domain_rows = rows_to_dicts(self.db.query("SELECT * FROM domains"))
+        domains = {
+            str(row.get("id") or ""): _to_public(row)
+            for row in domain_rows
+            if row.get("id")
+        }
+        by_name = {
+            str((item or {}).get("name") or "").lower(): item
+            for item in domains.values()
+            if item is not None
+        }
+
+        active_fixture_domains = [
+            {
+                "name": str(item.get("name") or ""),
+                "description": str(item.get("description") or ""),
+                "keywords": list(item.get("keywords") or []),
+                "examples": list(item.get("examples") or []),
+            }
+            for item in sorted(
+                (
+                    domain for domain in domains.values()
+                    if domain is not None
+                    and domain.get("status") == "active"
+                    and str(domain.get("id") or "") != GENERAL_DOMAIN
+                    and str(domain.get("name") or "").strip()
+                ),
+                key=lambda entry: str(entry.get("name") or ""),
+            )[:12]
+        ]
+        scenarios: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for feedback in feedback_rows:
+            correct_id = str(feedback.get("correct_domain") or "")
+            domain = domains.get(correct_id) or by_name.get(correct_id.lower())
+            correct_name = (
+                str(domain.get("name") or "")
+                if domain is not None else correct_id
+            )
+            key = (
+                str(feedback.get("message_text") or ""),
+                str(feedback.get("routed_domain") or ""),
+                str(feedback.get("correct_domain") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            fixture_domains = [dict(item) for item in active_fixture_domains]
+            if domain is not None and domain.get("status") == "active":
+                correct_fixture = {
+                    "name": str(domain.get("name") or ""),
+                    "description": str(domain.get("description") or ""),
+                    "keywords": list(domain.get("keywords") or []),
+                    "examples": list(domain.get("examples") or []),
+                }
+                if str(domain.get("id") or "") != GENERAL_DOMAIN and all(
+                    item.get("name") != correct_fixture["name"]
+                    for item in fixture_domains
+                ):
+                    fixture_domains.append(correct_fixture)
+            scenarios.append({
+                "id": f"k_feedback_{feedback['id']}",
+                "name": f"Routing feedback {feedback['id']}",
+                "category": "routing",
+                "severity": "high",
+                "modes": ["deterministic"],
+                "tags": ["feedback"],
+                "description": (
+                    "Routing correction recorded from "
+                    f"{feedback.get('source') or 'unknown'}."
+                ),
+                "settings": {"domains": {"model_routing": "off"}},
+                "fixtures": {"domains": fixture_domains},
+                "steps": [{
+                    "kind": "turn",
+                    "input": str(feedback.get("message_text") or ""),
+                    "script": [{"content": "ok"}],
+                    "expect": {"routing": {"domain": correct_name}},
+                }],
+            })
+        return scenarios
 
 
 # ---------------------------------------------------------------------------

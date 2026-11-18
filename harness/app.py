@@ -33,8 +33,9 @@ from .modules.registry import ModuleRegistry
 from .modules.skills import SkillBuilder
 from .runtime import AgentRuntime
 from .scheduler import Scheduler
-from .store import Domains, Events, Messages, Tasks
+from .store import Domains, Events, Messages, RoutingFeedback, Tasks
 from .subagents import SubAgentManager
+from .suggestions import DomainSuggestions
 from .tools import ToolContext, ToolRegistry
 
 log = get_logger("app")
@@ -132,7 +133,9 @@ class App:
         self.events = Events(self.db)
         self.messages = Messages(self.db)
         self.domains = Domains(self.db, self.events, self.config)
+        self.routing_feedback = RoutingFeedback(self.db, self.events)
         self.tasks = Tasks(self.db, self.events)
+        self.domain_suggestions = DomainSuggestions(self)
         self.memory = MemoryManager(
             self.db, self.events, self.artifacts_dir, self.config
         )
@@ -177,6 +180,10 @@ class App:
         """Graceful shutdown: stop ticking, finish current work, persist."""
         try:
             self.scheduler.stop()
+        except Exception:
+            pass
+        try:
+            self.runtime.close()
         except Exception:
             pass
         if self._lock is not None:

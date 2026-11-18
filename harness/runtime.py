@@ -18,13 +18,19 @@ import hashlib
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Any
 
 from . import util
 from . import transcript as transcript_mod
 from .approvals import ApprovalError
-from .config import Config
+from .config import (
+    Config,
+    ROUTING_MARGIN_FALLBACK,
+    ROUTING_THRESHOLD_FALLBACK,
+)
 from .db import Database, rows_to_dicts
 from .model import (
     ASK_USER_TAG,
@@ -41,6 +47,11 @@ from .tools import ToolError, validate_arguments
 
 
 SKILL_WRITE_TOOLS = frozenset({"propose_skill", "edit_skill"})
+DOMAIN_WRITE_TOOLS = frozenset({"edit_domain"})
+UNTRUSTED_ROUTING_SOURCES = frozenset({
+    "inbox", "automation", "schedule", "heartbeat",
+})
+MODEL_ROUTING_MAX_TOKENS = 16
 
 _REVISION_CUES = (
     "instead", "change", "make it", "change it", "use", "not that",
@@ -91,6 +102,19 @@ class AgentRuntime:
         self.approvals = app.approvals
         self.context = app.context
         self._lock = threading.RLock()
+        # One shared classifier worker bounds abandoned timed-out calls: a
+        # hung endpoint can occupy at most this one thread, and later calls
+        # queue behind it instead of creating unbounded executors.
+        self._classifier_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="domain-classifier"
+        )
+
+    def close(self) -> None:
+        """Stop background helpers owned by the runtime."""
+        try:
+            self._classifier_pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Run persistence helpers
@@ -517,7 +541,12 @@ class AgentRuntime:
                     context.update(util.keywords(value))
         context.update(util.keywords(str(approval.get("reason") or "")))
         context.update(util.keywords(str(task.get("objective") or "")))
-        return approval if reply_words & context else None
+        # One shared content word is not enough: "maybe we should discuss the
+        # telescope later" mentions the action's subject but is not feedback.
+        # A revision cue above remains sufficient; otherwise require at least
+        # two context terms so ambiguous replies reach the ambiguity question.
+        overlap = reply_words & context
+        return approval if len(overlap) >= 2 else None
 
     def _revise_from_user_message(
         self, text: str, source: str, approval: dict[str, Any]
@@ -637,19 +666,43 @@ class AgentRuntime:
     def _route_and_run(
         self, text: str, source: str, message_id: int,
         domain_override: str | None = None,
+        task_meta: dict[str, Any] | None = None,
+        trigger: dict[str, Any] | None = None,
     ) -> RunResult:
         # Route first: the routed domain is evidence for which open task this
         # message continues. Doing it the other way around let a resume
         # candidate from an unrelated domain win.
         if domain_override:
             domain_id = domain_override
+            routing = {
+                "domain_id": domain_id,
+                "reason": "explicit domain from the user",
+                "candidates": [],
+                "breakdown": {},
+                "matched": [],
+                "hint": None,
+                "model_choice": None,
+                "model_route": "off",
+            }
             self.events.record(
                 "domain.routed", domain_id=domain_id,
                 data={"reason": "explicit domain from the user",
-                      "candidates": []},
+                      "candidates": [], "model_choice": None,
+                      "model_route": "off"},
             )
         else:
-            domain_id = self._route_domain(text)
+            source_name = str(source or "").strip().lower()
+            untrusted_source = source_name in UNTRUSTED_ROUTING_SOURCES or any(
+                source_name.startswith(f"{name}:")
+                for name in UNTRUSTED_ROUTING_SOURCES
+            )
+            routing = self._route_domain(
+                text,
+                trusted=not untrusted_source,
+                task_meta=task_meta,
+                trigger=trigger,
+            )
+            domain_id = str(routing.get("domain_id") or "general")
         candidate = self.tasks.find_resume_candidate(text, domain_id=domain_id)
 
         if candidate.get("ambiguous"):
@@ -658,9 +711,15 @@ class AgentRuntime:
             task = self.tasks.create(
                 objective=text, domain_id=domain_id,
                 origin="user", origin_ref=str(message_id),
-                meta={"notes": "", "ambiguous_candidates": candidate["ambiguous"]},
+                meta={
+                    "notes": "",
+                    "ambiguous_candidates": candidate["ambiguous"],
+                    "routing": self._routing_payload(routing),
+                },
             )
-            return self.start_run(task, {"kind": "user"}, message_id)
+            return self.start_run(
+                task, {"kind": "user", "routing": routing}, message_id
+            )
 
         existing = candidate.get("task")
         if existing is not None:
@@ -677,29 +736,588 @@ class AgentRuntime:
 
         task = self.tasks.create(
             objective=text, domain_id=domain_id, origin="user",
-            origin_ref=str(message_id), meta={"notes": ""},
+            origin_ref=str(message_id),
+            meta={
+                "notes": "",
+                "routing": self._routing_payload(routing),
+            },
         )
-        return self.start_run(task, {"kind": "user"}, message_id)
+        return self.start_run(
+            task, {"kind": "user", "routing": routing}, message_id
+        )
 
-    def _route_domain(self, text: str) -> str:
+    @staticmethod
+    def _routing_payload(routing: dict[str, Any]) -> dict[str, Any]:
+        """Keep only JSON-safe routing evidence in a new task's metadata."""
+        candidates: list[dict[str, Any]] = []
+        raw_candidates = routing.get("candidates")
+        if isinstance(raw_candidates, list):
+            for candidate in raw_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                raw_breakdown = candidate.get("breakdown")
+                breakdown = (
+                    util.loads(util.dumps(raw_breakdown))
+                    if isinstance(raw_breakdown, dict) else {}
+                )
+                candidate_matched = breakdown.get("matched")
+                if not isinstance(candidate_matched, list):
+                    candidate_matched = []
+                try:
+                    score = float(candidate.get("score") or 0.0)
+                except (TypeError, ValueError):
+                    score = 0.0
+                candidates.append({
+                    "domain_id": str(candidate.get("domain_id") or ""),
+                    "name": str(candidate.get("name") or ""),
+                    "score": score,
+                    "breakdown": breakdown,
+                    "matched": [str(term) for term in candidate_matched],
+                })
+        matched = routing.get("matched")
+        hint = routing.get("hint")
+        try:
+            score = float(routing.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        model_choice = routing.get("model_choice")
+        if not isinstance(model_choice, str) or not model_choice:
+            model_choice = None
+        return {
+            "domain_id": str(routing.get("domain_id") or "general"),
+            "score": score,
+            "reason": str(routing.get("reason") or ""),
+            "model_choice": model_choice,
+            "model_route": str(routing.get("model_route") or "off"),
+            "candidates": candidates,
+            "matched": (
+                [str(term) for term in matched]
+                if isinstance(matched, list) else []
+            ),
+            "hint": (
+                util.loads(util.dumps(hint))
+                if isinstance(hint, dict) else None
+            ),
+        }
+
+    def _routing_learned(self, text: str) -> dict[str, list[str]]:
+        """Merge memory and skill affinity for deterministic routing."""
+        merged: dict[str, list[str]] = {}
+        sources = (
+            self.memory.domain_affinity(text),
+            self.app.modules.skills.domain_affinity(text),
+        )
+        for source in sources:
+            for domain_id, terms in source.items():
+                bucket = merged.setdefault(str(domain_id), [])
+                for term in terms:
+                    if term not in bucket:
+                        bucket.append(term)
+        return merged
+
+    def _route_domain(
+        self,
+        text: str,
+        trusted: bool = True,
+        task_meta: dict[str, Any] | None = None,
+        trigger: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Route deterministically, then optionally use one model tie-break.
+
+        The model path is deliberately narrow: it runs only for trusted input
+        when deterministic evidence is weak, it receives no tools, and its
+        output is treated only as a domain label.  A timeout or any classifier
+        failure leaves the deterministic General fallback in place.
+        """
         routing = self.domains.route(
             text,
             open_tasks=self.tasks.list_open(),
             recent_messages=self.messages.recent(limit=10),
+            learned=self._routing_learned(text),
         )
+        mode = str(
+            self.config.get("domains.model_routing", "off") or "off"
+        ).strip().lower()
+        model_choice: str | None = None
+        model_raw: str | None = None
+        model_route = "off"
+        active_domains = [
+            domain for domain in self.domains.list_active()
+            if str(domain.get("id") or "") != "general"
+        ]
+        tainted = self._routing_has_taint(task_meta, trigger)
+        if (
+            mode in ("shadow", "on")
+            and trusted
+            and not tainted
+            and self._routing_evidence_is_weak(routing, active_domains)
+        ):
+            model_route = mode
+            model_choice, model_raw = self._run_model_domain_classifier(
+                text, self._classifier_domains(routing, active_domains)
+            )
+            if mode == "on":
+                if model_choice and model_choice != "general":
+                    routing["domain_id"] = model_choice
+                    routing["reason"] = (
+                        "model tie-break selected domain "
+                        f"{model_choice!r} from weak deterministic evidence"
+                    )
+                elif model_choice == "general":
+                    routing["domain_id"] = "general"
+                    routing["reason"] = (
+                        "model tie-break selected general from weak "
+                        "deterministic evidence"
+                    )
+                else:
+                    routing["domain_id"] = "general"
+                    routing["reason"] = (
+                        "model tie-break was invalid or unavailable; fell "
+                        "back to general"
+                    )
+
+        routing["model_choice"] = model_choice
+        routing["model_route"] = model_route
+        data = {
+            "reason": routing["reason"],
+            "candidates": routing["candidates"],
+            "breakdown": routing.get("breakdown") or {},
+            "matched": routing.get("matched") or [],
+            "hint": routing.get("hint"),
+            "model_choice": model_choice,
+            "model_route": model_route,
+        }
+        if model_raw is not None:
+            data["model_raw"] = util.clip(model_raw, 120)
         self.events.record(
             "domain.routed",
             domain_id=routing["domain_id"],
+            data=data,
+        )
+        return routing
+
+    @staticmethod
+    def _routing_has_taint(
+        task_meta: dict[str, Any] | None,
+        trigger: dict[str, Any] | None,
+    ) -> bool:
+        """Defensively refuse model routing for already-tainted work."""
+        for payload in (task_meta, trigger):
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("tainted_sources"):
+                return True
+        return False
+
+    def _routing_evidence_is_weak(
+        self,
+        routing: dict[str, Any],
+        active_domains: list[dict[str, Any]],
+    ) -> bool:
+        """Whether deterministic routing fell back to General on weak evidence."""
+        if str(routing.get("domain_id") or "general") != "general":
+            return False
+        if not active_domains:
+            return False
+        try:
+            threshold = float(self.config.get(
+                "domains.routing_threshold", ROUTING_THRESHOLD_FALLBACK
+            ))
+        except (TypeError, ValueError):
+            threshold = float(ROUTING_THRESHOLD_FALLBACK)
+        try:
+            margin = float(self.config.get(
+                "domains.ambiguity_margin", ROUTING_MARGIN_FALLBACK
+            ))
+        except (TypeError, ValueError):
+            margin = float(ROUTING_MARGIN_FALLBACK)
+
+        scores: list[float] = []
+        candidates = routing.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("domain_id") or "") == "general":
+                    continue
+                try:
+                    scores.append(float(candidate.get("score") or 0.0))
+                except (TypeError, ValueError):
+                    scores.append(0.0)
+        scores.sort(reverse=True)
+        best_score = scores[0] if scores else 0.0
+        reason = str(routing.get("reason") or "").lower()
+        ambiguous = "ambiguous domain evidence" in reason
+        if len(scores) >= 2:
+            ambiguous = ambiguous or (scores[0] - scores[1] < margin)
+        return best_score < threshold or ambiguous
+
+    @staticmethod
+    def _classifier_domains(
+        routing: dict[str, Any], domains: list[dict[str, Any]], limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """Rank active domains for the tiny classifier prompt.
+
+        Deterministic candidates come first, then the remaining active domains
+        by name. The list is capped so a large domain set cannot make the
+        "tiny" tie-break call expensive.
+        """
+        by_id = {str(item.get("id") or ""): item for item in domains}
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in routing.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            domain_id = str(candidate.get("domain_id") or "")
+            if domain_id in by_id and domain_id not in seen:
+                ordered.append(by_id[domain_id])
+                seen.add(domain_id)
+        for domain in sorted(
+            domains, key=lambda item: str(item.get("name") or "")
+        ):
+            domain_id = str(domain.get("id") or "")
+            if domain_id in seen:
+                continue
+            ordered.append(domain)
+            seen.add(domain_id)
+        return ordered[:max(1, int(limit))]
+
+    @staticmethod
+    def _model_routing_prompt(
+        text: str, domains: list[dict[str, Any]]
+    ) -> str:
+        """Build the compact, tool-free label-classifier prompt."""
+        lines = [
+            "Choose exactly one active domain label for the user message.",
+            "Active domains:",
+        ]
+        for domain in domains:
+            name = " ".join(str(domain.get("name") or "").split())
+            description = " ".join(
+                str(domain.get("description") or "").split()
+            )
+            keywords = [
+                " ".join(str(item).split())
+                for item in domain.get("keywords") or []
+                if str(item).strip()
+            ]
+            lines.append(
+                f"{name} ({domain.get('id') or ''}): "
+                f"{util.clip(description, 240)} | keywords: "
+                f"{util.clip(', '.join(keywords), 360) or 'none'}"
+            )
+        lines.extend([
+            "User message:",
+            util.clip(str(text or "").strip(), 4000),
+            "Reply with exactly one domain id or general. Output only the label.",
+        ])
+        return util.clip("\n".join(lines), 4000)
+
+    def _run_model_domain_classifier(
+        self, text: str, domains: list[dict[str, Any]]
+    ) -> tuple[str | None, str | None]:
+        """Run one bounded classifier call and return (choice, raw output)."""
+        try:
+            prompt = self._model_routing_prompt(text, domains)
+        except Exception:
+            return None, None
+        try:
+            timeout = float(
+                self.config.get("domains.model_routing_timeout_s", 3.0)
+            )
+        except (TypeError, ValueError):
+            timeout = 3.0
+        timeout = max(0.0, timeout)
+        try:
+            future = self._classifier_pool.submit(
+                self.model.chat,
+                [{"role": "user", "content": prompt}],
+                [],
+                max_tokens=MODEL_ROUTING_MAX_TOKENS,
+                thinking=False,
+                recovery=False,
+            )
+            try:
+                reply = future.result(timeout=timeout)
+            except FutureTimeoutError:
+                return None, None
+            except Exception:
+                return None, None
+        except Exception:
+            return None, None
+
+        try:
+            raw = str(getattr(reply, "content", "") or "").strip()
+            choice = self._parse_model_domain_choice(raw, domains)
+        except Exception:
+            return None, None
+        return choice, raw
+
+    @staticmethod
+    def _parse_model_domain_choice(
+        content: str, domains: list[dict[str, Any]]
+    ) -> str | None:
+        """Parse one leading domain label, without scanning for later text."""
+        text = str(content or "").strip()
+        if not text:
+            return None
+        first_line = text.splitlines()[0].strip()
+        normalized = " ".join(
+            first_line.strip(" \t\"'`").rstrip(".,;:!?").split()
+        )
+        if not normalized:
+            return None
+        if normalized.casefold() == "general":
+            return "general"
+        for domain in domains:
+            name = " ".join(str(domain.get("name") or "").split())
+            if name and normalized.casefold() == name.casefold():
+                return str(domain.get("id") or "")
+        match = re.match(r"^[\w:.-]+", first_line, flags=re.UNICODE)
+        token = match.group(0) if match else ""
+        if not token:
+            return None
+        for domain in domains:
+            if token == str(domain.get("id") or ""):
+                return str(domain.get("id") or "")
+        for domain in domains:
+            name = " ".join(str(domain.get("name") or "").split())
+            if name and token.casefold() == name.casefold():
+                return str(domain.get("id") or "")
+        if token.casefold() == "general":
+            return "general"
+        return None
+
+    def preview_route(self, text: str) -> dict[str, Any]:
+        """Explain a route without recording or changing anything.
+
+        This uses the same learned-affinity merge as normal routing: active
+        memory affinity, active domain-skill affinity, task affinity, and open
+        task objectives. None of those reads count a memory access, and this
+        method deliberately emits no event. It is read-only and does not wait
+        for the runtime lock, so route previews remain available during a run.
+        """
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("route preview text must not be empty")
+        routing = self.domains.route(
+            text,
+            open_tasks=self.tasks.list_open(),
+            recent_messages=self.messages.recent(limit=10),
+            learned=self._routing_learned(text),
+        )
+        candidates = routing.get("candidates")
+        if not isinstance(candidates, list):
+            candidates = []
+            routing["candidates"] = candidates
+        candidate_names: list[str] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            name = str(candidate.get("name") or "")
+            if not name:
+                domain = self.domains.get(str(candidate.get("domain_id") or ""))
+                name = str((domain or {}).get("name") or "")
+                candidate["name"] = name
+            if name and name not in candidate_names:
+                candidate_names.append(name)
+        routing["candidate_names"] = candidate_names
+        return routing
+
+    @staticmethod
+    def _suggested_domain_keywords(
+        message_text: str, domain: dict[str, Any]
+    ) -> list[str]:
+        """Suggest up to three message terms missing from domain vocabulary.
+
+        This is advisory only.  Nothing here writes keywords to the domain.
+        """
+        corpus = " ".join([
+            str(domain.get("name") or ""),
+            " ".join(str(item) for item in domain.get("keywords") or []),
+            " ".join(str(item) for item in domain.get("examples") or []),
+            str(domain.get("description") or ""),
+        ])
+        existing = set(util.stemmed_keywords(corpus))
+        suggestions: list[str] = []
+        for term in util.keywords(message_text):
+            stems = util.stemmed_keywords(term)
+            normalized = stems[0] if stems else term
+            if normalized in existing:
+                continue
+            if any(stem in existing for stem in stems):
+                continue
+            if term not in suggestions:
+                suggestions.append(term)
+            if len(suggestions) >= 3:
+                break
+        return suggestions
+
+    @_serialized
+    def correct_task_domain(
+        self,
+        task_id: str,
+        domain_id: str,
+        *,
+        reason: str = "",
+        source: str = "web",
+    ) -> dict[str, Any]:
+        """Move one task to the user's corrected domain and label the fix.
+
+        A correction mutates task state, so it remains serialized and waits
+        for any active run to finish before the task is moved.
+        """
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(f"no such task: {task_id}")
+        domain = self.domains.get(domain_id)
+        if domain is None:
+            raise KeyError(f"no such domain: {domain_id}")
+        if domain.get("status") != "active":
+            raise ValueError(f"domain {domain['name']} is archived")
+
+        previous_domain_id = task.get("domain_id")
+        if previous_domain_id == domain["id"]:
+            return {
+                "task": task,
+                "feedback": None,
+                "suggested_keywords": [],
+                "previous_domain_id": previous_domain_id,
+            }
+
+        # Capture routing evidence before changing the task's domain.
+        task_meta = self.tasks.meta(task_id)
+        routing = task_meta.get("routing")
+        evidence = dict(routing) if isinstance(routing, dict) else {}
+        reason = util.clip(str(reason or "").strip(), 1000)
+        source = util.clip(str(source or "web").strip(), 40) or "web"
+
+        message_text = str(task.get("objective") or "").strip()
+        if not message_text:
+            user_messages = [
+                message for message in self.messages.recent_for_task(task_id)
+                if message.get("role") == "user"
+            ]
+            if user_messages:
+                message_text = str(user_messages[-1].get("content") or "").strip()
+
+        updated = self.tasks.set_domain(task_id, domain["id"])
+        # The task's current domain and its routing evidence must describe the
+        # same decision. Keep the correction marker so the UI can explain that
+        # the original route was replaced by the user.
+        task_meta["routing"] = {
+            "domain_id": domain["id"],
+            "score": 0.0,
+            "reason": "user corrected the domain",
+            "hint": None,
+            "matched": [],
+            "candidates": [],
+            "corrected_from": previous_domain_id,
+            "corrected_to": domain["id"],
+            "model_choice": None,
+            "model_route": "off",
+        }
+        self.tasks.set_meta(task_id, task_meta)
+        self.events.record(
+            "domain.corrected",
+            task_id=task_id,
+            domain_id=domain["id"],
             data={
-                "reason": routing["reason"],
-                "candidates": routing["candidates"],
+                "from_domain_id": previous_domain_id,
+                "to_domain_id": domain["id"],
+                "reason": reason,
+                "source": source,
+                "evidence": evidence,
             },
         )
-        return routing["domain_id"]
+        feedback_source = source if source in ("ui", "tool", "cli") else "ui"
+        feedback = self.app.routing_feedback.record(
+            task_id,
+            message_text or "routing correction",
+            str(previous_domain_id or "general"),
+            domain["id"],
+            evidence,
+            feedback_source,
+        )
+        suggested_keywords = self._suggested_domain_keywords(
+            message_text, domain
+        )
+
+        latest_run = self._latest_run(task_id)
+        self._announce_domain(
+            str(latest_run.get("id") or "") if latest_run else "",
+            updated,
+            str(previous_domain_id) if previous_domain_id else None,
+            "domain corrected by user",
+            [],
+        )
+        return {
+            "task": self.tasks.get(task_id) or updated,
+            "feedback": feedback,
+            "suggested_keywords": suggested_keywords,
+            "previous_domain_id": previous_domain_id,
+        }
 
     # ------------------------------------------------------------------
     # Run lifecycle
     # ------------------------------------------------------------------
+
+    def _announce_domain(
+        self,
+        run_id: str,
+        task: dict[str, Any],
+        previous_domain: str | None,
+        reason: str,
+        matched: list[str] | None = None,
+    ) -> None:
+        """Record and optionally display a one-time domain entry status."""
+        current_task = self.tasks.get(task["id"]) or task
+        current_domain = str(current_task.get("domain_id") or "")
+        if not current_domain or current_domain == "general":
+            return
+        domain = self.domains.get(current_domain)
+        if domain is None or domain.get("status") != "active":
+            return
+        prior = self.db.query_one(
+            "SELECT id FROM event_log WHERE type='domain.entered'"
+            " AND task_id=? AND domain_id=? LIMIT 1",
+            (current_task["id"], current_domain),
+        )
+        changed = previous_domain != current_domain
+        if prior is not None and not changed:
+            return
+        terms = [
+            str(term).strip()
+            for term in (matched or [])
+            if str(term).strip()
+        ]
+        self.events.record(
+            "domain.entered",
+            task_id=current_task["id"],
+            run_id=run_id,
+            domain_id=current_domain,
+            data={
+                "domain_id": current_domain,
+                "name": domain["name"],
+                "reason": reason,
+                "matched": terms,
+            },
+        )
+        if not bool(self.config.get("domains.status_line", True)):
+            return
+        text = f"Entering {domain['name']}"
+        if terms:
+            text += f" - matched: {', '.join(terms)}"
+        self.messages.record(
+            "note", text, source="system",
+            domain_id=current_domain, task_id=current_task["id"],
+            run_id=run_id, visible=self._visible(current_task),
+            meta={
+                "kind": "domain.status",
+                "chip": True,
+                "domain_id": current_domain,
+            },
+        )
 
     @_serialized
     def start_run(
@@ -711,13 +1329,22 @@ class AgentRuntime:
         """Create a run for a task and execute it to a pause or completion."""
         run_id = util.new_id("run")
         pending = self.approvals.pending()
+        task_meta = util.loads(task.get("meta") or "{}", {})
+        if not isinstance(task_meta, dict):
+            task_meta = {}
+        routing = trigger.get("routing")
+        if not isinstance(routing, dict):
+            routing = task_meta.get("routing")
+        if not isinstance(routing, dict):
+            routing = None
+        role = task.get("role") or "user"
+        selection = self._select_tools(task.get("domain_id"), role)
         built = self.context.build(
             task=task, domain=self.domains.get(task["domain_id"])
             if task.get("domain_id") else None,
             trigger=trigger, pending_approvals=pending, run_id=run_id,
+            routing=routing, tool_selection=selection,
         )
-        role = task.get("role") or "user"
-        selection = self._select_tools(task.get("domain_id"), role)
         sources = list(built["sources"])
         for exclusion in selection["exclusions"]:
             sources.append({
@@ -737,13 +1364,13 @@ class AgentRuntime:
         parent_run_id = trigger.get("parent_run_id") or task.get("parent_run_id")
         run_meta: dict[str, Any] = {
             "toolset": self._toolset_snapshot(selection),
+            "trigger": trigger,
             **self._model_stamp(),
         }
         # Inbox content is untrusted by definition. Seed the same taint list
         # that untrusted tool output uses, so every later side-effecting tool
         # is escalated to an explicit approval by the one existing rule.
         tainted: list[dict[str, Any]] = []
-        task_meta = util.loads(task.get("meta") or "{}", {})
         for source in (
             list(trigger.get("tainted_sources") or [])
             + list((task_meta or {}).get("tainted_sources") or [])
@@ -779,6 +1406,15 @@ class AgentRuntime:
         self.events.record(
             "run.started", task_id=task["id"], run_id=run_id,
             data={"trigger": trigger["kind"]},
+        )
+        routing_matched = (routing or {}).get("matched")
+        self._announce_domain(
+            run_id, task, task.get("domain_id"),
+            str((routing or {}).get("reason") or "task started in domain"),
+            (
+                [str(term) for term in routing_matched]
+                if isinstance(routing_matched, list) else []
+            ),
         )
         self.tasks.set_status(task["id"], "active", reason="run started")
         run = self._run_row(run_id)
@@ -1668,10 +2304,237 @@ class AgentRuntime:
             ),
         }
 
+    def _domain_briefing(
+        self,
+        run_id: str,
+        task: dict[str, Any],
+        previous_domain: str | None,
+        new_domain_id: str,
+    ) -> dict[str, Any]:
+        """Build the environment briefing delivered by ``use_domain``."""
+        domain = self.domains.get(new_domain_id)
+        if domain is None or domain.get("status") != "active":
+            return {"text": "", "memories": [], "skills": [], "new_tools": []}
+        objective = str(task.get("objective") or "")
+
+        memories = self.memory.search(
+            objective,
+            scope_priority=[f"domain:{new_domain_id}", "global"],
+            limit=3,
+        )
+        memory_items: list[dict[str, Any]] = []
+        for item in memories:
+            memory_items.append({
+                "id": item["id"],
+                "kind": item.get("kind") or "memory",
+                "scope": item.get("scope") or "",
+                "content": util.clip(str(item.get("content") or ""), 200),
+            })
+        if memory_items:
+            try:
+                self.memory.record_access(
+                    [item["id"] for item in memory_items], run_id=run_id
+                )
+            except Exception:
+                pass
+
+        skill_items: list[dict[str, Any]] = []
+        skills = self.app.modules.skills
+        # Use the same disclosure rules as the context builder so adaptive
+        # skills whose preconditions match the task also appear in a mid-run
+        # briefing (an entry briefing is the only skill disclosure that run).
+        _, skill_sources = skills.disclose(new_domain_id, objective)
+        applicable_skill_ids = {
+            str(source.get("ref") or "")
+            for source in skill_sources
+            if str(source.get("reason") or "") in (
+                "global skill",
+                "domain-bound skill for this domain",
+                "skill preconditions matched the objective",
+            )
+        }
+        for module in skills.all():
+            if len(skill_items) >= 5:
+                break
+            if module.status != "active" or module.id not in applicable_skill_ids:
+                continue
+            description = " ".join(
+                str((module.manifest or {}).get("description") or "").split()
+            )
+            skill_items.append({
+                "name": module.name,
+                "description": util.clip(description, 160),
+            })
+
+        role = task.get("role") or "user"
+        previous_selection = self._select_tools(previous_domain, role)
+        new_selection = self._select_tools(new_domain_id, role)
+        previous_names = set(previous_selection.get("names") or [])
+        new_tools = [
+            name for name in (new_selection.get("names") or [])
+            if name not in previous_names
+        ]
+
+        try:
+            instruction_limit = int(
+                self.config.get("domains.instructions_max_chars", 1200)
+            )
+        except (TypeError, ValueError):
+            instruction_limit = 1200
+        instruction_limit = max(1, instruction_limit)
+        description = util.clip(str(domain.get("description") or ""), 400)
+        instructions = util.clip(
+            str(domain.get("instructions") or "").strip(), instruction_limit
+        )
+        lines = [f"# Entering {domain['name']}"]
+        if description:
+            lines.append(f"Description: {description}")
+        if instructions:
+            lines.append("Instructions:")
+            lines.append(instructions)
+        if memory_items:
+            lines.append("Relevant memories:")
+            for item in memory_items:
+                lines.append(
+                    f"- [{item['kind']}] ({item['scope']}): {item['content']}"
+                )
+        if skill_items:
+            lines.append("Applicable skills:")
+            for item in skill_items:
+                suffix = f": {item['description']}" if item["description"] else ""
+                lines.append(f"- {item['name']}{suffix}")
+        if new_tools:
+            lines.append("Newly available tools:")
+            lines.extend(f"- {name}" for name in new_tools)
+        try:
+            briefing_limit = int(
+                self.config.get("domains.briefing_chars", 1800)
+            )
+        except (TypeError, ValueError):
+            briefing_limit = 1800
+        briefing_limit = max(1, briefing_limit)
+        text = util.clip("\n".join(lines), briefing_limit)
+
+        self._append_context_source(
+            run_id,
+            {
+                "section": "domain",
+                "ref": f"domain:{new_domain_id}:briefing",
+                "reason": "domain entry briefing",
+            },
+        )
+        for item in memories:
+            self._append_context_source(
+                run_id,
+                {
+                    "section": "memories",
+                    "ref": f"memory:{item['id']}",
+                    "reason": str(item.get("reason") or "domain briefing memory"),
+                },
+            )
+        for item in skill_items:
+            self._append_context_source(
+                run_id,
+                {
+                    "section": "domain",
+                    "ref": f"skill:{item['name']}",
+                    "reason": "active skill disclosed in domain briefing",
+                },
+            )
+        for name in new_tools:
+            self._append_context_source(
+                run_id,
+                {
+                    "section": "tools",
+                    "ref": name,
+                    "reason": "newly available after domain entry",
+                },
+            )
+        return {
+            "text": text,
+            "memories": memory_items,
+            "skills": skill_items,
+            "new_tools": new_tools,
+        }
+
+    def _rebuild_context_after_domain_change(
+        self,
+        run: dict[str, Any],
+        task: dict[str, Any],
+        previous_domain: str | None,
+    ) -> None:
+        """Replace the run's system context after a domain switch.
+
+        The task, memories, skills, and tool selection may all change when the
+        model enters a domain. Rebuilding the prompt keeps those changes
+        atomic from the model's point of view and removes instructions and
+        routing hints belonging to the previous domain.
+        """
+        run_id = str(run["id"])
+        fresh = self.tasks.get(str(task["id"]))
+        if fresh is None:
+            return
+        new_domain_id = str(fresh.get("domain_id") or "general")
+        new_domain = self.domains.get(new_domain_id)
+        role = fresh.get("role") or "user"
+        trigger = self._run_meta(run_id).get("trigger")
+        if not isinstance(trigger, dict):
+            trigger = {"kind": "domain_change"}
+        built = self.context.build(
+            task=fresh,
+            domain=new_domain,
+            trigger=trigger,
+            pending_approvals=self.approvals.pending(),
+            run_id=run_id,
+            # The original route described the pre-switch task. Keeping it
+            # would put a stale domain hint back into the rebuilt prompt.
+            routing=None,
+            tool_selection=self._select_tools(new_domain_id, role),
+        )
+
+        current = self._run_row(run_id) or run
+        transcript = self._transcript(current)
+        if (
+            transcript
+            and isinstance(transcript[0], dict)
+            and transcript[0].get("role") == "system"
+        ):
+            transcript[0]["content"] = built["system"]
+        else:
+            transcript.insert(0, {"role": "system", "content": built["system"]})
+        sources = util.loads(current.get("context_sources") or "[]", [])
+        if not isinstance(sources, list):
+            sources = []
+        sources.extend(
+            source for source in built.get("sources", [])
+            if isinstance(source, dict)
+        )
+        sources.append({
+            "section": "domain",
+            "ref": "domain:rebuild",
+            "reason": "system prompt rebuilt after domain change",
+        })
+        self._save_run(
+            run_id,
+            transcript=util.dumps(transcript),
+            context_sources=util.dumps(sources),
+        )
+        self.events.record(
+            "domain.context_rebuilt",
+            task_id=fresh["id"],
+            run_id=run_id,
+            domain_id=new_domain_id,
+            data={
+                "from_domain_id": previous_domain,
+                "to_domain_id": new_domain_id,
+            },
+        )
+
     def _handle_tool_call(
         self, run: dict[str, Any], task: dict[str, Any], call: ToolCall
     ) -> dict[str, Any]:
         run_id, task_id = run["id"], task["id"]
+        previous_domain = task.get("domain_id")
         role = task.get("role") or "user"
         # A sub-agent asking for a confirm-risk or parent-only tool gets an
         # explicit blocked result for its parent instead of an approval.
@@ -1795,6 +2658,28 @@ class AgentRuntime:
                     "Skills are built only from trusted work."
                 ),
             }
+        if call.name in DOMAIN_WRITE_TOOLS and taint:
+            origin = str(taint[0].get("origin") or "untrusted content")
+            wanted = str((call.arguments or {}).get("domain") or "").strip()
+            domain = self.domains.get(wanted) or self.domains.by_name(wanted)
+            self.events.record(
+                "domain.refused", level="warn", task_id=task_id, run_id=run_id,
+                source="runtime",
+                data={
+                    "origin": util.clip(origin, 300),
+                    "tool": call.name,
+                    "domain": str((domain or {}).get("id") or wanted)[:120],
+                    "name": str((domain or {}).get("name") or wanted)[:120],
+                },
+            )
+            return {
+                "status": "denied",
+                "error": (
+                    "This run consumed untrusted content from "
+                    f"{util.clip(origin, 160)}, so it cannot change "
+                    "user-authored domain instructions."
+                ),
+            }
         tainted_side_effect = bool(
             taint and spec.side_effects and not spec.read_only
         )
@@ -1841,6 +2726,46 @@ class AgentRuntime:
                 )
             except Exception as exc:
                 return {"status": "denied", "error": str(exc)}
+            if call.name in DOMAIN_WRITE_TOOLS:
+                wanted = str(arguments.get("domain") or "").strip()
+                domain = self.domains.get(wanted) or self.domains.by_name(wanted)
+                if domain is None:
+                    return {
+                        "status": "denied",
+                        "error": (
+                            f"no such domain: {wanted}; use an existing "
+                            "domain id or name"
+                        ),
+                    }
+                if domain.get("status") != "active":
+                    return {
+                        "status": "denied",
+                        "error": f"domain {domain['name']} is archived",
+                    }
+                try:
+                    instruction_limit = int(
+                        self.config.get("domains.instructions_max_chars", 1200)
+                    )
+                except (TypeError, ValueError):
+                    instruction_limit = 1200
+                instruction_limit = max(1, instruction_limit)
+                instructions = str(arguments.get("instructions") or "")
+                if "\x00" in instructions:
+                    return {
+                        "status": "denied",
+                        "error": "domain instructions must not contain NUL bytes",
+                    }
+                arguments["domain"] = wanted
+                arguments["instructions"] = util.clip(
+                    instructions, instruction_limit
+                )
+                arguments["reason"] = util.clip(
+                    str(arguments.get("reason") or ""), 500
+                )
+                # The approval and its eventual execution must carry exactly
+                # the same bounded instructions shown to the user.
+                call.arguments = arguments
+                call.raw_arguments = util.dumps(arguments)
             if call.name in SKILL_WRITE_TOOLS:
                 skills = self.app.modules.skills
                 if not skills.enabled:
@@ -1970,6 +2895,15 @@ class AgentRuntime:
                     "Reply approve/reject, or use the Approvals panel."
                     f"{provenance}"
                 )
+            elif call.name in DOMAIN_WRITE_TOOLS:
+                note = (
+                    "I want to change **user-authored domain instructions**. "
+                    "Review the full bounded text below; approval is required "
+                    "before anything is written.\n\n"
+                    f"{self._domain_proposal_detail(arguments)}\n\n"
+                    "Reply approve/reject, or use the Approvals panel."
+                    f"{provenance}"
+                )
             else:
                 note = (
                     f"I want to run **{call.name}** with "
@@ -1992,6 +2926,9 @@ class AgentRuntime:
         # mark provenance when a (non-escalated) write happens in a
         # tainted run.
         ctx.tainted_origin = taint_origin
+        ctx.briefing = lambda new_domain_id: self._domain_briefing(
+            run_id, task, previous_domain, new_domain_id
+        )
         outcome = self.tools.execute(
             call, ctx, run_id=run_id, task_id=task_id,
             allowed_names=allowed, role=role,
@@ -2000,6 +2937,14 @@ class AgentRuntime:
             self._mark_tainted(
                 run_id, call.name, spec.module,
                 self._taint_origin(outcome.get("result"), call.name),
+            )
+        if outcome.get("status") == "succeeded" and call.name == "use_domain":
+            self._announce_domain(
+                run_id, task, previous_domain,
+                "domain changed by the model", [],
+            )
+            self._rebuild_context_after_domain_change(
+                run, task, previous_domain,
             )
         return outcome
 
@@ -2063,6 +3008,29 @@ class AgentRuntime:
                         "was written and no new approval was created",
             },
         }
+
+    def _domain_proposal_detail(self, arguments: dict[str, Any]) -> str:
+        """Bounded, readable approval content for a domain instruction edit."""
+        wanted = str(arguments.get("domain") or "").strip()
+        domain = self.domains.get(wanted) or self.domains.by_name(wanted)
+        name = str((domain or {}).get("name") or wanted or "(missing)")
+        domain_id = str((domain or {}).get("id") or wanted or "(missing)")
+        try:
+            limit = int(
+                self.config.get("domains.instructions_max_chars", 1200)
+            )
+        except (TypeError, ValueError):
+            limit = 1200
+        limit = max(1, limit)
+        instructions = util.clip(
+            str(arguments.get("instructions") or ""), limit
+        )
+        reason = util.clip(str(arguments.get("reason") or "").strip(), 500)
+        return (
+            f"- domain: {name} ({domain_id})\n"
+            f"- reason: {reason or '(none)'}\n\n"
+            f"Instructions (limit {limit} chars):\n{instructions}"
+        )
 
     def _skill_proposal_detail(self, arguments: dict[str, Any]) -> str:
         """Bounded, readable approval content for a skill write call."""

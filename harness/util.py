@@ -150,6 +150,76 @@ def keywords(text: str) -> list[str]:
     return out
 
 
+# Words the generic suffix rules would mangle. Kept tiny and explicit so the
+# stemmer stays deterministic and predictable.
+_STEM_EXCEPTIONS = {
+    "calories": "calorie",
+    "series": "series",
+    "species": "species",
+    "news": "news",
+    "this": "this",
+}
+
+
+def _undouble(text: str) -> str:
+    if len(text) >= 4 and text[-1] == text[-2]:
+        return text[:-1]
+    return text
+
+
+def stem(word: str) -> str:
+    """A small deterministic suffix stripper for lexical matching.
+
+    Lowercases alphabetic input and removes at most one plural, verb
+    (-ing/-ed), or derivational (-al/-ly) suffix. Conservative by design:
+    when stripping would leave too short a stem the word is returned
+    unchanged, so a miss costs recall rather than a false hit.
+    """
+    text = str(word or "").strip().lower()
+    if len(text) < 3 or not text.isalpha():
+        return text
+    if text in _STEM_EXCEPTIONS:
+        return _STEM_EXCEPTIONS[text]
+
+    # Plurals: stories -> story, boxes -> box, workouts -> workout.
+    if text.endswith("ies") and len(text) >= 5:
+        return text[:-3] + "y"
+    if text.endswith("es") and len(text) >= 5 and text.endswith(
+        ("ches", "shes", "xes", "zes", "ses")
+    ):
+        return text[:-2]
+    if text.endswith("s") and len(text) > 3 and not text.endswith(
+        ("ss", "us", "is")
+    ):
+        return text[:-1]
+
+    # Verb forms; de-double a final consonant so running -> run.
+    if text.endswith("ing") and len(text) >= 6:
+        return _undouble(text[:-3])
+    if text.endswith("ed") and len(text) >= 5:
+        return _undouble(text[:-2])
+
+    # Derivational suffixes: nutritional -> nutrition, quickly -> quick.
+    if text.endswith("al") and len(text) - 2 >= 4:
+        return text[:-2]
+    if text.endswith("ly") and len(text) - 2 >= 4:
+        return text[:-2]
+    return text
+
+
+def stemmed_keywords(text: str) -> list[str]:
+    """Stemmed, de-duplicated content words in first-seen order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for word in keywords(text):
+        stemmed = stem(word)
+        if not stemmed or stemmed in seen:
+            continue
+        seen.add(stemmed)
+        out.append(stemmed)
+    return out
+
+
 def clip(text: str, limit: int) -> str:
     """Trim text to a budget, cutting on a boundary and marking the cut."""
     if len(text) <= limit:

@@ -144,7 +144,9 @@ def test_domain_creation_requires_approval(make_app):
     app = make_app.build(scripts=[
         {"tool_calls": [{"name": "create_domain", "arguments": {
             "name": "Astronomy", "description": "telescope and observing logs",
-            "reason": "recurring distinct work with its own knowledge"}}]},
+            "reason": "recurring distinct work with its own knowledge",
+            "keywords": ["astronomy", "telescope", "observing"],
+            "examples": ["set up telescope observing", "log tonight's stars"]}}]},
         {"content": "I proposed the Astronomy domain."},
     ])
     result = _say(app, "I keep doing telescope work; set up a place for it.")

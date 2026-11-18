@@ -8,7 +8,8 @@ single source of truth for structured state; artifacts hold only long-form
 text whose identity is tracked by the row that references them.
 
 Schema versioning: ``schema_meta.schema_version``; ``migrate()`` creates v1
-and can grow additive migrations later. Never rebuild in place without a
+and grows additive migrations later (currently v9: domain routing evidence and
+the Phase 13 ``user_id`` prep columns). Never rebuild in place without a
 backup path documented in the README. Before migrating an existing database,
 ``migrate()`` writes ``backups/pre-migrate-v<old>-to-v<new>-<ts>.zip`` into
 the data directory and aborts the migration if the backup cannot be written.
@@ -24,7 +25,7 @@ from typing import Any
 
 from . import util
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Phase 3 memory lifetime: additive columns on ``memories`` plus a small
 # access table. ``archived_at`` marks an archived row without touching the
@@ -75,6 +76,55 @@ CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
 """
 
+# Phase 10 (schema v9): domain routing evidence and the feedback/suggestion
+# tables. The columns are additive JSON/text fields; empty lists and an empty
+# instruction string stay valid so old rows keep working unchanged.
+PHASE10_DOMAIN_COLUMNS = (
+    ("keywords", "TEXT NOT NULL DEFAULT '[]'"),
+    ("examples", "TEXT NOT NULL DEFAULT '[]'"),
+    ("instructions", "TEXT NOT NULL DEFAULT ''"),
+)
+
+# Phase 13 prep rides along in the same v9 migration: a per-row owner id with
+# no behaviour change until identity ships.
+PHASE13_USER_COLUMNS = (
+    ("user_id", "TEXT NOT NULL DEFAULT 'owner'"),
+)
+
+PHASE13_USER_ID_TABLES = (
+    "messages", "tasks", "memories", "domains", "schedules", "approvals",
+    "inbox_events",
+)
+
+# Phase 10 feedback loop: labelled routing corrections and the late-phase
+# suggestion queue. Tables only; nothing reads them until the later
+# sub-phases, so creating them now changes no routing behaviour.
+DOMAIN_EVIDENCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS routing_feedback (
+  id TEXT PRIMARY KEY,
+  task_id TEXT,
+  message_text TEXT NOT NULL,
+  routed_domain TEXT NOT NULL,
+  correct_domain TEXT NOT NULL,
+  evidence TEXT NOT NULL DEFAULT '{}',
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_routing_feedback_created
+  ON routing_feedback(created_at);
+
+CREATE TABLE IF NOT EXISTS domain_suggestions (
+  id TEXT PRIMARY KEY,
+  terms TEXT NOT NULL,
+  task_ids TEXT NOT NULL,
+  status TEXT NOT NULL
+    CHECK(status IN ('open','created','dismissed')),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_domain_suggestions_status
+  ON domain_suggestions(status);
+"""
+
 # Phase 5: durable external wake-ups and the declarative rules that act on
 # them. The unique key is the idempotency contract; the fire table is both the
 # visible history (Phase 6) and the durable half of the hourly loop breaker.
@@ -92,6 +142,7 @@ CREATE TABLE IF NOT EXISTS inbox_events (
   severity TEXT NOT NULL DEFAULT 'info',
   meta TEXT,
   trust TEXT NOT NULL DEFAULT 'untrusted',
+  user_id TEXT NOT NULL DEFAULT 'owner',
   UNIQUE(source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_inbox_status
@@ -195,7 +246,8 @@ CREATE TABLE IF NOT EXISTS messages (
   task_id TEXT,
   run_id TEXT,
   visible INTEGER NOT NULL DEFAULT 1,
-  meta TEXT
+  meta TEXT,
+  user_id TEXT NOT NULL DEFAULT 'owner'
 );
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
@@ -237,7 +289,11 @@ CREATE TABLE IF NOT EXISTS domains (
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  meta TEXT
+  meta TEXT,
+  keywords TEXT NOT NULL DEFAULT '[]',
+  examples TEXT NOT NULL DEFAULT '[]',
+  instructions TEXT NOT NULL DEFAULT '',
+  user_id TEXT NOT NULL DEFAULT 'owner'
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -257,7 +313,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   parent_task_id TEXT,
   parent_run_id TEXT,
   role TEXT NOT NULL DEFAULT 'user',
-  meta TEXT
+  meta TEXT,
+  user_id TEXT NOT NULL DEFAULT 'owner'
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_domain ON tasks(domain_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -308,7 +365,8 @@ CREATE TABLE IF NOT EXISTS memories (
   last_accessed_at TEXT,
   archived_at TEXT,
   pinned INTEGER NOT NULL DEFAULT 0,
-  importance INTEGER NOT NULL DEFAULT 0
+  importance INTEGER NOT NULL DEFAULT 0,
+  user_id TEXT NOT NULL DEFAULT 'owner'
 );
 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope, status);
 
@@ -356,7 +414,8 @@ CREATE TABLE IF NOT EXISTS schedules (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   next_due_at TEXT,
-  meta TEXT
+  meta TEXT,
+  user_id TEXT NOT NULL DEFAULT 'owner'
 );
 
 CREATE TABLE IF NOT EXISTS schedule_occurrences (
@@ -388,7 +447,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   decided_by TEXT,
   expires_at TEXT,
   notified_at TEXT,
-  meta TEXT
+  meta TEXT,
+  user_id TEXT NOT NULL DEFAULT 'owner'
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
 
@@ -411,7 +471,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_toolx_run ON tool_executions(run_id);
 CREATE INDEX IF NOT EXISTS idx_toolx_status ON tool_executions(status);
-""" + MODULE_SCHEMA + INBOX_SCHEMA
+""" + MODULE_SCHEMA + INBOX_SCHEMA + DOMAIN_EVIDENCE_SCHEMA
 
 
 class Database:
@@ -593,6 +653,30 @@ ALTER TABLE modules_v7 RENAME TO modules;
             ALTER TABLE approvals_v8 RENAME TO approvals;
             CREATE INDEX idx_approvals_status ON approvals(status);
             """)
+        if version < 9:
+            # Phase 10 domains-as-work-environments (keywords/examples/
+            # instructions plus the feedback tables) and the Phase 13 prep
+            # owner id, in one additive migration. Guard every ALTER because a
+            # down-stamped fresh database may already carry the column; never
+            # rebuild a table here.
+            for table, columns in (
+                ("domains", PHASE10_DOMAIN_COLUMNS),
+                *(
+                    (table, PHASE13_USER_COLUMNS)
+                    for table in PHASE13_USER_ID_TABLES
+                ),
+            ):
+                existing = {
+                    row["name"] for row in self._conn.execute(
+                        f"PRAGMA table_info({table})"
+                    )
+                }
+                for name, ddl in columns:
+                    if name not in existing:
+                        self._conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
+                        )
+            self._conn.executescript(DOMAIN_EVIDENCE_SCHEMA)
         if version < SCHEMA_VERSION:
             self._conn.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",

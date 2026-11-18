@@ -223,6 +223,47 @@ class SkillManager:
     def list_skills(self) -> list[dict[str, Any]]:
         return [self.describe(module) for module in self.all()]
 
+    def domain_affinity(
+        self, text: str, limit_per_domain: int = 3
+    ) -> dict[str, list[str]]:
+        """Return message terms learned from active domain-bound skills.
+
+        Only active ``scope=domain`` skills with an enabled binding can
+        contribute. Skill names and descriptions use the same
+        ``domains.stemming`` normalization as the message, and each bound
+        domain receives at most three matched terms.
+        """
+        stemming = bool(self.config.get("domains.stemming", True))
+        normalize = util.stemmed_keywords if stemming else util.keywords
+        message_terms = set(normalize(text))
+        if not message_terms or limit_per_domain <= 0:
+            return {}
+        affinity: dict[str, list[str]] = {}
+        for module in self.all():
+            if module.status != "active" or module.scope != "domain":
+                continue
+            manifest = module.manifest or {}
+            skill_terms = set(normalize(
+                f"{module.name} {manifest.get('description') or ''}"
+            ))
+            matched = message_terms & skill_terms
+            if not matched:
+                continue
+            for binding in self.registry.bindings(module.id):
+                if not binding.enabled:
+                    continue
+                domain_id = str(binding.domain_id or "")
+                if not domain_id:
+                    continue
+                bucket = affinity.setdefault(domain_id, [])
+                for term in sorted(matched):
+                    if term in bucket:
+                        continue
+                    if len(bucket) >= max(1, int(limit_per_domain)):
+                        break
+                    bucket.append(term)
+        return {domain_id: affinity[domain_id] for domain_id in sorted(affinity)}
+
     # -- validation ------------------------------------------------------
 
     def validate_fields(

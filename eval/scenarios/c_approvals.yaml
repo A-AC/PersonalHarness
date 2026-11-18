@@ -20,6 +20,10 @@ scenarios:
                   name: Astronomy
                   description: telescope and observing logs
                   reason: recurring distinct work with its own knowledge
+                  keywords: [astronomy, telescope, observing]
+                  examples:
+                    - set up telescope observing
+                    - log tonight's stars
         expect:
           status: waiting_approval
           task:
@@ -77,6 +81,10 @@ scenarios:
                   name: Astronomy
                   description: telescope and observing logs
                   reason: recurring distinct work with its own knowledge
+                  keywords: [astronomy, telescope, observing]
+                  examples:
+                    - set up telescope observing
+                    - log tonight's stars
         expect:
           status: waiting_approval
           approvals:
@@ -124,6 +132,10 @@ scenarios:
                   name: Astronomy
                   description: telescope and observing logs
                   reason: recurring distinct work with its own knowledge
+                  keywords: [astronomy, telescope, observing]
+                  examples:
+                    - set up telescope observing
+                    - log tonight's stars
         expect:
           status: waiting_approval
           approvals:
@@ -164,6 +176,10 @@ scenarios:
                   name: Astronomy
                   description: telescope and observing logs
                   reason: recurring distinct work with its own knowledge
+                  keywords: [astronomy, telescope, observing]
+                  examples:
+                    - set up telescope observing
+                    - log tonight's stars
         expect:
           status: waiting_approval
           approvals:
