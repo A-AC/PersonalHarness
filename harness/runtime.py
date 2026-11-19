@@ -13,6 +13,7 @@ the exact arguments; outcomes are recorded as they are, including unknown.
 
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import hashlib
 import re
@@ -30,6 +31,7 @@ from .config import (
     Config,
     ROUTING_MARGIN_FALLBACK,
     ROUTING_THRESHOLD_FALLBACK,
+    resolve_zone,
 )
 from .db import Database, rows_to_dicts
 from .model import (
@@ -44,7 +46,11 @@ from .model import (
 from .providers import configured_provider_id
 from .store import Domains, Events, Messages, Tasks
 from .routing import RoutingService
-from .tools import ToolDenied, ToolError, ToolSpec, validate_arguments
+from .schedule_policy import (
+    allowed_tools as unattended_allowed_tools,
+    authorizes_web_search,
+)
+from .tools import ToolDenied, ToolError, ToolSpec, validate_tool_arguments
 
 
 SKILL_WRITE_TOOLS = frozenset({"propose_skill", "edit_skill"})
@@ -63,6 +69,17 @@ _REVISION_CUES = (
 # request and swallowed a new topic while an approval was pending.
 _REVISION_CUE_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(cue) for cue in _REVISION_CUES) + r")\b"
+)
+_COMPLETED_CONTINUATION_CUE_RE = re.compile(
+    r"\b(?:actually|already|again|above|before|change|correct|delete|edit|"
+    r"instead|rename|replace|update|noon|midnight|that|this|there|created|"
+    r"told|12am|12pm)\b",
+    re.IGNORECASE,
+)
+_NEW_TOPIC_START_RE = re.compile(
+    r"^(?:add|create|draft|explain|find|how|list|remember|schedule|search|"
+    r"show|tell|what|when|where|which|who|why|write)\b",
+    re.IGNORECASE,
 )
 
 
@@ -273,6 +290,72 @@ class AgentRuntime:
     def _toolset(self, run_id: str) -> dict[str, Any]:
         snapshot = self._run_meta(run_id).get("toolset")
         return snapshot if isinstance(snapshot, dict) else {}
+
+    @staticmethod
+    def _task_unattended_policy(task: dict[str, Any]) -> dict[str, Any] | None:
+        if task.get("origin") != "schedule":
+            return None
+        meta = util.loads(task.get("meta") or "{}", {})
+        policy = meta.get("unattended") if isinstance(meta, dict) else None
+        return policy if isinstance(policy, dict) else None
+
+    def _unattended_policy(
+        self, task: dict[str, Any], run_id: str | None = None
+    ) -> dict[str, Any] | None:
+        if run_id:
+            policy = self._run_meta(run_id).get("unattended")
+            if isinstance(policy, dict):
+                return policy
+        return self._task_unattended_policy(task)
+
+    def _restrict_unattended_selection(
+        self, task: dict[str, Any], selection: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Freeze only the explicitly approved report tools for an occurrence."""
+        policy = self._task_unattended_policy(task)
+        if not policy:
+            return selection
+        allowed = unattended_allowed_tools(policy)
+        restricted = dict(selection)
+        kept = [
+            (schema, name, spec)
+            for schema, name, spec in zip(
+                selection.get("schemas") or [],
+                selection.get("names") or [],
+                selection.get("specs") or [],
+            )
+            if name in allowed
+        ]
+        removed = set(selection.get("names") or []) - {
+            name for _schema, name, _spec in kept
+        }
+        restricted["schemas"] = [item[0] for item in kept]
+        restricted["names"] = [item[1] for item in kept]
+        restricted["specs"] = [item[2] for item in kept]
+        restricted["modules"] = sorted({
+            str(item[2].get("module") or "builtin") for item in kept
+        })
+        restricted["tokens"] = sum(
+            util.token_len(util.dumps(item[0])) for item in kept
+        )
+        exclusions = list(selection.get("exclusions") or [])
+        exclusions.extend({
+            "tool": name, "module": "policy", "risk": "restricted",
+            "tokens": 0, "reason": "unattended_policy",
+            "detail": "outside the explicitly approved unattended policy",
+        } for name in sorted(removed))
+        restricted["exclusions"] = exclusions
+        return restricted
+
+    def _unattended_now(
+        self, task: dict[str, Any], run_id: str
+    ) -> dt.datetime:
+        run_meta = self._run_meta(run_id)
+        task_meta = util.loads(task.get("meta") or "{}", {})
+        due = task_meta.get("scheduled_for")
+        now = util.parse_iso(str(due)) if due else util.now_utc()
+        timezone = str(run_meta.get("unattended_timezone") or "UTC")
+        return now.astimezone(resolve_zone(timezone))
 
     def _frozen_spec(self, run_id: str, name: str) -> ToolSpec | None:
         """The run's frozen definition for one tool, or ``None``.
@@ -602,15 +685,20 @@ class AgentRuntime:
             # 1. Quick confirmation on a pending approval.
             pending = self.approvals.pending()
             if pending:
-                quick = self.approvals.maybe_quick_confirm(text, pending)
-                if quick and quick["kind"] == "decision":
-                    return self._apply_quick_decision(
-                        text, source, quick, pending
-                    )
+                # Substantive corrections are revisions, never approvals. Do
+                # this before the model-backed classifier: a small classifier
+                # once read "Actually change it to ..." as affirmative and
+                # executed the stale arguments. Exact yes/no handling remains
+                # in maybe_quick_confirm below.
                 target = self._revision_feedback_target(text, pending)
                 if target is not None:
                     return self._revise_from_user_message(
                         text, source, target
+                    )
+                quick = self.approvals.maybe_quick_confirm(text, pending)
+                if quick and quick["kind"] == "decision":
+                    return self._apply_quick_decision(
+                        text, source, quick, pending
                     )
                 if (
                     quick
@@ -788,6 +876,11 @@ class AgentRuntime:
             (approval["task_id"], self._task_domain(approval["task_id"]),
              message_id),
         )
+        # The resumed model must see the actual reply that resolved the card,
+        # not infer the user's intent from the old tool call alone.
+        self._append_transcript(
+            approval["run_id"], {"role": "user", "content": text}
+        )
         try:
             self.approvals.decide(
                 approval["id"], quick["decision"], decided_by=f"quick:{source}"
@@ -809,6 +902,97 @@ class AgentRuntime:
     # ------------------------------------------------------------------
     # Routing: domain, task resume, new task
     # ------------------------------------------------------------------
+
+    def _unique_waiting_answer(
+        self,
+        text: str,
+        routing: dict[str, Any],
+        domain_override: str | None,
+    ) -> dict[str, Any] | None:
+        """Route a context-free answer to one task that is awaiting it."""
+        if domain_override or self._looks_like_question(text):
+            return None
+        if len(text.split()) > 16 or _NEW_TOPIC_START_RE.match(text.strip()):
+            return None
+        waiting = [
+            task for task in self.tasks.list_open()
+            if task.get("status") == "waiting_user"
+            and (task.get("role") or "user") != "subagent"
+        ]
+        if len(waiting) != 1:
+            return None
+        task = waiting[0]
+        domain_id = str(routing.get("domain_id") or "general")
+        if domain_id not in ("general", task.get("domain_id")):
+            return None
+        # A strong route to another domain is a new topic, not an answer.
+        for candidate in routing.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            breakdown = candidate.get("breakdown") or {}
+            if (
+                candidate.get("domain_id") != task.get("domain_id")
+                and breakdown.get("auto_route")
+            ):
+                return None
+        return task
+
+    def _completed_continuation(
+        self,
+        text: str,
+        routing: dict[str, Any],
+        domain_override: str | None,
+    ) -> dict[str, Any] | None:
+        """Find a recent completed task explicitly referenced by a correction.
+
+        Completed work remains terminal. The caller opens a linked task with a
+        bounded receipt/history brief instead of resurrecting the old run.
+        """
+        candidates = [
+            task for task in self.tasks.list_recent(limit=30)
+            if task.get("status") == "completed"
+            and task.get("origin") == "user"
+            and (task.get("role") or "user") != "subagent"
+        ]
+        if not candidates:
+            return None
+        previous = candidates[0]
+        age = (
+            util.now_utc() - util.parse_iso(previous["last_activity_at"])
+        ).total_seconds()
+        if age < 0 or age > 2 * 3600:
+            return None
+        routed_domain = str(routing.get("domain_id") or "general")
+        if (
+            not domain_override
+            and routed_domain not in ("general", previous.get("domain_id"))
+        ):
+            return None
+        if not domain_override and routed_domain == "general":
+            for candidate in routing.get("candidates") or []:
+                if not isinstance(candidate, dict):
+                    continue
+                breakdown = candidate.get("breakdown") or {}
+                if (
+                    candidate.get("domain_id") != previous.get("domain_id")
+                    and breakdown.get("auto_route")
+                ):
+                    return None
+        direct = bool(_COMPLETED_CONTINUATION_CUE_RE.search(text))
+        if not direct and len(text.split()) <= 16:
+            # A model may forget ASK_USER_TAG. Preserve continuity when its
+            # final visible assistant message was plainly a question, without
+            # treating every completed task as resumable.
+            messages = self.messages.recent_for_task(previous["id"], limit=20)
+            assistant = next((
+                message for message in reversed(messages)
+                if message.get("role") == "assistant"
+                and str(message.get("content") or "").strip()
+            ), None)
+            direct = bool(
+                assistant and "?" in str(assistant.get("content") or "")
+            )
+        return previous if direct else None
 
     def _route_and_run(
         self, text: str, source: str, message_id: int,
@@ -851,6 +1035,16 @@ class AgentRuntime:
                 source=source,
             )
             domain_id = str(routing.get("domain_id") or "general")
+
+        waiting = self._unique_waiting_answer(text, routing, domain_override)
+        if waiting is not None:
+            self.events.record(
+                "task.resumed", task_id=waiting["id"],
+                data={"reason": "answer to the unique task waiting for input"},
+            )
+            self.tasks.touch(waiting["id"])
+            return self.resume_with_user_answer(waiting, text, message_id)
+
         candidate = self.tasks.find_resume_candidate(text, domain_id=domain_id)
 
         if candidate.get("ambiguous"):
@@ -882,14 +1076,42 @@ class AgentRuntime:
                 return self.resume_with_user_answer(existing, text, message_id)
             return self.resume_task(existing, text, message_id)
 
+        previous = self._completed_continuation(text, routing, domain_override)
+        task_meta: dict[str, Any] = {
+            "notes": "",
+            "routing": self._routing_payload(routing),
+        }
+        if previous is not None:
+            classified_domain = domain_id
+            if domain_override:
+                domain_id = domain_override
+            elif classified_domain == "general":
+                domain_id = str(previous.get("domain_id") or "general")
+            continuation = {
+                "from_task_id": previous["id"],
+                "classified_domain_id": classified_domain,
+                "inherited_domain_id": domain_id,
+            }
+            routing["continuation"] = continuation
+            routing["domain_id"] = domain_id
+            routing["reason"] = (
+                f"direct continuation of completed task {previous['id']}"
+            )
+            task_meta["continues_task_id"] = previous["id"]
+            task_meta["routing"] = self._routing_payload(routing)
         task = self.tasks.create(
             objective=text, domain_id=domain_id, origin="user",
-            origin_ref=str(message_id),
-            meta={
-                "notes": "",
-                "routing": self._routing_payload(routing),
-            },
+            origin_ref=str(message_id), meta=task_meta,
         )
+        if previous is not None:
+            self.events.record(
+                "task.continued", task_id=task["id"], domain_id=domain_id,
+                data={
+                    "from_task_id": previous["id"],
+                    "classified_domain_id": classified_domain,
+                    "inherited_domain_id": domain_id,
+                },
+            )
         return self.start_run(
             task, {"kind": "user", "routing": routing}, message_id
         )
@@ -954,6 +1176,10 @@ class AgentRuntime:
                 if isinstance(routing.get("inputs"), dict) else {}
             ),
             "fallback": routing.get("fallback"),
+            "continuation": (
+                util.loads(util.dumps(routing.get("continuation")))
+                if isinstance(routing.get("continuation"), dict) else None
+            ),
             "shadow": (
                 util.loads(util.dumps(routing.get("shadow")))
                 if isinstance(routing.get("shadow"), list) else []
@@ -1514,6 +1740,7 @@ class AgentRuntime:
             routing = None
         role = task.get("role") or "user"
         selection = self._select_tools(task.get("domain_id"), role)
+        selection = self._restrict_unattended_selection(task, selection)
         built = self.context.build(
             task=task, domain=self.domains.get(task["domain_id"])
             if task.get("domain_id") else None,
@@ -1542,6 +1769,15 @@ class AgentRuntime:
             "trigger": trigger,
             **self._model_stamp(),
         }
+        unattended = self._task_unattended_policy(task)
+        if unattended:
+            run_meta["unattended"] = unattended
+            schedule = self.app.scheduler.get_schedule(
+                str(task_meta.get("schedule_id") or "")
+            )
+            run_meta["unattended_timezone"] = str(
+                (schedule or {}).get("tz") or "UTC"
+            )
         # Inbox content is untrusted by definition. Seed the same taint list
         # that untrusted tool output uses, so every later side-effecting tool
         # is escalated to an explicit approval by the one existing rule.
@@ -1788,7 +2024,7 @@ class AgentRuntime:
             raise ValueError(
                 f"approval tool does not exist: {approval.get('tool')}"
             )
-        validated = validate_arguments(spec, arguments)
+        validated = validate_tool_arguments(spec, arguments)
 
         taint = self._taint_sources(approval["run_id"])
         if taint and spec.side_effects and not spec.read_only:
@@ -2205,6 +2441,10 @@ class AgentRuntime:
 
             # --- model call --------------------------------------------
             transcript = self._transcript(run)
+            if self.context.refresh_clock(transcript):
+                # Approval/retry resumes may happen on another day. Refresh
+                # only the clock, preserving the rest of the durable context.
+                self._save_run(run_id, transcript=util.dumps(transcript))
             tools_schema = self._run_schemas(run, task)
             prompt, repairs, repaired = self._prepare_prompt(
                 transcript, tools_schema, run_id=run_id
@@ -2760,7 +3000,7 @@ class AgentRuntime:
         validated_arguments: dict[str, Any] | None = None
         if known is not None:
             try:
-                validated_arguments = validate_arguments(
+                validated_arguments = validate_tool_arguments(
                     known, call.arguments
                 )
             except ToolError:
@@ -2795,6 +3035,42 @@ class AgentRuntime:
                 call, run_id=run_id, task_id=task_id, error=str(exc)
             )
             return {"status": "denied", "error": str(exc)}
+
+        unattended = self._unattended_policy(task, run_id)
+        unattended_authorized = False
+        if unattended:
+            allowed = unattended_allowed_tools(unattended)
+            if call.name not in allowed:
+                return {
+                    "status": "denied",
+                    "error": f"{call.name} is outside this run's explicitly "
+                             "approved unattended schedule policy",
+                }
+            if call.name == "web_search":
+                unattended_authorized = authorizes_web_search(
+                    unattended, call.arguments or {},
+                    self._unattended_now(task, run_id),
+                )
+                if not unattended_authorized:
+                    self.events.record(
+                        "schedule.capability_denied", task_id=task_id,
+                        run_id=run_id,
+                        data={"tool": call.name, "reason": "query template mismatch"},
+                    )
+                    return {
+                        "status": "denied",
+                        "error": "web_search arguments do not match an approved "
+                                 "unattended query template; no request was made",
+                    }
+            elif call.name == "update_task_notes":
+                if self._run_meta(run_id).get("unattended_notes_used"):
+                    return {
+                        "status": "denied",
+                        "error": "update_task_notes was already used for this "
+                                 "unattended occurrence; its one-write capability "
+                                 "is exhausted",
+                    }
+                unattended_authorized = True
 
         # create_domain is a virtual action: if the domain already exists, or
         # an identical proposal is already pending, do not ask again.
@@ -2901,8 +3177,11 @@ class AgentRuntime:
             }
         tainted_side_effect = bool(
             taint and spec.side_effects and not spec.read_only
+            and not unattended_authorized
         )
-        tainted_egress = bool(taint and spec.external_egress)
+        tainted_egress = bool(
+            taint and spec.external_egress and not unattended_authorized
+        )
         tainted_action = tainted_side_effect or tainted_egress
         escalated = tainted_action and spec.risk != "confirm"
         effective_risk = "confirm" if escalated else spec.risk
@@ -2918,6 +3197,13 @@ class AgentRuntime:
                     "external_egress": tainted_egress,
                 },
             )
+
+        if unattended and effective_risk == "confirm":
+            return {
+                "status": "denied",
+                "error": f"{call.name} would need approval, which is unavailable "
+                         "for this unattended occurrence; nothing was executed",
+            }
 
         if effective_risk == "confirm":
             pending = self.approvals.pending_for_run(run_id)
@@ -2948,6 +3234,15 @@ class AgentRuntime:
                 )
             except Exception as exc:
                 return {"status": "denied", "error": str(exc)}
+            if call.name == "schedule_task" and arguments.get("domain"):
+                wanted = str(arguments["domain"]).strip()
+                domain = self.domains.get(wanted) or self.domains.by_name(wanted)
+                if domain is None or domain.get("status") != "active":
+                    return {
+                        "status": "denied",
+                        "error": f"no active schedule domain: {wanted}",
+                    }
+                arguments["domain"] = domain["id"]
             if call.name in DOMAIN_WRITE_TOOLS:
                 wanted = str(arguments.get("domain") or "").strip()
                 domain = self.domains.get(wanted) or self.domains.by_name(wanted)
@@ -3102,14 +3397,14 @@ class AgentRuntime:
                 if call.name == "edit_skill":
                     lead = (
                         "I want to refine an **agent-created skill**. Review "
-                        "the full bounded body below; approval writes a new "
-                        "draft version and never activates it."
+                        "the full bounded body below; approval saves and "
+                        "activates the new version."
                     )
                 else:
                     lead = (
-                        "I want to save a **draft skill**. Review the full "
-                        "bounded body below; approval writes a draft and "
-                        "never activates it."
+                        "I want to save and activate a **skill**. Review the "
+                        "full bounded body below; approval makes it active "
+                        "immediately. You can disable it later."
                     )
                 note = (
                     f"{lead}\n\n"
@@ -3142,6 +3437,22 @@ class AgentRuntime:
                 "approval_id": approval["id"],
                 "message": note,
             }
+
+        if unattended_authorized:
+            self.events.record(
+                "schedule.capability_used", task_id=task_id, run_id=run_id,
+                data={
+                    "tool": call.name,
+                    "arguments_hash": self._args_hash(call.arguments or {}),
+                },
+            )
+            if call.name == "update_task_notes":
+                # Mark before dispatch so interruption/recovery cannot repeat a
+                # write whose outcome may be unknown. Provenance is still
+                # recorded by the normal notes handler and taint ledger.
+                meta = self._run_meta(run_id)
+                meta["unattended_notes_used"] = True
+                self._save_meta(run_id, meta)
 
         ctx = self.app.tool_context(run_id, task_id, task.get("domain_id"))
         # Carry the taint origin into execution so memory handlers can

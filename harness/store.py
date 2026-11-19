@@ -419,7 +419,9 @@ class Domains:
         routing decision can be explained without a model call.
 
         Routing never creates a domain. A clear non-General winner above the
-        threshold wins; weak or ambiguous evidence falls back to ``general``.
+        threshold wins only with a name/keyword, two distinct explicit terms,
+        or corroborated learned evidence. Weak candidates remain hints and
+        fall back to ``general``; ambiguous eligible evidence does the same.
         """
         words = self._routing_terms(text)
         surface_forms = self._surface_forms(text)
@@ -460,8 +462,18 @@ class Domains:
         specific = [
             item for item in candidates if item["domain_id"] != GENERAL_DOMAIN
         ]
-        best = specific[0] if specific else None
-        runner_up = specific[1] if len(specific) > 1 else None
+        # A weak description/example word must not select a domain by itself.
+        # Explicit names/keywords, two distinct explicit terms, or corroborated
+        # learned evidence are eligible; weaker candidates remain visible as
+        # hints. This keeps conversational words such as "help" from becoming
+        # accidental routing labels while preserving keywordless learned
+        # domains backed by durable memories or active skills.
+        eligible = [
+            item for item in specific
+            if item["breakdown"].get("auto_route")
+        ]
+        best = eligible[0] if eligible else None
+        runner_up = eligible[1] if len(eligible) > 1 else None
         threshold = float(self._threshold())
         margin = float(self._margin())
 
@@ -490,15 +502,22 @@ class Domains:
         matched = list(winner_breakdown.get("matched") or [])
 
         hint = None
-        if chosen == GENERAL_DOMAIN and best is not None:
+        hint_candidate = specific[0] if specific else None
+        if chosen == GENERAL_DOMAIN and hint_candidate is not None:
             hint_min = float(self._hint_min_score())
-            if float(best["score"]) >= hint_min:
+            if float(hint_candidate["score"]) >= hint_min:
                 hint = {
-                    "domain_id": best["domain_id"],
-                    "name": best["name"],
-                    "score": best["score"],
+                    "domain_id": hint_candidate["domain_id"],
+                    "name": hint_candidate["name"],
+                    "score": hint_candidate["score"],
                     "matched": list(
-                        best["breakdown"].get("matched") or []
+                        hint_candidate["breakdown"].get("matched") or []
+                    ),
+                    "auto_route": bool(
+                        hint_candidate["breakdown"].get("auto_route")
+                    ),
+                    "model_hint": bool(
+                        hint_candidate["breakdown"].get("model_hint", True)
                     ),
                 }
 
@@ -513,20 +532,34 @@ class Domains:
             "hint": hint,
         }
 
+    @staticmethod
+    def _validated_task_affinity(task: dict[str, Any]) -> bool:
+        meta = util.loads(task.get("meta") or "{}", {})
+        routing = meta.get("routing") if isinstance(meta, dict) else None
+        if not isinstance(routing, dict) or not routing:
+            return True
+        corrected = bool(
+            routing.get("corrected_to") or routing.get("corrected_from")
+        )
+        explicit = routing.get("reason") == "explicit domain from the user"
+        return corrected or explicit
+
     def task_affinity(
         self, text: str, limit: int = 200
     ) -> dict[str, list[str]]:
         """Return learned task terms grouped by domain.
 
         Recent non-subagent task objectives are inspected in deterministic
-        activity order. Only terms shared with the message are returned, at
-        most three per domain; General is excluded because it is global.
+        activity order. Automatically routed objectives are excluded until a
+        user explicitly selects or corrects the domain, preventing false routes
+        from becoming their own training labels. Only terms shared with the
+        message are returned, at most three per domain; General is excluded.
         """
         words = self._routing_terms(text)
         if not words or limit <= 0:
             return {}
         rows = self.db.query(
-            "SELECT id, domain_id, objective FROM tasks "
+            "SELECT id, domain_id, objective, meta FROM tasks "
             "WHERE COALESCE(role, 'user') != 'subagent' "
             "AND domain_id IS NOT NULL AND domain_id != ? "
             "ORDER BY last_activity_at DESC, id ASC LIMIT ?",
@@ -536,6 +569,14 @@ class Domains:
         for row in rows_to_dicts(rows):
             domain_id = str(row.get("domain_id") or "")
             if not domain_id or domain_id == GENERAL_DOMAIN:
+                continue
+            # Automatically routed work is an unvalidated prediction, not a
+            # new training label. Otherwise one false assignment teaches its
+            # generic objective vocabulary back to the same domain and
+            # reinforces the mistake on later turns. Explicit user domain
+            # selection and durable corrections are safe to learn from;
+            # legacy/test rows without routing metadata retain their behavior.
+            if not self._validated_task_affinity(row):
                 continue
             overlap = words & self._routing_terms(str(row.get("objective") or ""))
             if not overlap:
@@ -577,7 +618,7 @@ class Domains:
         message_words = self._routing_terms(text)
         for task in open_tasks or []:
             domain_id = task.get("domain_id")
-            if not domain_id:
+            if not domain_id or not self._validated_task_affinity(task):
                 continue
             overlap = message_words & self._routing_terms(
                 str(task.get("objective") or "")
@@ -662,6 +703,19 @@ class Domains:
                 if surface not in matched:
                     matched.append(surface)
         score = round(sum(float(item["contribution"]) for item in signals.values()), 4)
+        explicit_terms = set().union(
+            name_matches, keyword_matches, example_matches, description_matches
+        )
+        auto_route = bool(
+            name_matches or keyword_matches
+            or len(explicit_terms) >= 2
+            or len(learned_matches) >= 2
+        )
+        conversational = {"help", "create", "use", "domain", "general", "one", "yeah", "now"}
+        model_hint = bool(
+            auto_route or not explicit_terms
+            or explicit_terms - conversational
+        )
         breakdown = {
             "domain_id": domain["id"],
             "name": domain["name"],
@@ -669,6 +723,9 @@ class Domains:
             "factor": factor,
             "signals": signals,
             "matched": matched,
+            "explicit_terms": sorted(explicit_terms),
+            "auto_route": auto_route,
+            "model_hint": model_hint,
         }
         return {
             "domain_id": domain["id"],
@@ -677,6 +734,8 @@ class Domains:
             "breakdown": breakdown,
             "signals": signals,
             "matched": matched,
+            "auto_route": auto_route,
+            "model_hint": model_hint,
         }
 
     def _routing_terms(self, text: str) -> set[str]:
@@ -1204,14 +1263,17 @@ class Tasks:
             (now,),
         ))
 
-    def set_domain(self, task_id: str, domain_id: str) -> dict[str, Any]:
+    def set_domain(
+        self, task_id: str, domain_id: str, *,
+        reason: str = "domain changed by user",
+    ) -> dict[str, Any]:
         self.db.execute(
             "UPDATE tasks SET domain_id=?, updated_at=? WHERE id=?",
             (domain_id, util.iso(), task_id),
         )
         self.events.record(
             "task.domain", task_id=task_id, domain_id=domain_id,
-            data={"reason": "domain changed by user"},
+            data={"reason": reason},
         )
         return self.get(task_id)  # type: ignore[return-value]
 

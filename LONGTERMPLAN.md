@@ -15,6 +15,9 @@ Non-negotiables:
 
 1. One process and one writer per data directory; one bounded agent runtime.
 2. Exact-argument approvals and honest unknown outcomes after interruption.
+   Unattended exceptions must be explicit schedule-scoped capabilities: bounded
+   fixed query templates and at most one provenance-preserving notes write per
+   occurrence, frozen and audited. There is no general schedule-origin bypass.
 3. SQLite is authoritative; durable changes have provenance and audit records.
 4. Untrusted content cannot silently authorize state changes or external data
    transmission. Read-only does not mean safe for confidentiality.
@@ -70,29 +73,63 @@ Non-negotiables:
   become ordinary assertions and can gate a run; optional rubrics remain
   separate quality measurements.
 
+### Real-use corrective release
+
+- Approval replies now process substantive revision feedback before the quick
+  classifier, and the resolving reply enters the owning run transcript. A
+  correction can no longer be mistaken for approval of stale arguments.
+- Calendar writes reject explicit `all_day: false` with date-only input instead
+  of silently creating an all-day event; mutation results carry canonical
+  titles/times. Rename guidance and linked receipts prefer update-by-UID.
+- Automatically routed task objectives no longer become unvalidated routing
+  labels. Weak generic evidence falls back or remains a bounded hint, and
+  learned-only confidence is capped. Unique waiting answers resume correctly;
+  explicit recent corrections open linked tasks with history and action state
+  while completed tasks stay terminal.
+- Schedule fields are validated before approval, results include UTC and
+  schedule-local next-run values plus timezone/domain, and the clock refreshes
+  before every model call. Web search supports optional recency and publication
+  metadata without rewriting historical queries.
+- User-approved `propose_skill` and `edit_skill` calls now activate the approved
+  version and domain bindings immediately. Automatic builder proposals remain
+  drafts; disabling is an explicit reversible action.
+- Unattended schedules can carry a narrow user-approved report policy: fixed
+  web-query templates with date-only placeholders, optional recency, and at most
+  one taint-preserving notes write per occurrence. Other calls fail closed
+  instead of waiting for approval. Local CalDAV may be declared inside the
+  confidentiality boundary explicitly; its content remains untrusted and writes
+  still require approval.
+
 ## 3. Current evidence, not aspirational metrics
 
-- Deterministic pytest: **591 passed**.
-- Complete deterministic scenario run: **97/109 passed**; the other 12 are
-  explicitly non-gating routing measurements. The core non-measurement suite
-  also passes **36/36 scenarios and 291/291 assertions**.
-- Live Qwen3.5-9B passed **13/14 scenarios and 133/134 assertions**;
-  MiniCPM5-2B passed **12/14 and 131/134**, including two critical
-  hostile-inbox runaway-bound failures. The required contradiction case failed
-  in both, so no 100% claim is made. Rubric means were 95.2% and 92.9%.
-- On hostile inbox input, Qwen scored 100% with no tool calls; MiniCPM scored
-  71.4% with nine calls and exceeded both bounds. Qwen remains the
-  quality/default path. One repeat is
-  not enough evidence for automatic model routing.
+- Deterministic pytest after the real-use corrections: **628 passed**.
+- Complete deterministic scenario run after those corrections: **97/109 passed**
+  and **372/384 assertions**; the other 12 are the same explicitly non-gating
+  routing measurements as before. Every non-measurement scenario passed.
+- Current full live Qwen3.5-9B evaluation passed **19/20 scenarios and 167/168
+  assertions**, with zero critical failures and a 95.6% rubric mean. The only
+  failure is the already-known `j_live_conflicting_instruction` required rubric
+  (42.86%), so there is no 100% claim. The new generic-routing and local-noon
+  scenarios passed **18/18 assertions** within that run.
+- Separate live endpoint tests updated the referenced calendar UID without
+  recreating an event and completed an unattended two-query research run with
+  current-year queries, recency, source URLs, and no approvals.
+- Historical comparison: MiniCPM5-2B passed **12/14 and 131/134**, including two
+  critical hostile-inbox runaway-bound failures. Qwen scored 100% on that input
+  with no tool calls; MiniCPM scored 71.4% with nine calls and exceeded both
+  bounds. Qwen remains the quality/default path. One repeat is not enough
+  evidence for automatic model routing.
 - Full 65-case live routing bake-off: lexical base/held-out accuracy was
   **92.7% / 20%** with **0% wrong-domain**. The constrained LLM strategy was
   **92.7% / 90%**, with **5.45% wrong-domain on base** and approximately
   one-second routing latency. It improves weak/paraphrased evidence but is not
   a safe global default. Lexical stays default; semantic routing is an opt-in
   fallback candidate pending real-use correction data.
-- Raw live and aggregate reports are curated under `eval/results/` with code
-  and scenario fingerprints. Historical reports are experiments, not current
-  release claims; check corpus version and source identity before comparing.
+- Current correction artifacts are `eval/results/real_use_fixes_final.*` and
+  `eval/results/live_full_real_use_fixes.*`, with code/scenario/config identity.
+  Raw live and aggregate reports are curated under `eval/results/`; historical
+  reports are experiments, not current release claims. Check corpus version and
+  source identity before comparing.
 
 ## 4. Known alpha limitations
 
@@ -107,8 +144,9 @@ Non-negotiables:
 3. **Confidentiality needs more work.** Taint now gates subsequent egress, but
    the first external request can still contain sensitive context. A future
    policy needs argument-level/data-flow controls, not only run-level taint.
-4. **Routing is not yet validated on real domains.** Composite and follow-up
-   requests, multilingual input, and domain lifecycle operations need real-use
+4. **Routing needs broader real-domain validation.** The reported generic-token
+   false positives are now regressions, but composite requests, multilingual
+   input, domain lifecycle operations, and new domains still need time-split
    evidence. Semantic strategies remain opt-in.
 5. **Storage lifecycle is incomplete.** Messages, transcripts, revisions,
    access records, events, artifacts, and backups need retention and true

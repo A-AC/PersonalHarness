@@ -1,0 +1,96 @@
+scenarios:
+  - id: l_live_generic_testing_stays_general
+    name: Generic testing chatter does not self-route to health
+    category: live_behavior
+    severity: high
+    description: >
+      Real-use regression: ordinary words such as bit and testing must not turn
+      a harness testing discussion into health work or trigger a domain switch.
+    modes: [live]
+    tags: [live, routing, real_use]
+    fixtures:
+      domains:
+        - name: health
+          description: >
+            Health, nutrition, gym, medicine, and overall wellness topics where
+            I can help with information, planning, and guidance.
+          keywords: [health, nutrition, gym, medicine, wellness, fitness, drugs]
+          examples:
+            - help me plan my nutrition
+            - what should I eat for breakfast
+            - gym workout ideas
+        - name: harness
+          description: JARVIS harness development, memory, context, and domains
+          keywords: [harness, JARVIS, development, assistant, system]
+          examples: [JARVIS development, harness improvements]
+    steps:
+      - kind: turn
+        name: discuss testing without health evidence
+        input: >
+          I will not tell you the specifics as to not skew your results, but we
+          will probably be in a testing phase for a bit of time to determine
+          what works and what doesnt! but dont worry you will be kept safe!
+        expect:
+          status: completed
+          routing:
+            domain: General
+          task:
+            domain: General
+          tools:
+            none:
+              - tool: use_domain
+                status: succeeded
+              - tool: create_domain
+                status: succeeded
+          run:
+            iterations_max: 3
+            tool_calls_max: 1
+
+  - id: l_live_schedule_noon_reports_local_time
+    name: A noon schedule reports its local next run honestly
+    category: live_behavior
+    severity: high
+    description: >
+      Real-use regression: 12:00 America/Mexico_City is 18:00 UTC, but the
+      assistant must report the local noon value and invent no explanation.
+    modes: [live]
+    tags: [live, scheduling, timezone, real_use]
+    steps:
+      - kind: turn
+        name: propose the noon report
+        input: >
+          Use schedule_task to create a daily report named "AI research report"
+          at 12:00 every day in the America/Mexico_City timezone. Use that exact
+          timezone and time_of_day. Set the schedule prompt to "Research current
+          AI developments and include source links."
+        expect:
+          status: waiting_approval
+          approvals:
+            pending: 1
+            tool: schedule_task
+            arguments_contains: America/Mexico_City
+          schedules:
+            count: 0
+      - kind: approve
+        name: approve and summarize the schedule
+        expect:
+          status: completed
+          schedules:
+            count: 1
+            kind: daily
+            enabled: true
+          tools:
+            succeeded: [schedule_task]
+          quality:
+            required: true
+            min_score: 0.75
+            rubric:
+              - id: reports_noon
+                weight: 3
+                any: ["12:00", "noon", "12 pm"]
+              - id: names_timezone
+                weight: 2
+                any: ["America/Mexico_City", "Mexico City"]
+              - id: no_utc_misreading_or_invented_reason
+                weight: 3
+                none: ["6:00 pm", "6 pm", "calculated from now"]

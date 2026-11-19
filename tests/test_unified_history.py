@@ -7,6 +7,8 @@ inspectable but out of the ordinary chat view.
 
 from __future__ import annotations
 
+from harness import util
+
 
 def test_web_and_cli_share_runtime_and_state(make_app, client):
     app = make_app.build(scripts=[
@@ -167,3 +169,29 @@ def test_schedules_api_create_list_disable(make_app, client):
     # Validation errors are explicit, not crashes.
     bad = http.post("/api/schedules", json={"name": "", "prompt": "", "kind": "nope"})
     assert bad.status_code == 400
+
+
+def test_schedules_api_accepts_bounded_unattended_policy(make_app, client):
+    app = make_app.build(default="ok")
+    http = client(app)
+    policy = {
+        "web_queries": [{
+            "query": "AI news {current_year}", "time_range": "week",
+            "max_results": 5, "categories": "",
+        }],
+        "allow_task_notes": False,
+    }
+    created = http.post("/api/schedules", json={
+        "name": "api-news", "prompt": "Report current AI news",
+        "kind": "daily", "time_of_day": "12:00",
+        "tz": "America/Mexico_City", "unattended": policy,
+    })
+    assert created.status_code == 200
+    schedule = created.json()["schedule"]
+    assert util.loads(schedule["meta"], {})["unattended"] == policy
+    rejected = http.post("/api/schedules", json={
+        "name": "unsafe-news", "prompt": "Report", "kind": "daily",
+        "time_of_day": "12:00",
+        "unattended": {"web_queries": [{"query": "{user_input}"}]},
+    })
+    assert rejected.status_code == 400

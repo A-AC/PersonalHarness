@@ -1,12 +1,12 @@
-# E. Modules: skill drafts/lifecycle/disclosure, taint refusal, MCP tools.
+# E. Modules: skill lifecycle/disclosure, taint refusal, MCP tools.
 scenarios:
   - id: e_skill_propose_activate_disclose
-    name: Skill proposals become drafts only after approval
+    name: Skill proposals activate after approval
     category: modules
     severity: critical
     description: >
-      propose_skill is approval-gated. Approval creates a draft, the draft is
-      not disclosed as active instructions, and activation makes it visible.
+      propose_skill is approval-gated. Approval saves and activates the skill,
+      making it immediately visible; disabling remains an optional later action.
     modes: [deterministic]
     tags: [skills, approvals]
     steps:
@@ -35,43 +35,24 @@ scenarios:
               - tool: propose_skill
                 status: succeeded
       - kind: approve
-        name: approve the draft
+        name: approve and activate the skill
         script:
-          - content: "Draft saved."
+          - content: "Skill saved and active."
         expect:
           status: completed
           modules:
             statuses:
-              "skill:weekly-review": draft
+              "skill:weekly-review": active
           approvals:
             statuses:
               executed: 1
           tools:
             succeeded: [propose_skill]
           events:
-            include: [approval.approved, skill.draft_proposed]
+            include: [approval.approved, skill.activated]
       - kind: turn
-        name: a draft is not active instructions
+        name: an approved skill is active instructions
         input: "Use the weekly review procedure for this week."
-        script:
-          - content: "Here is this week's review."
-        expect:
-          status: completed
-          context:
-            system_not_contains:
-              - "## Skill: weekly review"
-              - "Gather open tasks"
-      - kind: module_status
-        name: activate the draft
-        id: "skill:weekly-review"
-        action: activate
-        expect:
-          modules:
-            statuses:
-              "skill:weekly-review": active
-      - kind: turn
-        name: an active skill is disclosed
-        input: "Run the weekly review procedure now."
         script:
           - content: "Here is this week's review."
         expect:
@@ -80,14 +61,33 @@ scenarios:
             system_contains:
               - "## Skill: weekly review"
               - "Gather open tasks"
+      - kind: module_status
+        name: disable the active skill
+        id: "skill:weekly-review"
+        action: disable
+        expect:
+          modules:
+            statuses:
+              "skill:weekly-review": disabled
+      - kind: turn
+        name: a disabled skill is not disclosed
+        input: "Run the weekly review procedure now."
+        script:
+          - content: "The procedure is disabled."
+        expect:
+          status: completed
+          context:
+            system_not_contains:
+              - "## Skill: weekly review"
+              - "Gather open tasks"
 
   - id: e_skill_edit_requires_approval
-    name: Editing an agent-owned skill creates a new draft after approval
+    name: Editing an agent-owned skill activates the approved version
     category: modules
     severity: high
     description: >
       An edit is approval-gated and does not change the active skill before the
-      decision. Approval writes a new draft version, never an auto-activation.
+      decision. Approval saves and activates the new version.
     modes: [deterministic]
     tags: [skills, approvals]
     fixtures:
@@ -124,12 +124,12 @@ scenarios:
       - kind: approve
         name: approve the edit
         script:
-          - content: "The refined draft is saved."
+          - content: "The refined skill is active."
         expect:
           status: completed
           modules:
             statuses:
-              "skill:rack-procedure": draft
+              "skill:rack-procedure": active
           tools:
             succeeded: [edit_skill]
           events:

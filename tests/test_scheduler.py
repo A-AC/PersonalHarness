@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from harness import util
+from harness.tools import ToolSpec
 
 
 def _past(minutes: float = 5) -> str:
@@ -34,6 +37,55 @@ def test_scheduled_prompt_submitted_at_due_time_and_timezone(make_app):
                    (_past(), schedule["id"]))
     submitted = app.scheduler.submit_due()
     assert len(submitted) == 1
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"kind": "daily"},
+    {"kind": "daily", "time_of_day": "25:00"},
+    {"kind": "weekly", "time_of_day": "12:00"},
+    {"kind": "weekly", "weekday": "mon"},
+    {"kind": "interval"},
+    {"kind": "interval", "interval_s": 0},
+])
+def test_schedule_requires_explicit_kind_specific_fields(make_app, kwargs):
+    app = make_app.build(default="ok")
+    with pytest.raises(ValueError):
+        app.scheduler.create_schedule(
+            name="invalid", prompt="do not schedule", **kwargs,
+        )
+    assert app.scheduler.list_schedules() == []
+
+
+def test_schedule_local_due_uses_schedule_timezone(make_app):
+    app = make_app.build(default="ok")
+    schedule = app.scheduler.create_schedule(
+        name="noon-report", prompt="research", kind="daily",
+        time_of_day="12:00", tz="America/Mexico_City",
+    )
+    local = dt.datetime.fromisoformat(app.scheduler.next_due_local(schedule))
+    utc = util.parse_iso(schedule["next_due_at"])
+    assert (local.hour, local.minute) == (12, 0)
+    assert local.utcoffset() == dt.timedelta(hours=-6)
+    assert (utc.hour, utc.minute) == (18, 0)
+
+
+def test_task_schedule_can_explicitly_target_an_active_domain(make_app):
+    app = make_app.build(default="ok")
+    owner = app.tasks.create(objective="create AI schedule", origin="user")
+    domain = app.domains.create(
+        "dom_ai", name="ai_research", description="AI research",
+        created_by="test",
+    )
+    schedule = app.scheduler.create_for_task(
+        owner["id"], name="AI report", prompt="Report AI news",
+        kind="daily", time_of_day="12:00", target_domain_id=domain["id"],
+    )
+    assert schedule["domain_id"] == domain["id"]
+    with pytest.raises(ValueError):
+        app.scheduler.create_for_task(
+            owner["id"], name="bad", prompt="bad", kind="daily",
+            time_of_day="12:00", target_domain_id="missing",
+        )
 
 
 def test_schedules_survive_restart(make_app):
@@ -196,6 +248,179 @@ def test_scheduled_task_approval_pauses_and_resumes_same_run(make_app):
         (task["id"],),
     )["c"]
     assert executions == 1
+
+
+def _register_fake_web(app, calls):
+    def search(ctx, arguments):
+        calls.append(dict(arguments))
+        return {
+            "results": [{
+                "title": "Current AI news", "url": "https://example.com/current",
+                "snippet": "Current developments",
+            }],
+            "sources": ["https://example.com/current"],
+        }
+    app.tools.register(ToolSpec(
+        name="web_search", description="fake web search",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "categories": {"type": "string"},
+                "max_results": {"type": "integer"},
+                "time_range": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+        risk="low", handler=search, external_egress=True,
+        read_only=True, untrusted_output=True,
+    ))
+
+
+def test_unattended_schedule_runs_only_approved_research_capabilities(make_app):
+    calls = []
+    app = make_app.build(scripts=[])
+    _register_fake_web(app, calls)
+    owner = app.tasks.create(objective="own the report", origin="user")
+    policy = {
+        "web_queries": [
+            {"query": "local AI news {current_year}", "max_results": 5,
+             "categories": "", "time_range": "week"},
+            {"query": "frontier AI news {current_date}", "max_results": 5,
+             "categories": "", "time_range": "week"},
+        ],
+        "allow_task_notes": True,
+    }
+    app.scheduler.create_for_task(
+        owner["id"], name="daily-news", prompt="Report current AI news",
+        kind="once", at_ts=_past(), unattended=policy, tz="UTC",
+    )
+    item = app.scheduler.submit_due()[0]
+    task = item["task"]
+    scheduled_for = util.parse_iso(app.tasks.meta(task["id"])["scheduled_for"])
+    year = scheduled_for.strftime("%Y")
+    date = scheduled_for.strftime("%Y-%m-%d")
+    app.model.scripts.extend([
+        {"tool_calls": [{"name": "web_search", "arguments": {
+            "query": f"local AI news {year}", "time_range": "week",
+        }}]},
+        {"tool_calls": [{"name": "web_search", "arguments": {
+            "query": f"frontier AI news {date}", "time_range": "week",
+        }}]},
+        {"tool_calls": [{"name": "update_task_notes", "arguments": {
+            "notes": "Current report notes",
+        }}]},
+        {"tool_calls": [{"name": "update_task_notes", "arguments": {
+            "notes": "This second write must be denied",
+        }}]},
+        {"content": "Report with https://example.com/current"},
+    ])
+    result = app.runtime.start_run(
+        task, {"kind": "schedule", "name": "daily-news"},
+    )
+    assert result.status == "completed"
+    assert app.approvals.pending() == []
+    assert len(calls) == 2
+    notes = app.tasks.meta(task["id"])
+    assert notes["notes"] == "Current report notes"
+    assert notes["notes_tainted"]
+    toolset = util.loads(app.db.query_one(
+        "SELECT meta FROM runs WHERE id=?", (result.run_id,)
+    )["meta"], {})["toolset"]
+    assert set(toolset["names"]) == {"web_search", "update_task_notes"}
+    transcript = util.loads(app.db.query_one(
+        "SELECT transcript FROM runs WHERE id=?", (result.run_id,)
+    )["transcript"], [])
+    assert any(
+        "update_task_notes" in str(message)
+        and "unattended" in str(message).lower()
+        for message in transcript if message.get("role") == "tool"
+    )
+    assert "This second write must be denied" not in notes["notes"]
+
+
+def test_unattended_schedule_denies_unapproved_query_without_approval(make_app):
+    calls = []
+    app = make_app.build(scripts=[])
+    _register_fake_web(app, calls)
+    owner = app.tasks.create(objective="own the report", origin="user")
+    app.scheduler.create_for_task(
+        owner["id"], name="daily-news", prompt="Report current AI news",
+        kind="once", at_ts=_past(), unattended={
+            "web_queries": [{"query": "approved AI news {current_year}"}],
+            "allow_task_notes": False,
+        },
+    )
+    task = app.scheduler.submit_due()[0]["task"]
+    app.model.scripts.extend([
+        {"tool_calls": [{"name": "web_search", "arguments": {
+            "query": "unapproved private calendar details",
+        }}]},
+        {"content": "I could not use an unapproved query."},
+    ])
+    result = app.runtime.start_run(
+        task, {"kind": "schedule", "name": "daily-news"},
+    )
+    assert result.status == "completed"
+    assert calls == []
+    assert app.approvals.pending() == []
+    assert not any(
+        event["type"] == "approval.created" for event in app.events.list()
+    )
+
+
+def test_schedule_tool_result_contains_local_time_and_target_domain(make_app):
+    app = make_app.build(scripts=[])
+    domain = app.domains.create(
+        "dom_ai", name="ai_research", description="AI research",
+        created_by="test",
+    )
+    app.model.scripts.extend([
+        {"tool_calls": [{"name": "schedule_task", "arguments": {
+            "name": "AI report", "prompt": "Report AI news", "kind": "daily",
+            "time_of_day": "12:00", "tz": "America/Mexico_City",
+            "domain": "ai_research",
+        }}]},
+        {"content": "Schedule created."},
+    ])
+    result = app.runtime.submit_user_message("Schedule the AI report")
+    assert result.status == "waiting_approval"
+    approval = app.approvals.pending()[0]
+    app.approvals.decide(approval["id"], "approve", decided_by="web")
+    resumed = app.runtime.resume_after_approval(approval, "web")
+    assert resumed.status == "completed"
+    execution = app.db.query_one(
+        "SELECT result FROM tool_executions WHERE run_id=? AND tool='schedule_task'"
+        " AND status='succeeded'", (result.run_id,),
+    )
+    payload = util.loads(execution["result"], {})
+    local = dt.datetime.fromisoformat(payload["next_due_at_local"])
+    assert (local.hour, local.minute) == (12, 0)
+    assert payload["timezone"] == "America/Mexico_City"
+    assert payload["time_of_day"] == "12:00"
+    assert payload["domain_id"] == domain["id"]
+    assert util.parse_iso(payload["next_due_at"]).hour == 18
+
+
+def test_underspecified_schedule_is_denied_before_approval(make_app):
+    app = make_app.build(scripts=[
+        {"tool_calls": [{"name": "schedule_task", "arguments": {
+            "name": "AI report", "prompt": "Report AI news", "kind": "daily",
+        }}]},
+        {"content": "I need a specific time first."},
+    ])
+    result = app.runtime.submit_user_message("Schedule the AI report")
+    assert result.status == "completed"
+    assert app.approvals.pending() == []
+    assert app.scheduler.list_schedules() == []
+    transcript = util.loads(app.db.query_one(
+        "SELECT transcript FROM runs WHERE id=?", (result.run_id,)
+    )["transcript"], [])
+    assert any(
+        "time_of_day" in str(message.get("content") or "")
+        and "denied" in str(message.get("content") or "")
+        for message in transcript if message.get("role") == "tool"
+    )
 
 
 def test_heartbeat_does_not_overlap(make_app):

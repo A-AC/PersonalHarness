@@ -29,6 +29,7 @@ from .config import save_config
 from .db import Database, rows_to_dicts
 from .memory import MemoryError, MemoryManager
 from .model import ToolCall
+from .schedule_policy import validate_schedule_request
 from .store import Domains, Events, Messages, Tasks
 
 RISK_LOW = "low"
@@ -216,6 +217,21 @@ def validate_create_domain_arguments(arguments: dict[str, Any]) -> dict[str, Any
                 "non-empty value"
             )
     return arguments
+
+
+def validate_tool_arguments(
+    spec: ToolSpec, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate schema and tool-specific requirements before any approval."""
+    cleaned = validate_arguments(spec, arguments)
+    if spec.name == "create_domain":
+        validate_create_domain_arguments(cleaned)
+    if spec.name == "schedule_task":
+        try:
+            validate_schedule_request(cleaned)
+        except ValueError as exc:
+            raise ToolError(f"schedule_task: {exc}") from exc
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -801,10 +817,7 @@ class ToolRegistry:
             if snapshot is not None
             else self.resolve(call.name, allowed=allowed, role=role)
         )
-        validated = validate_arguments(spec, call.arguments)
-        if spec.name == "create_domain":
-            validate_create_domain_arguments(validated)
-        return validated
+        return validate_tool_arguments(spec, call.arguments)
 
     def record_rejected(
         self, call: ToolCall, *, run_id: str, task_id: str, error: str
@@ -1234,7 +1247,10 @@ class ToolRegistry:
                 "runtime later. Use only for recurring or delayed work the "
                 "user wants. It requires approval, is bound to this task, and "
                 "is capped by scheduler.max_schedules_per_task and "
-                "scheduler.max_schedule_depth."
+                "scheduler.max_schedule_depth. Resolve all required times "
+                "before proposing it. An optional unattended policy authorizes "
+                "only the exact dated web-query templates and optional single "
+                "notes write shown in the approval; it is not a general bypass."
             ),
             parameters={
                 "type": "object",
@@ -1271,6 +1287,27 @@ class ToolRegistry:
                         "type": "string",
                         "description": "System or IANA timezone. Defaults to "
                             "the configured timezone.",
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Existing active domain id or exact name "
+                            "for scheduled work. Defaults to the task domain.",
+                    },
+                    "unattended": {
+                        "type": "object",
+                        "description": "Optional bounded report capability: "
+                            "web_queries (fixed templates with optional "
+                            "current_date/current_year/current_month "
+                            "placeholders) and allow_task_notes (at most one "
+                            "write per occurrence). Shown for exact approval.",
+                        "properties": {
+                            "web_queries": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
+                            "allow_task_notes": {"type": "boolean"},
+                        },
+                        "required": ["web_queries"],
                     },
                 },
                 "required": ["name", "prompt", "kind"],
@@ -1332,9 +1369,9 @@ class ToolRegistry:
             description=(
                 "Propose a reusable procedural skill for the user to review. "
                 "A skill is instruction text only: no code, handlers, or tool "
-                "schemas. The proposal becomes a draft only after explicit "
-                "approval, and drafts are never activated automatically. "
-                "Reusing the exact name of an existing skill you created "
+                "schemas. Explicit approval saves and activates the skill "
+                "immediately; the user can disable it later. Reusing the exact "
+                "name of an existing skill you created "
                 "revises it; imported and user-created skills cannot be "
                 "revised this way."
             ),
@@ -1370,7 +1407,7 @@ class ToolRegistry:
                 "required": ["name", "description", "body"],
             },
             risk=RISK_CONFIRM,
-            # Durable cross-run state: approving writes a draft skill row.
+            # Durable cross-run state: approving writes and activates a skill.
             # This also keeps skill writes out of "approve all safe" and hides
             # the always-allow control, which cannot apply to skill writes.
             side_effects=True,
@@ -1381,8 +1418,8 @@ class ToolRegistry:
             description=(
                 "Refine a skill the agent created. Use the existing skill "
                 "name; omitted fields keep their current values. A skill is "
-                "instruction text only, and the edit becomes a new draft "
-                "version only after explicit approval. Imported and "
+                "instruction text only, and explicit approval saves and "
+                "activates the new version. Imported and "
                 "user-created skills cannot be edited by the agent."
             ),
             parameters={
@@ -1420,7 +1457,7 @@ class ToolRegistry:
                 "required": ["name"],
             },
             risk=RISK_CONFIRM,
-            # Durable cross-run state: approving writes a new draft version.
+            # Durable cross-run state: approving activates the new version.
             side_effects=True,
             handler=self._tool_edit_skill,
         ))
@@ -1674,7 +1711,22 @@ class ToolRegistry:
             raise ToolError(f"domain {domain['name']} is archived")
         previous = ctx.tasks.get(ctx.task_id)
         previous_domain = previous["domain_id"] if previous else None
-        ctx.tasks.set_domain(ctx.task_id, domain["id"])
+        ctx.tasks.set_domain(
+            ctx.task_id, domain["id"], reason="domain changed by the model"
+        )
+        meta = ctx.tasks.meta(ctx.task_id)
+        routing = meta.get("routing")
+        if isinstance(routing, dict):
+            transitions = list(routing.get("domain_transitions") or [])
+            transitions.append({
+                "at": util.iso(), "actor": "model",
+                "from_domain_id": previous_domain,
+                "to_domain_id": domain["id"],
+                "reason": util.clip(str(args.get("reason") or ""), 500),
+            })
+            routing["domain_transitions"] = transitions[-12:]
+            meta["routing"] = routing
+            ctx.tasks.set_meta(ctx.task_id, meta)
         ctx.domain_id = domain["id"]
         briefing: dict[str, Any] = {}
         if ctx.briefing is not None:
@@ -1729,12 +1781,18 @@ class ToolRegistry:
             time_of_day=args.get("time_of_day"),
             weekday=args.get("weekday"),
             tz=args.get("tz"),
+            unattended=args.get("unattended"),
+            target_domain_id=args.get("domain"),
         )
         return {
             "schedule_id": schedule["id"],
             "name": schedule["name"],
             "kind": schedule["kind"],
             "next_due_at": schedule["next_due_at"],
+            "next_due_at_local": ctx.scheduler.next_due_local(schedule),
+            "timezone": schedule["tz"],
+            "time_of_day": schedule["time_of_day"],
+            "domain_id": schedule.get("domain_id"),
             "enabled": bool(schedule["enabled"]),
         }
 
@@ -1777,13 +1835,18 @@ class ToolRegistry:
             created_by="model",
             reason="proposed by the model and approved by the user",
         )
+        # This handler runs only after exact user approval. The approved
+        # procedure is immediately useful; disabling remains an explicit,
+        # reversible lifecycle action. Automatic builder drafts do not use this
+        # path and remain inactive until the user activates them.
+        module = ctx.skills.activate(module.id)
         return {
             "skill_id": module.id,
             "name": module.name,
             "version": module.version,
             "status": module.status,
             "scope": module.scope,
-            "note": "saved as a draft; activate it explicitly when ready",
+            "note": "saved and activated; disable it whenever you no longer want it",
         }
 
     def _tool_edit_skill(
@@ -1805,14 +1868,15 @@ class ToolRegistry:
             },
             reason="refined by the model and approved by the user",
         )
+        module = ctx.skills.activate(module.id)
         return {
             "skill_id": module.id,
             "name": module.name,
             "version": module.version,
             "status": module.status,
             "scope": module.scope,
-            "note": "saved as a draft revision; activate it explicitly when "
-                    "ready",
+            "note": "revision saved and activated; disable it whenever you no "
+                    "longer want it",
         }
 
 

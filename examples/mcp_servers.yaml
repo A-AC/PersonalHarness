@@ -105,6 +105,9 @@ servers:
   #   risk_default: confirm
   #   trust_annotations: true
   #   side_effects: true
+  #   # Opt in only when this CalDAV instance is inside your confidentiality
+  #   # boundary. Returned event content remains untrusted; writes still confirm.
+  #   external_egress: false
   #   startup: lazy
   #   timeout_s: 60
 

@@ -45,6 +45,16 @@ python harness/modules/web/server.py \
   --config harness/modules/web/web.example.json --probe
 ```
 
+## Tool arguments and recency
+
+`web_search` accepts `query`, optional `categories`, optional `max_results`,
+and optional `time_range` (`day`, `week`, `month`, or `year`). The recency value
+is forwarded to SearXNG and returned for audit; invalid values are rejected
+before a request. Historical queries are never rewritten. When SearXNG supplies
+`publishedDate`/`published`, a bounded `published_date` is included with the
+result. Dates are not inferred from snippets, and the server never fetches the
+linked page.
+
 ## Registering with the harness
 
 Copy `web.example.json` to `<data_dir>/modules/mcp/web.json` and edit it. The

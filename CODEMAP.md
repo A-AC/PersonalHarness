@@ -16,23 +16,24 @@ tests under the `live` marker.
 | `harness/logging.py` | Structured stdout + rotating file logs |
 | `harness/model.py` | Provider-aware `ModelClient` (OpenAI-compatible chat completions, native tool calls, Hermes fallback parsing, bounded retries, probe, `list_models`); `ScriptedModel` for tests |
 | `harness/providers.py` | Provider records and resolution, synthesized built-in `default` provider, model allowlists, catalogue construction, and explicit selection verification without fallback |
-| `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + routing evidence v2 with learned/task affinity), `RoutingFeedback` (durable correction labels and `k_routing`-format export), `Tasks` (statuses, resume-candidate scoring, parent/child tree relationships) |
+| `harness/store.py` | `Messages` (unified history + FTS search), `Events` (observability log), `Domains` (records + routing evidence v2 with learned/task affinity; automatic routes are not self-training labels and weak generic evidence is hint-only), `RoutingFeedback` (durable correction labels and `k_routing`-format export), `Tasks` (statuses, resume-candidate scoring, parent/child tree relationships) |
 | `harness/memory.py` | `MemoryManager`: explicit capture and correction, advisory possible conflicts (never implicit supersession), scopes/kinds, revisions + provenance, FTS retrieval with scope priority and cross-domain modes, General-as-global, always-on core profile, final-payload usage accounting with per-run dedupe, deterministic lifetime sweep, archive/read-only archived retrieval/explicit restore/pin, expiry, merge, bounded artifact reads with path containment, and artifact consistency checks |
-| `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules including conflict handling, state, domain instructions/descriptions/hints, memories and cross-domain labels, core profile, recent + retrieved history with provenance, registry-driven skill disclosure, cross-domain tool discovery), sub-agent mode, tainted-note/history/memory labelling, disclosure markers, and final inclusion/exclusion sources |
+| `harness/context.py` | `ContextBuilder`: budgeted system prompt (persona, operating rules, state, domain instructions/descriptions/hints, memories, core profile, recent + retrieved history with provenance, direct-continuation objectives/messages/approval and mutation receipts, registry-driven skill disclosure, cross-domain tool discovery), sub-agent mode, taint labelling, local + UTC clock refresh before model calls, disclosure markers, and final inclusion/exclusion sources |
 | `harness/tools.py` | `ToolRegistry` (builtin tools, JSON-schema-lite validation, risk classes, state-mutation vs external-egress vs untrusted-output policy, per-tool summaries, persistent risk overrides, trust flags, banned-name refusal, execution records, budgeted per-run schema selection and frozen spec metadata, synchronized atomic module replacement, frozen-schema/policy resolution, and fail-closed removed tools), result-carried untrusted provenance, minimal MCP stdio client with scrubbed child environments |
 | `harness/approvals.py` | `Approvals`: lifecycle (pending/approved/rejected/cancelled/executed/expired/revised/superseded), free-text revision, supersede chains (`supersedes_id`, argument diff), per-tool template summaries, expiry sweep, name-keyed skill dedupe, quick-confirm classification (keyword + tiny model call) |
-| `harness/runtime.py` | `AgentRuntime`: the single bounded loop; frozen schema/policy snapshots; trust/taint propagation and state-change/external-egress escalation; routing/resume entry point and strategies; domain entry/correction; approvals including frozen-definition edit presentation/validation; per-run denial memory; untrusted result envelopes; final-prompt compaction/source-ledger reconciliation and memory disclosure accounting; transcript persistence; child budgets and role-aware denial; per-run model/provider snapshots |
+| `harness/runtime.py` | `AgentRuntime`: the single bounded loop; frozen schema/policy snapshots; trust/taint propagation and escalation; revision-before-classifier approvals; routing, unique-waiting answers and linked completed-task continuations; domain entry/correction and transition metadata; per-run denial memory; bounded unattended-schedule capability checks; untrusted result envelopes; final-prompt compaction/source-ledger reconciliation; transcript persistence; child budgets; per-run model/provider snapshots |
 | `harness/suggestions.py` | `DomainSuggestions`: deterministic usage-based clustering of repeated General-task vocabulary; bounded open suggestions, visible notes, create/dismiss state, and remembered dismissals; never creates a domain |
 | `harness/subagents.py` | `SubAgentManager`: bounded sequential delegation, goal-hash dedupe/reuse, child task/run creation, blocked-outcome closing, durable result artifacts, clean/tainted child result provenance propagation and reuse, and sub-agent events |
-| `harness/scheduler.py` | Durable schedules (once/interval/daily/weekly in system or explicit timezones), idempotent occurrence submission, missed-run policy, self-scheduling bounds (`create_for_task`/`cancel_for_task`), inbox-before-schedule heartbeat ordering, module health refresh, bounded skill builder and memory-lifetime sweep, scheduler thread |
+| `harness/scheduler.py` | Durable schedules with pre-approval kind-specific validation, explicit target domains and UTC + schedule-local due values; idempotent occurrence submission, missed-run policy, self-scheduling bounds, propagation of frozen unattended policy, inbox-before-schedule heartbeat ordering, module health refresh, bounded skill builder and memory-lifetime sweep, scheduler thread |
+| `harness/schedule_policy.py` | Validation and evaluation of explicitly approved unattended report capabilities: bounded fixed web-query templates with date-only placeholders, optional recency, and at most one notes write per occurrence; fail-closed argument matching |
 | `harness/inbox.py` | `InboxManager`: idempotent external event intake with bounded bodies, trust marking, quiet hours, content dedupe, declarative automation CRUD/matching, cooldown + hourly loop breaker, task/notify/ignore actions, fire history, promoted-task recovery and tainted run triggers |
 | `harness/consolidation.py` | Bounded model pass proposing create/update/merge/retract from trusted inputs only; tainted memories/messages are excluded and tainted row mutations refused; changes apply via `MemoryManager` with revisions and markdown logs |
 | `harness/modules/types.py` | `Module`, `ModuleBinding`, `ModuleTool` value objects over the v3 tables |
 | `harness/modules/registry.py` | Module persistence, domain eligibility, lazy skill manager, and the loader seam (`load_all`, `reload`, `set_enabled`, `health_tick`); skill imports and reloads route here |
 | `harness/modules/mcp.py` | Generic registry-backed MCP loader: manifest/import, private env sidecars and scrubbed subprocess env, discovery cache, per-domain visibility, atomic rediscovery/removal, health, trust/read-only/external-egress flags, trusted annotations, per-tool risk, summary templates, tool-name prefixing, user setup operations, command allowlist, connection preview, and bundled templates |
-| `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions, agent-owned edit guard) and `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
-| `harness/modules/web/server.py` | Self-contained stdio MCP server over SearXNG JSON with its own `--config`; NFKC/control/zero-width/HTML normalisation, http(s)-only URL policy, heuristic injection flags, nonce-labelled data output, capped queries, bounded results, no `web_fetch` |
-| `harness/modules/calendar/server.py` | Self-contained stdio MCP server over CalDAV with its own `--config`; ETag-guarded VEVENT read/write tools, `readOnlyHint` annotations on reads, approval summary templates |
+| `harness/modules/skills.py` | `SkillManager` (front-matter import, scope disclosure, bounded validation, draft/active/disabled lifecycle, versioned bodies, rollback, revisions, agent-owned edit guard); approved model proposals/revisions activate immediately while automatic builder output remains draft; `SkillBuilder` (bounded heartbeat drafting, strict JSON, taint refusal, artifact logs) |
+| `harness/modules/web/server.py` | Self-contained stdio MCP server over SearXNG JSON with its own `--config`; NFKC/control/zero-width/HTML normalisation, http(s)-only URL policy, heuristic injection flags, nonce-labelled data output, capped queries, bounded results, optional recency and publication metadata, no `web_fetch` |
+| `harness/modules/calendar/server.py` | Self-contained stdio MCP server over CalDAV with its own `--config`; ETag-guarded VEVENT read/write tools, coherent all-day/timed validation, canonical mutation results, `readOnlyHint` annotations on reads, approval summary templates |
 | `harness/app.py` | `App` composition root, startup recovery, `ProcessLock` (single writer), backup/restore, reset (backup then wipe with in-data-dir guard), graceful shutdown; `build_app` test helper (configured) |
 | `harness/routing/` | Pluggable domain routing: `RoutingService` strategy selection/fallback/shadow; unchanged `LexicalRouter` control; OpenAI-compatible embedding client with packed-float32 SQLite cache and stdlib cosine; constrained `LLMRouter` JSON label call; `HybridRouter` top-3 embedding margin plus LLM pick; bounded domain cards (name, description, examples, summary) |
 | `harness/server.py` | Starlette JSON API + auth; thin delegation to `App`; first-run setup page and `/api/setup`, `/api/setup/probe`, `/api/setup` (unauthenticated only while unconfigured) and authenticated `/api/reset`; per-panel endpoints (`/api/summary`, `/api/messages`, `/api/tasks` with optional `include_subagents=1`, `/api/approvals`, `/api/schedules`, `/api/inbox`, `/api/automations`, `/api/memories`, `/api/domains`, `/api/skills`, `/api/consolidations`, `/api/modules`, `/api/tools`, `/api/events`, `/api/system`, `/api/config`, `/api/backups`, `/api/models`, `/api/model`), memory edit/retract and skill draft/delete and module-binding mutations, MCP setup/test/template/tool-risk endpoints with redacted module payloads, task detail with each run's full persisted model transcript/context sources and the child tree (children hidden from the default task list), approval payloads with summary/schema/editable/taint fields, `approve|reject|cancel|revise|edit` decisions with feedback/arguments/remember, `/api/tools/{tool}/risk`, `/api/system` with version/git/sha/schema, `/api/state` as a compatibility aggregate for the CLI; Phase 10 `/api/domains/route-preview`, `/api/domains/feedback`, and `/api/domain-suggestions` endpoints, environment-card counts/routing stats, core/pinned memory filters, task domain-correction payloads, and task routing "why"/domain-entered detail; summary/system/task-detail model and provider attribution; authenticated static UI assets |
@@ -62,14 +63,17 @@ tests under the `live` marker.
 ```text
 web POST /api/message | CLI msg | schedule due | inbox triage | heartbeat | approval decision
   -> AgentRuntime.submit_user_message / start_run / resume_*
-  -> quick confirmation? classify (keyword | tiny model call); decide exactly
-     one pending approval; resume that run
-  -> else: record user message (source, visible)
-  -> resume candidate? (waiting_user bonus + keyword overlap + recency)
+  -> revision feedback? close as revised before any model approval classifier
+  -> else quick confirmation? classify (keyword | tiny model call); decide exactly
+     one pending approval; append reply and resume that run
+  -> else: record user message (source, visible) -> route domain (evidence v2)
+  -> unique waiting task? resume it with the short answer
+  -> else resume candidate? (waiting_user bonus + keyword overlap + recency)
        tie -> new task whose context lists the candidates (model asks)
        hit -> resume the same run (answer appended / run continued)
-  -> else: route domain (evidence v2; per-term breakdown recorded)
-             -> create a new task
+  -> else explicit recent correction? create linked continuation with prior
+       objective/history/action receipts; completed task stays completed
+  -> else create a new task in the routed domain
        side path: route preview? -> scores/breakdown; no state changes
        side path: task correction? -> move task + routing_feedback;
                                        suggest keywords only
@@ -79,12 +83,13 @@ web POST /api/message | CLI msg | schedule due | inbox triage | heartbeat | appr
   -> loop:
        limits?        -> limit_reached; task paused; honest note
        domain changed? -> recompute snapshot once; record toolset.changed
+       refresh local + UTC clock without rebuilding context
        model.chat(transcript, snapshot tool schemas, model=run snapshot)
          malformed?  -> bounded retries; then visible failure
          tool_calls? -> resolve inside snapshot (outside -> denied record)
                         validate args (all problems at once)
                         tainted run + state change/external egress? -> confirm escalation
-                        tainted run + skill write? -> refused; no draft
+                        tainted run + skill write? -> refused; no skill written
                         confirm-risk? -> approval + awaiting execution row;
                                           run waiting_approval; visible note
                                           (reason names untrusted origin;
@@ -183,7 +188,8 @@ heartbeat -> inbox.triage(new events, oldest first)
 | `tests/test_routing_eval.py` | Labelled routing/memory corpora, routing metrics/confusion, measurement-gating contract, General-only control, report determinism, and fixture updates |
 | `tests/test_memory_context.py` | Explicit capture, old-memory recall, scopes, context sources, budgets, supersession/revisions, temp expiry, consolidation, artifact consistency |
 | `tests/test_memory_lifetime.py` | v4 migration, per-run access dedupe, deterministic sweep bounds, pin/protected kinds, archive retrieval/restore, `search_knowledge` include-archived, consolidation exclusion, heartbeat sweep bound, API usage and filters |
-| `tests/test_scheduler.py` | Due times + timezones, restart survival, missed-run policies, occurrence idempotency, approval pause/resume, heartbeat overlap/notify/retry |
+| `tests/test_scheduler.py` | Due times + local/UTC results, explicit schedule fields/domains, restart survival, missed-run policies, occurrence idempotency, approval pause/resume, bounded unattended research/notes capabilities and denial, heartbeat overlap/notify/retry |
+| `tests/test_schedule_policy.py` | Pure fail-closed validation, date rendering, approved-template matching, and schedule request checks for unattended capabilities |
 | `tests/test_time.py` | System-time default, local rendering, naive `at_ts` semantics, explicit-zone override, timezone validation, UI local timestamps |
 | `tests/test_approvals.py` | Exact action binding, quick confirm (keyword/model/ambiguous), rejection/cancellation/expiry/staleness, untrusted-output immunity, no shell tools, risk override validation |
 | `tests/test_recovery.py` | Restart preservation, interrupted-run resume without repeats, unknown outcomes, graceful shutdown, backup/restore round trip, writer lock, concurrent web+CLI with one scheduler |
@@ -206,4 +212,5 @@ heartbeat -> inbox.triage(new events, oldest first)
 | `tests/test_approval_cards_ui.py` | Approval payload card/edit fields, tool override/template payload, UI asset wiring, edit/revise over HTTP |
 | `tests/test_evaluation.py` | Scenario loading/sandbox, deterministic runs, tool sequences, run bounds, model metrics, optional and `quality.required` rubric behavior, reports/comparison/aggregation |
 | `tests/test_scenarios.py` | The ten end-to-end acceptance scenarios |
-| `tests/test_live_endpoint.py` | Real-endpoint integration (marked `live`): models list, plain completion, native tool-call protocol, multi-step round trip, one full live turn |
+| `tests/test_live_endpoint.py` | Real-endpoint integration (marked `live`): models list, plain completion, native tool-call protocol, multi-step round trip, full live turn, calendar correction by existing UID, and current-year sourced unattended research |
+| `eval/scenarios/l_live_real_use.yaml` | Live real-use regressions for generic-chatter domain abstention and honest schedule-local noon reporting |

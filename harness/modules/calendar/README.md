@@ -97,6 +97,7 @@ auto-detected) or to the file named by `tools.mcp_servers_file`:
       "risk_default": "confirm",
       "trust_annotations": true,
       "side_effects": true,
+      "external_egress": false,
       "startup": "lazy",
       "timeout_s": 60
     }
@@ -120,9 +121,14 @@ own write tools. Correct an individual tool with
 `tool_risk: {"calendar_get_event": "confirm"}` (risk only; trust flags are
 unchanged).
 
+- **Local confidentiality boundary:** `external_egress: false` is appropriate
+  only when you explicitly trust this CalDAV destination as part of that
+  boundary; it is never inferred from a private IP. Event content remains
+  untrusted, and writes remain confirm-risk. Omit the flag (default true) for a
+  server outside that boundary; subsequent egress after taint then needs approval.
 - **Reads only:** set `read_only: true` in the calendar config. The server
-  hides the write tools, and with the entry above reads need no approval even
-  after untrusted output taints the run.
+  hides the write tools. Reads are low-risk, but external-egress policy still
+  applies after untrusted output taints the run.
 - **Reads and writes:** keep the entry above. Reads run without an approval;
   writes need one, and after an untrusted result taints the run every
   side-effecting call still needs approval.
@@ -150,6 +156,10 @@ on every request.
   confirm-risk and side-effecting under the recommended registration. All
   results are untrusted data: a read taints the run and later side-effecting
   calls still need approval.
+- `all_day: false` requires timed ISO start/end values. Date-only input is
+  rejected rather than silently converted into an all-day event; date-only
+  values imply all-day only when the flag is omitted or true. Mutation results
+  include the canonical summary, times, all-day flag, UID, and status.
 - Updates/deletes first find the record by exact UID and send `If-Match`, so
   an unknown UID never targets another event and a concurrent edit returns
   HTTP 412 instead of being clobbered.

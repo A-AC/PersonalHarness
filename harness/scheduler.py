@@ -24,6 +24,7 @@ from typing import Any
 from . import util
 from .config import Config, resolve_zone
 from .db import Database, rows_to_dicts
+from .schedule_policy import validate_unattended
 from .store import Events, Tasks
 
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -109,6 +110,15 @@ class Scheduler:
             return util.iso(candidate.astimezone(dt.timezone.utc))
         return None
 
+    def next_due_local(self, schedule: dict[str, Any]) -> str | None:
+        """Render the stored UTC instant in the schedule's own timezone."""
+        due = schedule.get("next_due_at")
+        if not due:
+            return None
+        return util.parse_iso(str(due)).astimezone(
+            self._zone(str(schedule.get("tz") or "UTC"))
+        ).isoformat()
+
     # ------------------------------------------------------------------
     # Schedule CRUD
     # ------------------------------------------------------------------
@@ -131,6 +141,36 @@ class Scheduler:
             raise ValueError(f"unknown schedule kind: {kind}")
         if not prompt.strip() or not name.strip():
             raise ValueError("schedule needs a name and a prompt")
+        if kind == "interval":
+            try:
+                interval_s = float(interval_s or 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("interval schedule needs a numeric interval_s") from exc
+            if interval_s <= 0:
+                raise ValueError("interval schedule needs interval_s > 0")
+        if kind in ("daily", "weekly"):
+            parts = str(time_of_day or "").split(":")
+            if (
+                len(parts) != 2
+                or not all(part.isdigit() for part in parts)
+                or not 0 <= int(parts[0]) <= 23
+                or not 0 <= int(parts[1]) <= 59
+            ):
+                raise ValueError(
+                    f"{kind} schedule needs time_of_day in HH:MM format"
+                )
+            time_of_day = f"{int(parts[0]):02}:{int(parts[1]):02}"
+        if kind == "weekly":
+            weekday = str(weekday or "").strip().lower()[:3]
+            if weekday not in WEEKDAYS:
+                raise ValueError("weekly schedule needs a valid weekday")
+        if domain_id:
+            domain = self.app.domains.get(domain_id) or self.app.domains.by_name(
+                str(domain_id)
+            )
+            if domain is None or domain.get("status") != "active":
+                raise ValueError(f"no active schedule domain: {domain_id}")
+            domain_id = domain["id"]
         schedule_id = util.new_id("sch")
         ts = util.iso()
         tz = (
@@ -186,6 +226,8 @@ class Scheduler:
         time_of_day: str | None = None,
         weekday: str | None = None,
         tz: str | None = None,
+        unattended: dict[str, Any] | None = None,
+        target_domain_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a schedule owned by one task, with durable bounds.
 
@@ -200,6 +242,17 @@ class Scheduler:
             raise ValueError(f"no such task: {task_id}")
         if (task.get("role") or "user") == "subagent":
             raise ValueError("sub-agents cannot create schedules")
+        domain_id = task.get("domain_id")
+        if target_domain_id:
+            domain = self.app.domains.get(target_domain_id) or self.app.domains.by_name(
+                target_domain_id
+            )
+            if domain is None or domain.get("status") != "active":
+                raise ValueError(
+                    f"schedule domain does not exist or is not active: "
+                    f"{target_domain_id}"
+                )
+            domain_id = domain["id"]
         meta = self.tasks.meta(task_id)
         depth = int(meta.get("schedule_depth", 0) or 0) + 1
         max_depth = max(0, int(
@@ -224,6 +277,18 @@ class Scheduler:
                 f"this task already owns {len(owned)} schedule(s); the "
                 f"per-task cap is {cap}"
             )
+        unattended = validate_unattended(unattended)
+        schedule_meta = {
+            "parent_task_id": task_id,
+            "parent_run_id": run_id,
+            "schedule_depth": depth,
+            "created_by": "task",
+        }
+        if unattended is not None:
+            # This object was shown verbatim in the schedule approval. It is
+            # not a general schedule-origin permission: later occurrences get
+            # only these bounded, frozen capabilities.
+            schedule_meta["unattended"] = unattended
         return self.create_schedule(
             name=name,
             prompt=prompt,
@@ -233,13 +298,8 @@ class Scheduler:
             interval_s=interval_s,
             time_of_day=time_of_day,
             weekday=weekday,
-            domain_id=task.get("domain_id"),
-            meta={
-                "parent_task_id": task_id,
-                "parent_run_id": run_id,
-                "schedule_depth": depth,
-                "created_by": "task",
-            },
+            domain_id=domain_id,
+            meta=schedule_meta,
         )
 
     def cancel_for_task(
@@ -384,7 +444,10 @@ class Scheduler:
         task_meta: dict[str, Any] = {
             "notes": "",
             "schedule_id": schedule["id"],
+            "scheduled_for": due_iso,
         }
+        if schedule_meta.get("unattended"):
+            task_meta["unattended"] = schedule_meta["unattended"]
         if schedule_meta.get("schedule_depth"):
             task_meta["schedule_depth"] = int(schedule_meta["schedule_depth"])
         if schedule_meta.get("parent_task_id"):

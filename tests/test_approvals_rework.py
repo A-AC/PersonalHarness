@@ -76,7 +76,6 @@ def _event_data(app, event_type: str) -> dict:
 def test_feedback_reply_revises_and_reproposes(make_app):
     app = make_app.build(scripts=[
         _proposal("hello", "alice"),
-        {"content": "ambiguous"},
         _proposal("hello", "bob"),
         {"content": "Ready with the revised recipient."},
     ])
@@ -115,6 +114,42 @@ def test_feedback_reply_revises_and_reproposes(make_app):
     assert pending[0]["status"] == "pending"
     assert pending[0]["arguments"]["recipient"] == "bob"
     assert not received
+
+
+def test_correction_wins_over_affirmative_classifier_and_never_executes_stale_args(
+    make_app,
+):
+    app = make_app.build(scripts=[
+        _proposal("Office day"),
+        _proposal("Office Day Pantry party"),
+        {"content": "The title correction is ready for review."},
+    ])
+    received = _register_confirm_tool(app)
+    first = app.runtime.submit_user_message("create Office day")
+    approval = app.approvals.pending()[0]
+    classifier_calls = []
+
+    def affirmative(*args):
+        classifier_calls.append(args)
+        return "affirmative"
+
+    app.approvals._classify = affirmative
+    revised = app.runtime.submit_user_message(
+        'Actually change it to "Office Day Pantry party"'
+    )
+
+    assert revised.status == "waiting_approval"
+    assert classifier_calls == []  # revision is resolved before classification
+    assert received == []
+    assert app.approvals.get(approval["id"])["status"] == "revised"
+    pending = app.approvals.pending()
+    assert len(pending) == 1
+    assert pending[0]["arguments"]["text"] == "Office Day Pantry party"
+    transcript = _run_transcript(app, first.run_id)
+    assert any(
+        "Office Day Pantry party" in str(message.get("content") or "")
+        for message in transcript
+    )
 
 
 def test_unrelated_message_leaves_approval_pending_and_starts_new_task(

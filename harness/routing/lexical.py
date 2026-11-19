@@ -34,11 +34,36 @@ def _confidence(routing: dict[str, Any]) -> str:
         return "low"
     if str(routing.get("domain_id") or "") == "general":
         return "low"
-    score = float(specific[0].get("score") or 0.0)
-    runner = float(specific[1].get("score") or 0.0) if len(specific) > 1 else 0.0
-    if score - runner >= 0.75:
+    winner = next((
+        item for item in specific
+        if str(item.get("domain_id") or "") == str(
+            routing.get("domain_id") or ""
+        )
+    ), None)
+    if winner is None:
+        return "low"
+    score = float(winner.get("score") or 0.0)
+    runner = max((
+        float(item.get("score") or 0.0) for item in specific
+        if item is not winner
+        and (item.get("breakdown") or {}).get("auto_route")
+    ), default=0.0)
+    gap = score - runner
+    breakdown = winner.get("breakdown") or {}
+    signals = breakdown.get("signals") or {}
+    explicit = set(breakdown.get("explicit_terms") or [])
+    strong = bool(
+        (signals.get("name") or {}).get("terms")
+        or (signals.get("keyword") or {}).get("terms")
+        or len(explicit) >= 2
+    )
+    if not strong:
+        # Learned-only evidence can be useful, but a large margin over no
+        # runner-up does not make it high-confidence evidence.
+        return "medium" if gap >= 0.75 else "low"
+    if gap >= 0.75:
         return "high"
-    if score - runner >= 0.25:
+    if gap >= 0.25:
         return "medium"
     return "low"
 

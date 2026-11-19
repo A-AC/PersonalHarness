@@ -12,6 +12,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 SERVER = REPO / "harness" / "modules" / "calendar" / "server.py"
 
@@ -406,6 +408,42 @@ def test_list_calendars_and_events(tmp_path):
         assert result["sources"] == [event["href"]]
 
 
+def test_explicit_timed_date_only_values_fail_before_network(tmp_path, monkeypatch):
+    module = _load_module()
+    module.configure(str(_config(tmp_path / "calendar.json")))
+
+    def no_client():
+        raise AssertionError("CalDAV must not be contacted for invalid input")
+
+    monkeypatch.setattr(module, "_client", no_client)
+    calls = [
+        (module.calendar_create_event, {
+            "summary": "Dinner with Max", "start": "2026-11-20",
+            "end": "2026-11-20", "all_day": False,
+        }),
+        (module.calendar_update_event, {
+            "uid": "evt-1", "start": "2026-11-20",
+            "end": "2026-11-20", "all_day": False,
+        }),
+    ]
+    for handler, arguments in calls:
+        with pytest.raises(module.CalendarError, match="timed ISO datetimes"):
+            handler(arguments)
+
+
+def test_date_only_values_infer_all_day_only_when_not_explicitly_false(tmp_path):
+    module = _load_module()
+    with _caldav_stub() as (url, server):
+        module.configure(str(_config(tmp_path / "calendar.json", url=url)))
+        created = module.calendar_create_event({
+            "summary": "Office day", "start": "2026-11-19",
+            "end": "2026-11-19", "calendar": "Personal",
+        })
+        assert created["all_day"] is True
+        path = urllib.parse.urlsplit(created["href"]).path
+        assert "DTSTART;VALUE=DATE:20261119" in server.events[path]["ics"]
+
+
 def test_write_round_trip_uses_etags(tmp_path):
     module = _load_module()
     with _caldav_stub() as (url, server):
@@ -419,6 +457,7 @@ def test_write_round_trip_uses_etags(tmp_path):
             "description": "Created by the test",
         })
         assert created["status"] == "created"
+        assert created["all_day"] is False
         uid = created["uid"]
         href = created["href"]
         event_path = urllib.parse.urlsplit(href).path
@@ -432,6 +471,7 @@ def test_write_round_trip_uses_etags(tmp_path):
             "summary": "Renamed event",
         })
         assert updated["status"] == "updated"
+        assert updated["summary"] == "Renamed event"
         stored = server.events[event_path]
         assert "Renamed event" in stored["ics"]
 

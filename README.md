@@ -471,17 +471,22 @@ user-authored keywords, example phrases, and description, plus learned
 vocabulary from its active memories, bound skills, and past task objectives.
 Learned terms are deliberately weaker (0.5 each): explicit evidence wins, and
 a single learned term can never select a domain by itself; chat/status
-messages are not learned evidence.
+messages are not learned evidence. Automatically routed task objectives are
+not reused as training labels unless the user explicitly selected or corrected
+the domain, preventing false routes from reinforcing themselves.
 Message and domain terms use the small deterministic stemmer when
 `domains.stemming` is enabled. Each candidate keeps a per-term breakdown, and
 `domain.routed` events preserve that evidence. The shipped
 `domains.routing_threshold` and `domains.ambiguity_margin` are both `1.0`:
 a clear specific-domain winner is selected, while weak or ambiguous evidence
-falls back to General. Routing never creates a domain.
+falls back to General. Automatic selection requires a name/keyword, two
+distinct explicit terms, or corroborated learned evidence; one generic
+description/example word is only a possible hint. Routing never creates a domain.
 
 When routing falls back to General but a candidate scores at least
-`domains.hint_min_score`, the context includes a bounded hint naming up to
-two possible domains and their matched terms. The `use_domain` result carries
+`domains.hint_min_score`, the route evidence can include a bounded hint naming
+up to two possible domains and their matched terms. Weak conversational-only
+hints are not shown to the model. The `use_domain` result carries
 the entered domain's entry briefing: its description, user-authored
 instructions, top memories for the task, applicable skills, and newly
 available tools. The active domain's instructions are also included in
@@ -509,9 +514,13 @@ remembered.
 
 Resumption is preferred over new work: a message that plausibly continues
 an open task (keyword overlap, recency, and a bonus for tasks waiting on
-the user) resumes that task's run. When two candidates tie materially, the
-harness creates a task whose context names the candidates so the assistant
-asks which to continue instead of guessing.
+the user) resumes that task's run. A context-free short answer resumes a unique
+waiting task even when its lexical route is General. Explicit corrections to a
+recent completed task open a linked continuation instead of reopening it; the
+new task inherits the corrected domain and receives the original objective,
+direct history, approval states, and bounded mutation receipts with provenance.
+When two candidates tie materially, the harness creates a task whose context
+names the candidates so the assistant asks which to continue instead of guessing.
 
 Domains are created only by the explicit API/CLI command or by the model's
 `create_domain` tool, which is confirm-risk: the exact name, description,
@@ -632,7 +641,10 @@ the web panel, the CLI, or a short chat reply. Short replies are resolved
 by deterministic keywords ("yes", "approve", "go ahead", "no", "reject",
 "cancel", ...) or, for short non-obvious wording, a tiny constrained model
 call that classifies affirmative/negative/ambiguous and nothing else.
-Ambiguous replies never approve. With more than one pending approval, a
+Substantive revision feedback is handled before that classifier, so a title,
+time, or argument correction cannot become an approval of stale arguments.
+The resolving reply is also appended to the owning run transcript. Ambiguous
+replies never approve. With more than one pending approval, a
 reply resolves one only when it also names that action (for example
 `approve Logs`); otherwise the assistant asks which action is meant.
 Approvals expire after `approvals.expires_after_s` (default one week; set
@@ -669,6 +681,35 @@ restarts and duplicate ticks. Missed slots while the process was down are coales
 skipped) or discarded (`skip`). Once-schedules disable themselves after
 their run. Scheduled prompts are submitted as ordinary tasks to the
 ordinary runtime with the same tools, permissions, approvals, and context.
+
+Kind-specific fields are validated before an approval is shown: daily requires
+`time_of_day`, weekly also requires `weekday`, interval requires a positive
+`interval_s`, and once requires `at_ts`; there are no hidden 09:00/Monday
+defaults. `schedule_task` accepts an explicit `domain` and returns both UTC
+`next_due_at` and `next_due_at_local`, plus the schedule timezone, local time,
+and domain. The current clock is refreshed before every model call, including
+approval and retry resumes.
+
+A schedule approval may optionally include a narrowly scoped unattended report
+policy. This is not a schedule-origin taint exemption: only up to four fixed
+`web_search` templates are allowed, with optional `current_date`,
+`current_year`, and `current_month` placeholders and optional `time_range`.
+No other prompt-derived substitution is possible. `allow_task_notes` separately
+permits one bounded notes write per occurrence, preserving taint and provenance.
+The run snapshot contains only those tools, calls outside the approved templates
+are denied rather than parked for approval, and the policy is frozen for
+recovery. Authenticated `POST /api/schedules` accepts the same `unattended`
+object. Example:
+
+```json
+{
+  "web_queries": [
+    {"query": "frontier AI news {current_year}", "time_range": "week",
+     "max_results": 5}
+  ],
+  "allow_task_notes": false
+}
+```
 
 The heartbeat (one scheduler thread in the server process, tick interval
 `scheduler.tick_interval_s`) submits due schedules, resumes interrupted
@@ -754,9 +795,9 @@ Built-in tools (all low-risk unless noted): `remember`, `update_memory`,
 (confirm-risk), `edit_domain` (confirm-risk; changes user-authored domain
 instructions only after approval), `schedule_task` / `cancel_schedule`
 (confirm-risk; bounded
-to schedules the task owns), `propose_skill` (confirm-risk; saves a draft
-only after approval), and `edit_skill` (confirm-risk; refines only skills
-the agent created).
+to schedules the task owns), `propose_skill` (confirm-risk; saves and
+activates after approval), and `edit_skill` (confirm-risk; activates the
+approved revision of an agent-created skill).
 
 There is no shell, command, or code-execution tool, and the registry
 refuses to register any tool whose name starts with bash/sh/exec/run/
@@ -953,8 +994,9 @@ rollback restores the previous versioned body and lifecycle state.
 
 The model can call `propose_skill` (confirm-risk) with a name, description,
 preconditions, domains, and body. The approval shows the full body bounded
-by `skills.max_body_chars`; approval writes `status=draft` and never
-activates it. A run that consumed untrusted content cannot propose a skill
+by `skills.max_body_chars`; approval saves and activates the skill immediately,
+including its enabled domain bindings. Disabling is optional and reversible.
+A run that consumed untrusted content cannot propose a skill
 (`skill.refused`). The heartbeat may also propose at most one draft after
 `skills.draft_after_successful_tasks` completed tool-using tasks, subject
 to `skills.max_drafts_per_day`; tainted runs are refused, and a failed pass
@@ -963,8 +1005,7 @@ changes no skill. Builder logs are written under `artifacts/skills/`.
 The agent may refine skills it created with `edit_skill` (confirm-risk):
 it names the existing skill and supplies any of description, preconditions,
 domains, or a replacement body; omitted fields stay unchanged. Approval
-writes a new draft version, so an active skill becomes a draft until the
-user activates it again. Agent ownership is established only when the model
+saves and activates the new version. Agent ownership is established only when the model
 or the builder creates the row (`origin=agent`, `created_by=model|builder`).
 Imported skills and skills created by the user through the UI/API remain
 read-only to the agent; `propose_skill` cannot overwrite them by reusing
@@ -1193,8 +1234,9 @@ durable inbox/automations/self-scheduling, and the ten end-to-end acceptance
 scenarios.
 
 Live scenarios are split into `g_live.yaml` (single-turn smoke and capability
-checks), `i_live_behavior.yaml` (behavioral coverage), and
-`j_live_holdout.yaml` (held-out judgment and instruction following). The
+checks), `i_live_behavior.yaml` (behavioral coverage),
+`j_live_holdout.yaml` (held-out judgment and instruction following), and
+`l_live_real_use.yaml` (reported real-use regressions). The
 behavior suite exercises multi-turn continuity, memory correction, active-skill
 following, delegation, hostile-inbox safety, approval-gated scheduling, and a
 live `remember` → `search_knowledge` loop. Every behavior step carries
@@ -1220,9 +1262,14 @@ repeats on the same suite and read the per-scenario rows rather than one total.
 
 ### Model choice: quality path and fast path
 
-Current hardening evidence is one live repeat of the 14 behavior/holdout
-scenarios per model, not a universal ranking or a sufficient sample for a model
-router:
+After the real-use corrections, the full Qwen live evaluation passed 19/20
+scenarios and 167/168 assertions with zero critical failures; only the known
+contradiction rubric failed. Separate live tests also verified calendar rename
+by UID and current-year sourced unattended research. This is one repeat, not a
+universal ranking or sufficient evidence for a model router.
+
+The previous hardening comparison used one live repeat of 14 behavior/holdout
+scenarios per model:
 
 | | `qwen3.5-9b` | `minicpm5-2B` |
 | --- | ---: | ---: |
@@ -1246,8 +1293,10 @@ summarisation, and simple actions because of its higher token throughput. One
 repeat does not justify automatic routing. Measure task success and end-to-end
 latency over multiple repeats before enabling it.
 
-Raw artifacts with source and scenario fingerprints are committed under
-`eval/results/`: `hardening_release_qwen.*`, `hardening_release_minicpm.*`, and
+Raw artifacts with source and scenario fingerprints are stored under
+`eval/results/`. Current correction reports are `real_use_fixes_final.*` and
+`live_full_real_use_fixes.*`; the comparison above used
+`hardening_release_qwen.*`, `hardening_release_minicpm.*`, and
 `aggregate_minicpm5-2B_vs_qwen3.5-9b.*`. Re-run the suites after prompt, tool,
 or endpoint changes rather than treating these values as permanent.
 

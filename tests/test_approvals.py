@@ -113,6 +113,13 @@ def test_quick_confirm_yes_approves_exact_pending_action(make_app):
         "SELECT decided_by FROM approvals WHERE tool='mcp_test_send'"
     )
     assert decided["decided_by"].startswith("quick:")
+    transcript = util.loads(app.db.query_one(
+        "SELECT transcript FROM runs WHERE id=?", (result.run_id,)
+    )["transcript"], [])
+    assert any(
+        message.get("role") == "user" and message.get("content") == "yes"
+        for message in transcript
+    )
 
 
 def test_quick_confirm_model_classification_paths(make_app):

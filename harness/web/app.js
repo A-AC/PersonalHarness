@@ -1075,7 +1075,7 @@ function renderRoutingWhy(detail, task) {
     const oldId = (routing && routing.corrected_from) ||
       (routing && routing.domain_id);
     det.appendChild(el('div', 'small',
-      'Corrected from: ' + domainName(oldId)));
+      (corrected ? 'Corrected from: ' : 'Switched from: ') + domainName(oldId)));
   }
   if (!routing) {
     det.appendChild(el('div', 'small', 'No routing evidence recorded.'));

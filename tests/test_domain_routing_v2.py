@@ -156,6 +156,7 @@ def test_two_learned_memory_terms_win_without_explicit_domain_terms(make_app):
     )
     task = app.tasks.get(result.task_id)
     assert task["domain_id"] == domain["id"]
+    assert app.tasks.meta(task["id"])["routing"]["confidence"] == "medium"
 
 
 def test_one_past_task_term_does_not_route_by_itself(make_app):
@@ -171,6 +172,24 @@ def test_one_past_task_term_does_not_route_by_itself(make_app):
 
     routing = app.domains.route("banana")
     assert routing["domain_id"] == "general"
+
+
+def test_only_validated_task_affinity_becomes_routing_evidence(make_app):
+    app = make_app.build(default="ok")
+    domain = app.domains.create(
+        "baking", name="Baking", description="", created_by="test",
+    )
+    task = app.tasks.create(
+        objective="banana bread plan", domain_id=domain["id"], origin="user",
+        meta={"routing": {
+            "domain_id": domain["id"], "reason": "best domain evidence",
+        }},
+    )
+    assert app.domains.route("banana bread")["domain_id"] == "general"
+    meta = app.tasks.meta(task["id"])
+    meta["routing"]["corrected_to"] = domain["id"]
+    app.tasks.set_meta(task["id"], meta)
+    assert app.domains.route("banana bread")["domain_id"] == domain["id"]
 
 
 def test_two_memory_terms_route_a_keywordless_domain(make_app):
@@ -256,6 +275,48 @@ def test_general_chatter_never_selects_a_specific_domain(make_app):
     for text in GENERAL_CHATTER:
         routing = app.domains.route(text)
         assert routing["domain_id"] == "general", (text, routing)
+
+
+def test_real_use_generic_overlap_does_not_self_reinforce_auto_routes(make_app):
+    app = make_app.build(default="ok")
+    health = app.domains.create(
+        "dom_health", name="health",
+        description=(
+            "A domain for health, nutrition, gym, medicine, and overall "
+            "wellness topics where I can help with information, planning, "
+            "and guidance."
+        ),
+        created_by="test",
+        keywords=["health", "nutrition", "gym", "medicine", "wellness"],
+        examples=["help me plan my nutrition", "gym workout ideas"],
+    )
+    for objective in (
+        'Can you help me create an "Office day" calendar event',
+        "I will be in a testing phase for a bit of time",
+        "in the calendar... I have no use for it here",
+    ):
+        app.tasks.create(
+            objective=objective, domain_id=health["id"], origin="user",
+            meta={"routing": {
+                "domain_id": health["id"], "reason": "best domain evidence",
+            }},
+        )
+
+    for text in (
+        "I will probably be in a testing phase for a bit of time",
+        "No... change the name of the Office day event",
+        "in the calendar... I have no use for it here",
+        "Can you help me create two events in my calendar",
+    ):
+        routing = app.runtime.preview_route(text)
+        assert routing["domain_id"] == "general", (text, routing)
+        health_candidate = next((
+            item for item in routing["candidates"]
+            if item["domain_id"] == health["id"]
+        ), None)
+        if health_candidate is not None:
+            assert not health_candidate["breakdown"]["auto_route"]
+        assert app.context._routing_hint(routing) == ""
 
 
 def test_domain_routed_event_contains_per_term_breakdown(make_app):

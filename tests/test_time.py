@@ -66,6 +66,25 @@ def test_context_clock_is_local_time(make_app):
     assert not re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", line)
 
 
+def test_resume_clock_refresh_does_not_rebuild_context(make_app):
+    app = make_app.build(default="ok")
+    transcript = [{
+        "role": "system",
+        "content": (
+            "custom instructions\n"
+            "Time: 2024-01-01 00:00:00 +0000 (UTC, configured timezone)\n"
+            "UTC time: 2024-01-01 00:00:00 Z\n"
+            "Task objective: unchanged"
+        ),
+    }]
+    assert app.context.refresh_clock(transcript)
+    now = dt.datetime.now(local_tz(app.config))
+    assert now.strftime("%Y-%m-%d") in transcript[0]["content"]
+    assert "custom instructions" in transcript[0]["content"]
+    assert "Task objective: unchanged" in transcript[0]["content"]
+    assert "2024-01-01" not in transcript[0]["content"]
+
+
 def test_naive_at_ts_is_interpreted_as_system_local(make_app):
     app = make_app.build(default="ok")
     naive = "2031-06-15T09:30:00"

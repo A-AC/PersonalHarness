@@ -627,7 +627,7 @@ class Approvals:
             verb = (
                 "revise" if approval.get("tool") == "edit_skill" else "save"
             )
-            return f"{verb} the draft skill '{name}'"
+            return f"{verb} and activate the skill '{name}'"
         detail = util.dumps(arguments)
         if len(detail) > 120:
             detail = detail[:117] + "…"

@@ -36,6 +36,8 @@ SNIPPET_CHARS = 400
 TITLE_CHARS = 200
 URL_CHARS = 500
 QUERY_CHARS = 200
+PUBLISHED_DATE_CHARS = 100
+TIME_RANGES = ("day", "week", "month", "year")
 
 # Neutral names first; the HARNESS_* aliases keep standalone scripts written
 # before this server became self-contained working.
@@ -329,7 +331,12 @@ def _safe_result_url(value: str) -> str | None:
     return url
 
 
-def search(query: str, categories: str = "", max_results: int = 0) -> dict:
+def search(
+    query: str,
+    categories: str = "",
+    max_results: int = 0,
+    time_range: str = "",
+) -> dict:
     """Query SearXNG's JSON API and return bounded, structured results."""
     raw_query = str(query or "").strip()
     if not raw_query:
@@ -339,6 +346,9 @@ def search(query: str, categories: str = "", max_results: int = 0) -> dict:
     query = _clip(_normalise_text(clipped_query), QUERY_CHARS)
     if not query:
         raise ValueError("query must not be empty")
+    time_range = str(time_range or "").strip()
+    if time_range and time_range not in TIME_RANGES:
+        raise ValueError("time_range must be one of: day, week, month, year")
     base = base_url()
     limit = max(
         1, min(MAX_RESULTS_LIMIT, int(max_results or default_max_results()))
@@ -351,6 +361,8 @@ def search(query: str, categories: str = "", max_results: int = 0) -> dict:
     category = str(categories or "").strip() or default_categories()
     if category:
         params["categories"] = category
+    if time_range:
+        params["time_range"] = time_range
     url = base.rstrip("/") + "/search?" + urllib.parse.urlencode(params)
     request = urllib.request.Request(
         url, headers={"Accept": "application/json",
@@ -411,6 +423,12 @@ def search(query: str, categories: str = "", max_results: int = 0) -> dict:
             "snippet": snippet,
             "flags": flags,
         }
+        published = item.get("publishedDate") or item.get("published") or ""
+        published_date = _clip(
+            _normalise_text(str(published)), PUBLISHED_DATE_CHARS
+        )
+        if published_date:
+            entry["published_date"] = published_date
         if len(results) < limit:
             if flags:
                 flagged += 1
@@ -420,6 +438,7 @@ def search(query: str, categories: str = "", max_results: int = 0) -> dict:
     return {
         "query": query,
         "query_truncated": query_truncated,
+        "time_range": time_range,
         "count": len(results),
         "results": results,
         "sources": sources,
@@ -465,6 +484,14 @@ def tool_schema() -> dict:
                         "Maximum number of results (1-10)."
                     ),
                 },
+                "time_range": {
+                    "type": "string",
+                    "enum": list(TIME_RANGES),
+                    "description": (
+                        "Optional SearXNG recency filter. Omit for no time "
+                        "restriction; historical searches remain valid."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -482,6 +509,7 @@ def handle_call(name: str, arguments: dict) -> dict:
             str(arguments.get("query") or ""),
             str(arguments.get("categories") or ""),
             int(arguments.get("max_results") or 0),
+            str(arguments.get("time_range") or ""),
         )
     except Exception as exc:
         return {

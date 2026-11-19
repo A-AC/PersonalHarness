@@ -82,6 +82,62 @@ def test_new_run_for_existing_task_includes_its_prior_history(make_app):
     assert "Earlier work on this task" in context
 
 
+def test_linked_completed_task_preserves_referents_and_action_state(make_app):
+    app = make_app.build(default="ok")
+    previous = app.tasks.create(
+        objective="Create the Office day event", domain_id="general",
+        origin="user",
+    )
+    first = app.runtime.start_run(previous, {"kind": "user"})
+    app.messages.record(
+        "user", "Actually change it to Office Day Pantry party",
+        source="web", task_id=previous["id"], domain_id="general",
+    )
+    app.messages.record(
+        "assistant", "I can also create the Chest day event.",
+        source="agent", task_id=previous["id"], domain_id="general",
+        meta={"derived_untrusted": True, "tainted_origin": "calendar"},
+    )
+    uid = "office-event@personal-harness"
+    app.db.execute(
+        "INSERT INTO tool_executions(id, run_id, task_id, tool, tool_call_id,"
+        " arguments, status, started_at, ended_at, result) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "ex_office", first.run_id, previous["id"],
+            "calendar_create_event", "call_office", "{}", "succeeded",
+            util.iso(), util.iso(), util.dumps({
+                "status": "created", "uid": uid, "summary": "Office day",
+                "all_day": True,
+            }),
+        ),
+    )
+    approval = app.approvals.create(
+        task_id=previous["id"], run_id=first.run_id, action="tool",
+        tool="schedule_task", arguments={"time_of_day": "00:00"},
+        risk="confirm",
+    )
+    app.approvals.revise(
+        approval["id"], feedback="Not at 00:00; use 12 pm",
+        decided_by="test",
+    )
+
+    linked = app.tasks.create(
+        objective="That already exists... you created it...",
+        domain_id="general", origin="user",
+        meta={"continues_task_id": previous["id"]},
+    )
+    app.runtime.start_run(linked, {"kind": "user"})
+    context = json.dumps(app.model.last_messages)
+    assert "Create the Office day event" in context
+    assert "Office Day Pantry party" in context
+    assert "Chest day" in context
+    assert uid in context
+    assert "use 12 pm" in context
+    assert "revised" in context
+    assert app.tasks.get(previous["id"])["status"] == "completed"
+
+
 def test_unfinished_task_resumes_without_full_transcript(make_app):
     app = make_app.build(scripts=[])
     ASK = "<" + "ask_user" + "/>"
@@ -100,6 +156,65 @@ def test_unfinished_task_resumes_without_full_transcript(make_app):
     # The resumed transcript carried the prior question, not a re-plan.
     context = json.dumps(app2.model.calls[0]["messages"])
     assert "Which IP" in context
+
+
+def test_short_answer_resumes_unique_non_general_waiting_task(make_app):
+    app = make_app.build(scripts=[])
+    domain = _seed_domain(app, "Research", "AI research and frontier models")
+    ask = "<" + "ask_user" + "/>"
+    app.model.scripts.append({"content": f"Midnight or noon? {ask}"})
+    first = app.runtime.submit_user_message(
+        "Schedule the AI report at 12", domain_id=domain["id"],
+    )
+    assert first.status == "waiting_user"
+    app.model.scripts.append({"content": "Scheduled for noon."})
+    second = _say(app, "12pm Noon")
+    assert second.task_id == first.task_id
+    assert second.run_id == first.run_id
+    assert second.status == "completed"
+
+
+def test_explicit_correction_links_but_does_not_reopen_completed_task(make_app):
+    app = make_app.build(scripts=[])
+    domain = _seed_domain(app, "Calendar projects", "calendar event administration")
+    app.model.scripts.append({"content": "The Office day event was created."})
+    first = app.runtime.submit_user_message(
+        "Create the Office day event", domain_id=domain["id"],
+    )
+    assert first.status == "completed"
+    app.model.scripts.append({"content": "I will update the existing event."})
+    second = _say(app, "No... change the Office day title instead")
+    assert second.task_id != first.task_id
+    task = app.tasks.get(second.task_id)
+    assert task["domain_id"] == domain["id"]
+    assert app.tasks.meta(task["id"])["continues_task_id"] == first.task_id
+    assert app.tasks.get(first.task_id)["status"] == "completed"
+    context = json.dumps(app.model.last_messages)
+    assert "Create the Office day event" in context
+
+
+def test_answer_links_completed_question_when_marker_was_omitted(make_app):
+    app = make_app.build(scripts=[])
+    domain = _seed_domain(app, "Research", "AI research and frontier models")
+    app.model.scripts.append({"content": "Did you mean midnight or noon?"})
+    first = app.runtime.submit_user_message(
+        "Schedule the AI report at 12", domain_id=domain["id"],
+    )
+    assert first.status == "completed"  # model forgot ASK_USER_TAG
+    app.model.scripts.append({"content": "Scheduled for noon."})
+    second = _say(app, "12pm Noon")
+    assert second.task_id != first.task_id
+    assert app.tasks.meta(second.task_id)["continues_task_id"] == first.task_id
+    assert app.tasks.get(second.task_id)["domain_id"] == domain["id"]
+    assert "Schedule the AI report at 12" in json.dumps(app.model.last_messages)
+
+
+def test_new_topic_does_not_link_recent_completed_task(make_app):
+    app = make_app.build(scripts=[{"content": "ok"}, {"content": "weather"}])
+    first = _say(app, "Create the Office day event")
+    second = _say(app, "Tell me about the weather tomorrow")
+    assert second.task_id != first.task_id
+    assert "continues_task_id" not in app.tasks.meta(second.task_id)
 
 
 def test_competing_candidates_trigger_clarification(make_app):

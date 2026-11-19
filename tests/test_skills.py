@@ -149,7 +149,7 @@ def test_skills_import_with_scope_and_disclose_by_registry(make_app, tmp_path):
 # Proposed drafts + lifecycle
 # ---------------------------------------------------------------------------
 
-def test_propose_skill_approval_creates_draft_then_lifecycle(make_app):
+def test_propose_skill_approval_activates_then_lifecycle(make_app):
     body = "1. Gather open tasks.\n2. Summarize blockers."
     app = make_app.build(scripts=[
         {"tool_calls": [{
@@ -172,7 +172,8 @@ def test_propose_skill_approval_creates_draft_then_lifecycle(make_app):
     assert approval["arguments"]["body"] == body
     # The approval note shows the bounded full body before any write.
     note = app.messages.recent(limit=5)[-1]["content"]
-    assert "draft skill" in note
+    assert "activate" in note
+    assert "draft skill" not in note
     assert body in note
     assert app.modules.skills.find_by_name("weekly review") is None
 
@@ -183,20 +184,19 @@ def test_propose_skill_approval_creates_draft_then_lifecycle(make_app):
     skill = app.modules.skills.find_by_name("weekly review")
     assert skill is not None
     assert skill.id == "skill:weekly-review"
-    assert skill.status == "draft"
+    assert skill.status == "active"
     assert skill.version == 1
     assert app.modules.skills.body(skill) == body + "\n"
 
-    # Drafts are never disclosed as active instructions.
+    # Approval makes the procedure immediately visible. Disabling is an
+    # optional, reversible action rather than the default state.
     task = app.tasks.create(objective="weekly review", origin="user")
     built = app.context.build(task=task, domain=None, trigger={"kind": "user"})
+    assert "## Skill: weekly review" in built["system"]
+    disabled = app.modules.skills.disable(skill.id)
+    assert disabled.status == "disabled"
+    built = app.context.build(task=task, domain=None, trigger={"kind": "user"})
     assert "## Skill: weekly review" not in built["system"]
-    reasons = [
-        source["reason"] for source in built["sources"]
-        if source["ref"] == skill.id
-    ]
-    assert reasons and "draft" in reasons[0]
-
     active = app.modules.skills.activate(skill.id)
     assert active.status == "active"
     built = app.context.build(task=task, domain=None, trigger={"kind": "user"})
@@ -224,6 +224,45 @@ def test_propose_skill_approval_creates_draft_then_lifecycle(make_app):
     assert disabled.status == "disabled"
     built = app.context.build(task=task, domain=None, trigger={"kind": "user"})
     assert "## Skill: weekly review" not in built["system"]
+
+
+def test_approved_domain_skill_is_active_bound_and_disclosed(make_app):
+    app = make_app.build(scripts=[])
+    domain = app.domains.create(
+        "dom_research", name="ai_research", description="AI research",
+        created_by="test",
+    )
+    app.model.scripts.extend([
+        {"tool_calls": [{
+            "name": "propose_skill",
+            "arguments": {
+                "name": "AI research report",
+                "description": "Report current AI research",
+                "preconditions": ["AI", "research"],
+                "domains": [domain["id"]],
+                "body": "Use current dated sources and include source URLs.",
+            },
+        }]},
+        {"content": "Skill active."},
+    ])
+    result = app.runtime.submit_user_message("Create the AI research skill")
+    approval = app.approvals.pending()[0]
+    app.approvals.decide(approval["id"], "approve", decided_by="test")
+    app.runtime.resume_after_approval(approval, "test")
+    skill = app.modules.skills.find_by_name("AI research report")
+    assert skill.status == "active"
+    bindings = app.modules.bindings(skill.id)
+    assert len(bindings) == 1 and bindings[0].enabled
+    assert bindings[0].domain_id == domain["id"]
+    task = app.tasks.create(
+        objective="AI research report", domain_id=domain["id"], origin="user",
+    )
+    built = app.context.build(
+        task=task, domain=domain, trigger={"kind": "user"},
+    )
+    assert "## Skill: AI research report" in built["system"]
+    assert "source URLs" in built["system"]
+    assert result.status == "waiting_approval"
 
 
 def test_propose_skill_deduped_by_name_and_described(make_app):
@@ -300,14 +339,18 @@ def test_agent_can_refine_own_skill_via_approval(make_app):
 
     updated = app.modules.skills.get(skill.id)
     assert updated.version == 2
-    assert updated.status == "draft"
+    assert updated.status == "active"
     assert updated.manifest["description"] == "refined weekly review"
     assert app.modules.skills.body(updated) == (
         "1. Gather tasks.\n2. Name the top blockers.\n"
     )
     assert updated.manifest["version_history"][-1]["version"] == 1
-    assert updated.manifest["revisions"][-1]["changed_by"] == "model"
-    assert updated.manifest["revisions"][-1]["reason"].startswith("refined")
+    assert any(
+        revision["changed_by"] == "model"
+        and revision["reason"].startswith("refined")
+        for revision in updated.manifest["revisions"]
+    )
+    assert updated.manifest["revisions"][-1]["status"] == "active"
 
 
 def test_pending_proposal_can_be_refined_before_approval(make_app):
@@ -366,7 +409,7 @@ def test_pending_proposal_can_be_refined_before_approval(make_app):
     assert resumed.status == "completed"
     created = app.modules.skills.find_by_name("weekly review")
     assert created is not None
-    assert created.status == "draft"
+    assert created.status == "active"
     assert app.modules.skills.body(created) == (
         "1. Gather tasks.\n2. Rank blockers.\n"
     )

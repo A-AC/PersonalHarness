@@ -30,6 +30,7 @@ from .memory import KINDS as MEMORY_KINDS
 from .modules.mcp import McpSetupError
 from .modules.types import ModuleBinding
 from .providers import ModelSelectionError, configured_provider_id
+from .schedule_policy import validate_unattended
 from .setup import SetupError
 from .tools import ToolError
 
@@ -748,6 +749,11 @@ class Server:
             return _err("unauthorized", 401)
         body = await self._body(request)
         try:
+            unattended = (
+                validate_unattended(body.get("unattended"))
+                if "unattended" in body else None
+            )
+            meta = {"unattended": unattended} if unattended is not None else None
             schedule = self.app.scheduler.create_schedule(
                 name=str(body.get("name", "")),
                 prompt=str(body.get("prompt", "")),
@@ -758,6 +764,7 @@ class Server:
                 time_of_day=body.get("time_of_day"),
                 weekday=body.get("weekday"),
                 domain_id=body.get("domain_id") or None,
+                meta=meta,
             )
         except ValueError as exc:
             return _err(str(exc))

@@ -39,6 +39,7 @@
       "risk_default": "confirm",
       "trust_annotations": true,
       "side_effects": true,
+      "external_egress": false,
       "startup": "lazy",
       "timeout_s": 60
     }

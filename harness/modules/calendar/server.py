@@ -1362,6 +1362,21 @@ def calendar_get_event(arguments: dict) -> dict:
     }
 
 
+def _validate_explicit_timed_arguments(arguments: dict) -> None:
+    """Do not silently turn an explicitly timed request into an all-day one."""
+    if "all_day" not in arguments or bool(arguments.get("all_day")):
+        return
+    for field in ("start", "end"):
+        if field not in arguments:
+            continue
+        _value, date_only = _parse_user_datetime(str(arguments.get(field) or ""))
+        if date_only:
+            raise CalendarError(
+                "all_day=false requires timed ISO datetimes for start and end; "
+                f"{field} is date-only"
+            )
+
+
 def _normalized_event_times(
     start: dt.datetime,
     end: dt.datetime,
@@ -1396,6 +1411,7 @@ def _event_etag(client: DavClient, record: dict[str, object]) -> str:
 def calendar_create_event(arguments: dict) -> dict:
     if read_only():
         raise CalendarError("calendar writes are disabled (read_only=true)")
+    _validate_explicit_timed_arguments(arguments)
     summary = str(arguments.get("summary") or "").strip()
     if not summary:
         raise CalendarError("summary is required")
@@ -1454,6 +1470,7 @@ def calendar_create_event(arguments: dict) -> dict:
 def calendar_update_event(arguments: dict) -> dict:
     if read_only():
         raise CalendarError("calendar writes are disabled (read_only=true)")
+    _validate_explicit_timed_arguments(arguments)
     uid = str(arguments.get("uid") or "").strip()
     if not uid:
         raise CalendarError("uid is required")
@@ -1526,6 +1543,13 @@ def calendar_update_event(arguments: dict) -> dict:
     if not updates:
         raise CalendarError("no event fields to update")
     body = update_event_ics(raw_text, updates).encode("utf-8")
+    updated_event = next(
+        (event for event in parse_ics(body.decode("utf-8"))
+         if str(event.get("uid") or "") == uid),
+        None,
+    )
+    if updated_event is None:
+        raise CalendarError(f"updated event {uid!r} could not be serialized")
     status, headers, _data = client.request(
         "PUT",
         str(record["href"]),
@@ -1545,6 +1569,7 @@ def calendar_update_event(arguments: dict) -> dict:
         "href": record["href"],
         "etag": headers.get("ETag") or headers.get("Etag") or "",
         "calendar": calendar.name,
+        "summary": str(updated_event.get("summary") or ""),
         "start": start.isoformat() if start else "",
         "end": end.isoformat() if end else "",
         "all_day": all_day,
